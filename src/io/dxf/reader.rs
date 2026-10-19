@@ -224,6 +224,10 @@ impl DxfStreamReader for SourceHandleTracker {
     ) -> (Option<String>, Vec<stream_reader::DxfCodePair>) {
         self.inner.take_recorded_xdata()
     }
+
+    fn take_recorded_owner(&mut self) -> Option<Handle> {
+        self.inner.take_recorded_owner()
+    }
 }
 
 /// Configuration for the DXF reader.

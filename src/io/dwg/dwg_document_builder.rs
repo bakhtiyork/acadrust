@@ -8297,6 +8297,7 @@ fn map_dimension_common(
 fn same_child_properties(a: &EntityCommonData, b: &EntityCommonData) -> bool {
     a.layer_handle == b.layer_handle
         && a.color == b.color
+        && a.color_source == b.color_source
         && a.line_weight == b.line_weight
         && a.linetype_flags == b.linetype_flags
         && a.linetype_handle == b.linetype_handle
@@ -8328,6 +8329,7 @@ fn map_entity_common(
 ) -> EntityCommon {
     let mut common = crate::entities::EntityProperties::default();
     common.color = data.color;
+    common.dwg_color_source = data.color_source;
     common.transparency = data.transparency;
     common.invisible = data.invisible;
     common.linetype_scale = data.linetype_scale;
@@ -8453,6 +8455,7 @@ mod layer_handle_tests {
             xdictionary_handle: None,
             color: Color::ByLayer,
             transparency: Transparency::BY_LAYER,
+            color_source: None,
             line_weight: 0,
             linetype_scale: 1.0,
             invisible: false,
@@ -8525,6 +8528,20 @@ mod layer_handle_tests {
             let other = map_entity_common(&different, &maps, Handle::new(1), Handle::new(2));
             assert_ne!(mapped.properties, other.properties, "field {index}");
         }
+    }
+
+    #[test]
+    fn child_property_cache_preserves_provenance_despite_native_equality() {
+        let source = entity_on_layer(0x10);
+        let mut different = source.clone();
+        different.color_source = Some((0, 0));
+        assert!(!same_child_properties(&source, &different));
+        let maps = HandleMaps::new();
+        let mapped = map_entity_common(&source, &maps, Handle::new(1), Handle::new(2));
+        let other = map_entity_common(&different, &maps, Handle::new(1), Handle::new(2));
+        assert_eq!(mapped.properties, other.properties);
+        assert_eq!(mapped.dwg_color_source, None);
+        assert_eq!(other.dwg_color_source, Some((0, 0)));
     }
 
     #[test]

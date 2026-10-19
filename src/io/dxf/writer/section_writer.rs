@@ -2038,9 +2038,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_handle(360, handle)?;
             self.writer.write_string(102, "}")?;
         }
+        if let Some(reactors) = document.reactors_by_handle.get(&table_handle) {
+            if !reactors.is_empty() {
+                self.writer.write_string(102, "{ACAD_REACTORS")?;
+                for reactor in reactors {
+                    self.writer.write_handle(330, *reactor)?;
+                }
+                self.writer.write_string(102, "}")?;
+            }
+        }
         self.writer.write_handle(330, Handle::new(0))?; // Tables owned by document root (handle 0)
         self.writer.write_subclass("AcDbSymbolTable")?;
         self.writer.write_i16(70, count as i16)?;
+        self.write_table_xdata(document, table_handle, &[])?;
         Ok(())
     }
 

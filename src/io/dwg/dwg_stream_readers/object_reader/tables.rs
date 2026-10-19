@@ -534,7 +534,9 @@ pub fn read_layer(
     // R13/R14 records carry no plot flag (it arrived with R2000), so a layer
     // plots unless the record says otherwise — as a new layer and DXF do.
     let mut plottable = true;
-    let mut line_weight: i16 = -3;
+    // Like a newly constructed layer, versions without a lineweight field
+    // use the drawing default, not an explicit zero-width stroke.
+    let mut line_weight = crate::types::LineWeight::Default.as_i16();
 
     if version.r2000_plus() {
         let values = reader.read_bit_short();

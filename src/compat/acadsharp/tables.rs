@@ -516,7 +516,11 @@ fn block_entities(doc: &CadDocument, b: &crate::tables::BlockRecord, out: &mut V
     // BLOCK/ENDBLK are collapsed into BlockRecord by some readers. Retain their
     // stored identities, but do not invent discarded EntityCommon properties.
     if !b.block_entity_handle.is_null() && doc.get_entity(b.block_entity_handle).is_none() {
-        let mut p = metadata("Block");
+        let mut p = b
+            .block_entity_common
+            .as_ref()
+            .map(|common| super::entities::common(doc, common, "BLOCK", 4, "AcDbBlockBegin", false))
+            .unwrap_or_else(|| metadata("Block"));
         p.extend([
             ("BasePoint", vec3(b.base_point)),
             ("BlockOwner", handle(b.handle)),
@@ -537,7 +541,15 @@ fn block_entities(doc: &CadDocument, b: &crate::tables::BlockRecord, out: &mut V
             b.block_end_handle,
             "BlockEnd",
             b.handle,
-            props("BlockEnd", metadata("BlockEnd")),
+            props(
+                "BlockEnd",
+                b.block_end_common
+                    .as_ref()
+                    .map(|common| {
+                        super::entities::common(doc, common, "ENDBLK", 5, "AcDbBlockEnd", false)
+                    })
+                    .unwrap_or_else(|| metadata("BlockEnd")),
+            ),
         ));
     }
 }
@@ -598,13 +610,7 @@ fn line_type_segments(doc: &CadDocument, v: &crate::tables::LineType) -> Value {
 }
 
 fn base(doc: &CadDocument, h: Handle) -> Vec<(&'static str, Value)> {
-    let xdata = if let Some(data) = doc.object_xdata(h) {
-        super::entities::extended_data(doc, data)
-    } else if doc.eed_by_handle.get(&h).is_some_and(|v| !v.is_empty()) {
-        json!(UNMAPPED)
-    } else {
-        json!([])
-    };
+    let xdata = super::xdata::object_extended_data(doc, h);
     vec![
         ("ExtendedData", xdata),
         ("HasDynamicSubclass", json!(false)),
@@ -693,6 +699,8 @@ pub(super) fn text_style(doc: &CadDocument, v: &crate::tables::TextStyle, out: &
         ],
         out,
     );
+    out.last_mut().expect("text style record")["props"]["ExtendedData"] =
+        super::xdata::text_style_extended_data(doc, v);
 }
 
 // DWG does not assign the DXF-only resolved flag in ACadSharp.

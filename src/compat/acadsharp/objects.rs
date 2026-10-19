@@ -3778,22 +3778,24 @@ fn enrich_object_record(
         if props_value.contains_key("Reactors") {
             props_value.insert("Reactors".to_string(), handles(reactors.iter().copied()));
         }
+    } else if is_unmapped(props_value.get("Reactors")) {
+        props_value.insert("Reactors".into(), json!([]));
     }
     if let Some(xdictionary_handle) = doc.xdic_by_handle.get(&object_handle) {
         if props_value.contains_key("XDictionary") {
             props_value.insert(
-                "XDictionary".to_string(),
+                "XDictionary".into(),
                 optional_handle(Some(*xdictionary_handle)),
             );
         }
+    } else if is_unmapped(props_value.get("XDictionary")) {
+        props_value.insert("XDictionary".into(), Value::Null);
     }
-    if let Some(data) = doc.object_xdata.get(&object_handle) {
-        if props_value.contains_key("ExtendedData") {
-            props_value.insert(
-                "ExtendedData".to_string(),
-                super::entities::extended_data(doc, data),
-            );
-        }
+    if props_value.contains_key("ExtendedData") {
+        props_value.insert(
+            "ExtendedData".into(),
+            super::xdata::object_extended_data(doc, object_handle),
+        );
     }
     value
 }
