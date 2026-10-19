@@ -6,7 +6,8 @@ use acadrust::entities::{
     Dimension, DimensionArc, DimensionDiameter, DimensionLinear, DimensionOrdinate,
     DimensionRadius, EntityType, Tolerance,
 };
-use acadrust::types::Vector3;
+use acadrust::types::{DxfVersion, Vector3};
+use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::{CadDocument, DxfReader};
 use serde_json::{json, Value};
 use std::io::Cursor;
@@ -22,6 +23,16 @@ fn object<'a>(dump: &'a Value, type_name: &str) -> &'a Value {
 
 fn properties(doc: &CadDocument, type_name: &str) -> Value {
     object(&dump_document(doc, "", "new"), type_name)["props"].clone()
+}
+
+fn dimension_dxf(codes: &str) -> CadDocument {
+    let text = format!(
+        "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1032\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nDIMENSION\n5\n100\n100\nAcDbEntity\n8\n0\n100\nAcDbDimension\n100\nAcDbRotatedDimension\n{codes}0\nENDSEC\n0\nEOF\n"
+    );
+    DxfReader::from_reader(Cursor::new(text.into_bytes()))
+        .unwrap()
+        .read()
+        .unwrap()
 }
 
 #[test]
@@ -85,10 +96,115 @@ fn dimension_compatibility_projects_geometry_and_angular_flags() {
     assert!((p["Offset"].as_f64().unwrap() - 50.0_f64.sqrt()).abs() < 1e-12);
 
     let p = properties(&doc, "DimensionArc");
-    assert_eq!(p["Flags"], 5);
+    assert_eq!(p["Flags"], 37);
     assert_eq!(p["IsAngular"], true);
     let expected = 3.0 * std::f64::consts::FRAC_PI_2;
     assert!((p["Measurement"].as_f64().unwrap() - expected).abs() < 1e-12);
+}
+
+#[test]
+fn dimension_dxf_source_projects_raw_flags_and_omitted_common_defaults() {
+    let omitted = dimension_dxf("70\n0\n");
+    let native = omitted
+        .entities()
+        .find_map(|entity| match entity {
+            EntityType::Dimension(value) => Some(value),
+            _ => None,
+        })
+        .expect("dimension entity");
+    assert_eq!(
+        native.base().dxf_source.as_ref().unwrap().raw_flags,
+        Some(0)
+    );
+    assert_eq!(native.base().attachment_point as i16, 5);
+    assert_eq!(native.base().line_spacing_factor, 1.0);
+    assert_eq!(native.base().line_spacing_style, 1);
+    assert_eq!(
+        properties(&omitted, "DimensionLinear")["AttachmentPoint"],
+        0
+    );
+    assert_eq!(properties(&omitted, "DimensionLinear")["Flags"], 0);
+    assert_eq!(
+        properties(&omitted, "DimensionLinear")["LineSpacingFactor"],
+        0.0
+    );
+    assert_eq!(
+        properties(&omitted, "DimensionLinear")["LineSpacingStyle"],
+        0
+    );
+    assert_eq!(properties(&omitted, "DimensionLinear")["Text"], Value::Null);
+    assert_eq!(
+        properties(&omitted, "DimensionLinear")["HasStyleOverride"],
+        false
+    );
+
+    let explicit = dimension_dxf(
+        "70\n160\n71\n7\n41\n2.5\n72\n2\n1\nlabel\n1001\nACAD\n1000\nDSTYLE\n1002\n{\n1002\n}\n",
+    );
+    let props = properties(&explicit, "DimensionLinear");
+    assert_eq!(props["AttachmentPoint"], 7);
+    assert_eq!(props["Flags"], 160);
+    assert_eq!(props["LineSpacingFactor"], 2.5);
+    assert_eq!(props["LineSpacingStyle"], 2);
+    assert_eq!(props["Text"], "label");
+    assert_eq!(props["HasStyleOverride"], true);
+}
+
+#[test]
+fn dimension_pre_r2000_dwg_uses_clr_common_defaults() {
+    let mut doc = CadDocument::new();
+    doc.version = DxfVersion::AC1014;
+    doc.dwg_source_version = Some(DxfVersion::AC1014);
+    doc.add_entity(EntityType::Dimension(Box::new(Dimension::Linear(
+        DimensionLinear::new(Vector3::ZERO, Vector3::new(1.0, 0.0, 0.0)),
+    ))))
+    .unwrap();
+
+    let props = properties(&doc, "DimensionLinear");
+    assert_eq!(props["AttachmentPoint"], 0);
+    assert_eq!(props["LineSpacingFactor"], 0.0);
+    assert_eq!(props["LineSpacingStyle"], 0);
+}
+
+#[test]
+fn dimension_style_override_uses_the_first_acad_record_and_dwg_string_rules() {
+    let mut doc = CadDocument::new();
+    let mut dim = DimensionLinear::new(Vector3::ZERO, Vector3::UNIT_X);
+    let mut acad = ExtendedDataRecord::new("ACAD");
+    acad.add_value(XDataValue::String("DSTYLE\0".into()));
+    dim.base.common.extended_data.add_record(acad);
+    let h = doc
+        .add_entity(EntityType::Dimension(Box::new(Dimension::Linear(dim))))
+        .unwrap();
+    // DXF and constructed strings retain literal NULs.
+    assert_eq!(
+        properties(&doc, "DimensionLinear")["HasStyleOverride"],
+        false
+    );
+    doc.dwg_source_version = Some(DxfVersion::AC1032);
+    assert_eq!(
+        properties(&doc, "DimensionLinear")["HasStyleOverride"],
+        true
+    );
+    let EntityType::Dimension(dim) = doc.get_entity(h).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        dim.base().common.extended_data.records()[0].values[0],
+        XDataValue::String("DSTYLE\0".into())
+    );
+    // A later DSTYLE marker is not a style override header.
+    let EntityType::Dimension(dim) = doc.get_entity_mut(h).unwrap() else {
+        panic!()
+    };
+    let mut acad = ExtendedDataRecord::new("ACAD");
+    acad.add_value(XDataValue::Integer16(1));
+    acad.add_value(XDataValue::String("DSTYLE".into()));
+    dim.base_mut().common.extended_data.upsert_record(acad);
+    assert_eq!(
+        properties(&doc, "DimensionLinear")["HasStyleOverride"],
+        false
+    );
 }
 
 fn tolerance_dxf(codes: &str) -> CadDocument {

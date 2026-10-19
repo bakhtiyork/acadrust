@@ -143,10 +143,10 @@ impl<R: Read + Seek> DxfTextReader<R> {
         let value_line = if crate::io::dxf::code_page::has_legacy_escape(&value_line) {
             let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&value_line);
             if decoded != value_line
-                && matches!(code, 1 | 3)
+                && matches!(code, 1 | 2 | 3)
                 && matches!(
                     self.context.record_type.as_deref(),
-                    Some("3DSOLID" | "REGION" | "BODY" | "MTEXT")
+                    Some("3DSOLID" | "REGION" | "BODY" | "MTEXT" | "TEXT" | "ATTRIB" | "ATTDEF")
                 )
             {
                 modeler_raw = Some(value_line);
@@ -165,6 +165,13 @@ impl<R: Read + Seek> DxfTextReader<R> {
             pair.raw_value_string = modeler_raw;
         } else if changed {
             pair.raw_value_string = Some(value_line);
+        }
+        if self.encoding.is_none()
+            && matches!(code, 1 | 2 | 3)
+            && matches!(self.context.record_type.as_deref(), Some("TEXT" | "ATTRIB" | "ATTDEF"))
+            && std::str::from_utf8(&self.line_buf).is_err()
+        {
+            pair.undecoded_text_bytes = Some(self.line_buf.clone());
         }
         self.observe_pair(&pair, pair_offset);
         Ok(Some(pair))

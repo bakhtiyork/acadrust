@@ -182,9 +182,12 @@ impl MTextFlag {
 /// attdef.insertion_point = Vector3::new(0.0, 0.0, 0.0);
 /// attdef.height = 2.5;
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttributeDefinition {
+    /// Source spelling and field presence; excluded from native equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source: Option<Box<super::text::TextSource>>,
     /// Common entity properties
     pub common: EntityCommon,
     /// Attribute tag (identifier)
@@ -232,12 +235,49 @@ pub struct AttributeDefinition {
     pub embedded_mtext: Option<Box<crate::entities::MText>>,
     /// Lock position in block
     pub lock_position: bool,
+    /// Extrusion depth retained from common text data (DXF 39).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub thickness: f64,
+    /// Attribute version, independent of the lock flag.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub version: u8,
+}
+
+// Source metadata does not change native drawing-state equality.
+impl PartialEq for AttributeDefinition {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.tag == other.tag
+            && self.prompt == other.prompt
+            && self.default_value == other.default_value
+            && self.insertion_point == other.insertion_point
+            && self.alignment_point == other.alignment_point
+            && self.height == other.height
+            && self.rotation == other.rotation
+            && self.width_factor == other.width_factor
+            && self.oblique_angle == other.oblique_angle
+            && self.text_style == other.text_style
+            && self.text_generation_flags == other.text_generation_flags
+            && self.horizontal_alignment == other.horizontal_alignment
+            && self.vertical_alignment == other.vertical_alignment
+            && self.flags == other.flags
+            && self.field_length == other.field_length
+            && self.normal == other.normal
+            && self.mtext_flag == other.mtext_flag
+            && self.is_multiline == other.is_multiline
+            && self.line_count == other.line_count
+            && self.embedded_mtext == other.embedded_mtext
+            && self.lock_position == other.lock_position
+            && self.thickness == other.thickness
+            && self.version == other.version
+    }
 }
 
 impl AttributeDefinition {
     /// Create a new attribute definition
     pub fn new(tag: String, prompt: String, default_value: String) -> Self {
         Self {
+            source: None,
             common: EntityCommon::default(),
             tag,
             prompt,
@@ -260,6 +300,8 @@ impl AttributeDefinition {
             line_count: 1,
             embedded_mtext: None,
             lock_position: false,
+            thickness: 0.0,
+            version: 0,
         }
     }
 

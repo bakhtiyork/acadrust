@@ -4100,6 +4100,13 @@ impl DwgDocumentBuilder {
                     let data = entities::read_text(&mut reader, self.obj_reader.version());
                     let mut e = Text::new();
                     e.common = entity_common;
+                    if let Some(raw) = data.source_value {
+                        e.source = Some(Box::new(crate::entities::text::TextSource {
+                            value: Some(raw),
+                            decoded_value: Some(data.value.clone()),
+                            ..Default::default()
+                        }));
+                    }
                     e.value = data.value;
                     e.insertion_point = data.insertion_point;
                     e.height = data.height;
@@ -4117,13 +4124,8 @@ impl DwgDocumentBuilder {
                         3 => TextVerticalAlignment::Top,
                         _ => TextVerticalAlignment::Baseline,
                     };
-                    // Only set alignment_point when alignment mode actually uses it
-                    e.alignment_point =
-                        if data.horizontal_alignment != 0 || data.vertical_alignment != 0 {
-                            Some(data.alignment_point)
-                        } else {
-                            None
-                        };
+                    // Preserve a stored point even when the justification does not use it.
+                    e.alignment_point = data.has_alignment_point.then_some(data.alignment_point);
                     e.rotation = data.rotation;
                     e.oblique_angle = data.oblique_angle;
                     e.width_factor = data.width_factor;
@@ -4762,6 +4764,15 @@ impl DwgDocumentBuilder {
                         data.prompt.clone(),
                         data.text_data.value.clone(),
                     );
+                    if let Some(raw) = data.text_data.source_value {
+                        e.source = Some(Box::new(crate::entities::text::TextSource {
+                            value: Some(raw),
+                            decoded_value: Some(e.default_value.clone()),
+                            ..Default::default()
+                        }));
+                    }
+                    e.thickness = data.text_data.thickness;
+                    e.version = data.att_version;
                     e.common = entity_common;
                     e.insertion_point = data.text_data.insertion_point;
                     e.height = data.text_data.height;
@@ -4786,9 +4797,7 @@ impl DwgDocumentBuilder {
                         3 => VerticalAlignment::Top,
                         _ => VerticalAlignment::Baseline,
                     };
-                    e.alignment_point = if data.text_data.horizontal_alignment != 0
-                        || data.text_data.vertical_alignment != 0
-                    {
+                    e.alignment_point = if data.text_data.has_alignment_point {
                         data.text_data.alignment_point
                     } else {
                         crate::types::Vector3::ZERO
@@ -4817,6 +4826,15 @@ impl DwgDocumentBuilder {
                     );
                     let mut e =
                         AttributeEntity::new(data.tag.clone(), data.text_data.value.clone());
+                    if let Some(raw) = data.text_data.source_value {
+                        e.source = Some(Box::new(crate::entities::text::TextSource {
+                            value: Some(raw),
+                            decoded_value: Some(e.value.clone()),
+                            ..Default::default()
+                        }));
+                    }
+                    e.thickness = data.text_data.thickness;
+                    e.version = data.att_version;
                     e.common = entity_common;
                     e.insertion_point = data.text_data.insertion_point;
                     e.height = data.text_data.height;
@@ -4839,11 +4857,8 @@ impl DwgDocumentBuilder {
                         3 => VerticalAlignment::Top,
                         _ => VerticalAlignment::Baseline,
                     };
-                    // Match the writer/reader convention: an alignment point is
-                    // only meaningful when the text is not left/baseline.
-                    e.alignment_point = if data.text_data.horizontal_alignment != 0
-                        || data.text_data.vertical_alignment != 0
-                    {
+                    // Retain stored alignment coordinates independently of justification.
+                    e.alignment_point = if data.text_data.has_alignment_point {
                         data.text_data.alignment_point
                     } else {
                         crate::types::Vector3::ZERO

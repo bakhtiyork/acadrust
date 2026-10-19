@@ -1133,6 +1133,7 @@ impl<'a, W: DxfStreamWriter> R12Writer<'a, W> {
         if a.field_length != 0 {
             self.writer.write_i16(73, a.field_length)?;
         }
+        self.thickness(a.thickness)?;
         self.write_attribute_text(
             a.insertion_point,
             a.alignment_point,
@@ -1160,6 +1161,7 @@ impl<'a, W: DxfStreamWriter> R12Writer<'a, W> {
         if a.field_length != 0 {
             self.writer.write_i16(73, a.field_length)?;
         }
+        self.thickness(a.thickness)?;
         self.write_attribute_text(
             a.insertion_point,
             a.alignment_point,

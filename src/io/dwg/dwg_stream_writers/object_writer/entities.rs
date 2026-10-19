@@ -1312,7 +1312,7 @@ impl<'a> DwgObjectWriter<'a> {
             att.insertion_point,
             att.alignment_point,
             att.normal,
-            0.0, // thickness
+            att.thickness,
             att.oblique_angle,
             att.rotation,
             att.height,
@@ -1335,7 +1335,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
-            self.writer.write_byte(0);
+            self.writer.write_byte(att.version);
         }
 
         // R2018+: AttributeType byte
@@ -4685,7 +4685,7 @@ impl<'a> DwgObjectWriter<'a> {
             e.insertion_point,
             e.alignment_point,
             e.normal,
-            0.0, // thickness
+            e.thickness,
             e.oblique_angle,
             e.rotation,
             e.height,
@@ -4708,7 +4708,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
-            self.writer.write_byte(0); // version
+            self.writer.write_byte(e.version); // version
         }
 
         // R2018+: AttributeType byte
@@ -4748,7 +4748,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // writeAttDefinition: R2010+ version byte (second)
         if self.version.r2010_plus() {
-            self.writer.write_byte(0);
+            self.writer.write_byte(e.version);
         }
 
         // Prompt
@@ -4767,7 +4767,7 @@ impl<'a> DwgObjectWriter<'a> {
             e.insertion_point,
             e.alignment_point,
             e.normal,
-            0.0, // thickness
+            e.thickness,
             e.oblique_angle,
             e.rotation,
             e.height,
@@ -4790,7 +4790,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // writeCommonAttData: R2010+ version byte
         if self.version.r2010_plus() {
-            self.writer.write_byte(0); // version
+            self.writer.write_byte(e.version); // version
         }
 
         // R2018+: AttributeType byte
