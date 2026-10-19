@@ -443,7 +443,11 @@ pub(super) fn read_named_table_cell_style(reader: &mut DwgMergedReader) -> Named
 pub fn read_table_style(reader: &mut DwgMergedReader, version: DwgVersion) -> TableStyle {
     let mut value = TableStyle::new("");
     if !version.r2010_plus() {
-        value.name = reader.read_variable_text();
+        // The first object-specific string is the description.  The object
+        // name is also carried by the TABLESTYLE dictionary key; retaining
+        // the string in `name` keeps standalone object reads useful.
+        value.description = reader.read_variable_text();
+        value.name = value.description.clone();
         value.flow_direction = crate::objects::TableFlowDirection::from(reader.read_bit_short());
         value.flags = crate::objects::TableStyleFlags::from_bits_retain(reader.read_bit_short());
         value.horizontal_margin = reader.read_bit_double();
@@ -453,11 +457,15 @@ pub fn read_table_style(reader: &mut DwgMergedReader, version: DwgVersion) -> Ta
         value.data_row_style = read_legacy_table_row_style(reader, version);
         value.title_row_style = read_legacy_table_row_style(reader, version);
         value.header_row_style = read_legacy_table_row_style(reader, version);
+        value.legacy_source = Some((value.flags.bits(), value.title_suppressed, value.header_suppressed));
         value.sync_suppression_flags();
         return value;
     }
     value.modern_unknown_byte = reader.read_byte();
-    value.name = reader.read_variable_text();
+    // R2010+ uses the same first string for the style description.  The
+    // native object currently has no separate dictionary-name channel.
+    value.description = reader.read_variable_text();
+    value.name = value.description.clone();
     value.modern_unknown_long1 = reader.read_bit_long();
     // The R2010+ table style flags (title / header suppressed).
     value.flags =

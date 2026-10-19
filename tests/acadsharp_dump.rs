@@ -2,7 +2,7 @@
 
 use acadrust::compat::acadsharp::{self as dump, dump_document, schema};
 use acadrust::entities::{EntityType, Line};
-use acadrust::objects::{Dictionary, ObjectType, XRecord};
+use acadrust::objects::{Dictionary, MLineStyle, ObjectType, TableStyle, XRecord};
 use acadrust::types::{Color, DxfVersion, Handle, LineWeight, Transparency, Vector3};
 use acadrust::CadDocument;
 use serde_json::{json, Value};
@@ -430,6 +430,68 @@ fn common_object_variants_have_exact_nested_schema() {
         object(&value, Handle::new(0x1000))["props"]["DiffuseMatrix"]["M00"],
         "NaN"
     );
+}
+
+#[test]
+fn new_style_descriptions_preserve_explicit_values() {
+    let mut doc = CadDocument::new();
+    let mut mline = MLineStyle::new("CustomMLine");
+    mline.description = "custom mline description".to_string();
+    let mut table = TableStyle::new("CustomTable");
+    table.description = "custom table description".to_string();
+    doc.objects
+        .insert(Handle::new(0x1100), ObjectType::MLineStyle(mline));
+    doc.objects
+        .insert(Handle::new(0x1101), ObjectType::TableStyle(table));
+
+    let value = dump_document(&doc, "", "new");
+    assert_eq!(
+        object(&value, Handle::new(0x1100))["props"]["Description"],
+        "custom mline description"
+    );
+    assert_eq!(
+        object(&value, Handle::new(0x1101))["props"]["Description"],
+        "custom table description"
+    );
+}
+
+#[test]
+fn modern_table_style_source_masks_and_cell_styles_match_acadsharp() {
+    let mut doc = CadDocument::new();
+    let mut table = TableStyle::new("ModernTable");
+    table.modern_style = Some(acadrust::objects::NamedTableCellStyle {
+        name: "Table".into(),
+        cell_style: acadrust::objects::TableCellStyleData {
+            data_flags: 1,
+            borders: [1, 2, 4, 8, 16, 32]
+                .into_iter()
+                .map(|index_mask| acadrust::objects::TableGridFormat {
+                    index_mask,
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    let handle = Handle::new(0x1102);
+    doc.objects.insert(handle, ObjectType::TableStyle(table));
+
+    let value = dump_document(&doc, "source.dwg", "dwg");
+    let props = &object(&value, handle)["props"];
+    assert_eq!(props["CellStyles"], json!([]));
+    let table_style = &props["TableCellStyle"];
+    for (name, edge_flags) in [
+        ("TopBorder", 2),
+        ("RightBorder", 2),
+        ("BottomBorder", 4),
+        ("LeftBorder", 8),
+        ("VerticalInsideBorder", 16),
+        ("HorizontalInsideBorder", 32),
+    ] {
+        assert_eq!(table_style[name]["EdgeFlags"], edge_flags);
+        assert_eq!(table_style[name]["ApplyBorder"], true);
+    }
 }
 
 #[test]

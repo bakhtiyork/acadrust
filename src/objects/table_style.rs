@@ -523,9 +523,12 @@ pub struct NamedTableCellStyle {
 /// style.vertical_margin = 0.1;
 /// style.data_row_style.text_height = 0.2;
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TableStyle {
+    /// Legacy DWG flags/title/header before native suppression normalization.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub legacy_source: Option<(i16, bool, bool)>,
     /// Object handle.
     pub handle: Handle,
 
@@ -604,6 +607,7 @@ impl TableStyle {
     /// Creates a new TableStyle with default values.
     pub fn new(name: &str) -> Self {
         TableStyle {
+            legacy_source: None,
             handle: Handle::NULL,
             owner_handle: Handle::NULL,
             name: name.to_string(),
@@ -711,6 +715,33 @@ impl TableStyle {
         self.flags = self.effective_flags();
         self.title_suppressed = self.flags.contains(TableStyleFlags::TITLE_SUPPRESSED);
         self.header_suppressed = self.flags.contains(TableStyleFlags::HEADER_SUPPRESSED);
+    }
+}
+
+impl PartialEq for TableStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.owner_handle == other.owner_handle
+            && self.name == other.name
+            && self.description == other.description
+            && self.version == other.version
+            && self.flow_direction == other.flow_direction
+            && self.flags == other.flags
+            && self.horizontal_margin == other.horizontal_margin
+            && self.vertical_margin == other.vertical_margin
+            && self.title_suppressed == other.title_suppressed
+            && self.header_suppressed == other.header_suppressed
+            && self.data_row_style == other.data_row_style
+            && self.header_row_style == other.header_row_style
+            && self.title_row_style == other.title_row_style
+            && self.modern_unknown_byte == other.modern_unknown_byte
+            && self.modern_unknown_long1 == other.modern_unknown_long1
+            && self.modern_unknown_long2 == other.modern_unknown_long2
+            && self.modern_cell_style_handle == other.modern_cell_style_handle
+            && self.modern_style == other.modern_style
+            && self.modern_overrides == other.modern_overrides
+            && self.annotative == other.annotative
+            && self.raw_dxf_codes == other.raw_dxf_codes
     }
 }
 

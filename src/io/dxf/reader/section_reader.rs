@@ -8141,6 +8141,7 @@ impl<'a> SectionReader<'a> {
     /// Read a MATERIAL object
     fn read_material(&mut self) -> Result<Option<Material>> {
         let mut obj = Material::new();
+        let mut source = crate::objects::MaterialDxfSource::default();
         let mut diffuse_matrix = 0usize;
         let mut specular_matrix = 0usize;
         let mut reflection_matrix = 0usize;
@@ -8154,6 +8155,10 @@ impl<'a> SectionReader<'a> {
             if pair.code == 0 {
                 self.reader.push_back(pair);
                 break;
+            }
+            source.record(pair.code, advanced);
+            if pair.code == 90 {
+                source.last_color_90 = pair.as_i32_bits();
             }
             match pair.code {
                 5 => {
@@ -8370,6 +8375,7 @@ impl<'a> SectionReader<'a> {
                 _ => {}
             }
         }
+        obj.dxf_source = Some(Box::new(source));
         Ok(Some(obj))
     }
 
@@ -21152,8 +21158,9 @@ impl<'a> SectionReader<'a> {
 
     /// Read an MLINESTYLE object
     fn read_mlinestyle_object(&mut self) -> Result<Option<crate::objects::MLineStyle>> {
-        use crate::objects::MLineStyleElement;
+        use crate::objects::{MLineStyleElement, MLineStyleFlags};
         let mut style = crate::objects::MLineStyle::new("");
+        style.dxf_description_present = Some(false);
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -21172,7 +21179,15 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 2 => style.name = pair.value_string.clone(),
-                3 => style.description = pair.value_string.clone(),
+                3 => {
+                    style.description = pair.value_string.clone();
+                    style.dxf_description_present = Some(true);
+                },
+                70 => {
+                    if let Some(v) = pair.as_i16() {
+                        style.flags = MLineStyleFlags::from_bits(v as i32);
+                    }
+                }
                 // DXF stores MLINESTYLE angles in degrees; the model stores
                 // radians (the DWG stream and the DXF writer both use
                 // radians/degrees respectively). Reading them raw made every
@@ -21680,6 +21695,9 @@ impl<'a> SectionReader<'a> {
                 }
                 3 => {
                     ts.name = pair.value_string.clone();
+                    // Group 3 is the stored TABLESTYLE description. Preserve
+                    // the historical native name fallback as well.
+                    ts.description = pair.value_string.clone();
                     saw_name = true;
                 }
                 70 => {

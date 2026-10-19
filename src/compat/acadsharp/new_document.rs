@@ -142,6 +142,18 @@ fn create_defaults(doc: &mut CadDocument) {
     for name in ["Global", "ByLayer", "ByBlock"] {
         let mut material = Material::new();
         material.name = name.into();
+        material.channel_flags = 1;
+        for map in [
+            &mut material.diffuse_map,
+            &mut material.specular_map,
+            &mut material.reflection_map,
+            &mut material.opacity_map,
+            &mut material.bump_map,
+            &mut material.refraction_map,
+        ] {
+            map.source = 1;
+            map.projection = 1;
+        }
         add_object(doc, "ACAD_MATERIAL", name, ObjectType::Material(material));
     }
 
