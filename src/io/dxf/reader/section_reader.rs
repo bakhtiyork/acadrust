@@ -9375,6 +9375,7 @@ impl<'a> SectionReader<'a> {
                 _ => {}
             }
         }
+        obj.dxf_color_present = Some(true_color.is_some() || indexed_color.is_some());
         if let Some(color) = true_color.or(indexed_color) {
             obj.color = color;
         }
@@ -15742,6 +15743,8 @@ impl<'a> SectionReader<'a> {
         use crate::entities::hatch::*;
 
         let mut hatch = Hatch::new();
+        let mut source = HatchDxfSource::default();
+        let mut after_pattern = false;
         hatch.is_mpolygon = is_mpolygon;
         let mut current_subclass = String::new();
         let mut elevation_point = PointReader::new();
@@ -15762,6 +15765,11 @@ impl<'a> SectionReader<'a> {
             if pair.code == 0 {
                 self.reader.push_back(pair);
                 break;
+            }
+
+            if after_pattern {
+                source.pattern_trailer_code = Some(pair.code);
+                after_pattern = false;
             }
 
             match pair.code {
@@ -15785,6 +15793,14 @@ impl<'a> SectionReader<'a> {
                 2 => pattern_name = pair.value_string.clone(),
                 10 | 20 | 30 if !reading_boundary => {
                     elevation_point.add_coordinate(&pair);
+                    if pair.code == 10 {
+                        source.elevation_point =
+                            Some(Vector2::new(pair.as_double().unwrap_or(0.0), 0.0));
+                    } else if pair.code == 20 {
+                        if let Some(point) = source.elevation_point.as_mut() {
+                            point.y = pair.as_double().unwrap_or(0.0);
+                        }
+                    }
                 }
                 210 | 220 | 230 => {
                     normal.add_coordinate(&pair);
@@ -15795,6 +15811,7 @@ impl<'a> SectionReader<'a> {
                 // Invalid-loop count; the loops themselves are not read from DXF.
                 99 if is_mpolygon => {}
                 70 => {
+                    source.has_solid = true;
                     if let Some(solid_fill) = pair.as_i16() {
                         hatch.is_solid = solid_fill != 0;
                     }
@@ -15815,6 +15832,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 76 => {
+                    source.has_pattern_type = true;
                     if let Some(ptype) = pair.as_i16() {
                         pattern_type = match ptype {
                             0 => HatchPatternType::UserDefined,
@@ -15830,6 +15848,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 41 => {
+                    source.has_pattern_scale = true;
                     if let Some(s) = pair.as_double() {
                         hatch.pattern_scale = s;
                     }
@@ -15848,6 +15867,7 @@ impl<'a> SectionReader<'a> {
                         let line = self.read_hatch_pattern_line()?;
                         hatch.pattern.lines.push(line);
                     }
+                    after_pattern = num_lines > 0;
                 }
                 91 => {
                     if let Some(num_paths) = pair.as_i32() {
@@ -15980,6 +16000,7 @@ impl<'a> SectionReader<'a> {
                             }
                             463 => {
                                 let value = gp.as_double().unwrap_or(0.0);
+                                source.gradient_indices.push(0);
                                 hatch.gradient_color.colors.push(GradientColorEntry {
                                     value,
                                     color: Color::ByLayer,
@@ -15990,6 +16011,9 @@ impl<'a> SectionReader<'a> {
                             63 => {
                                 if let Some(entry) = hatch.gradient_color.colors.last_mut() {
                                     if let Ok(aci) = gp.value_string.trim().parse::<i16>() {
+                                        if let Some(index) = source.gradient_indices.last_mut() {
+                                            *index = aci;
+                                        }
                                         if !matches!(entry.color, Color::Rgb { .. }) {
                                             entry.color = Color::from_index(aci);
                                         }
@@ -16004,7 +16028,10 @@ impl<'a> SectionReader<'a> {
                                     entry.color = Color::from_true_color_value(rgb);
                                 }
                             }
-                            470 => hatch.gradient_color.name = gp.value_string.clone(),
+                            470 => {
+                                source.has_gradient_name = true;
+                                hatch.gradient_color.name = gp.value_string.clone();
+                            }
                             _ => {
                                 self.reader.push_back(gp);
                                 break;
@@ -16046,6 +16073,7 @@ impl<'a> SectionReader<'a> {
             hatch.mpolygon_x_direction = Vector2::new(value.x, value.y);
         }
 
+        hatch.dxf_source = Some(Box::new(source));
         Ok(Some(hatch))
     }
 
@@ -21234,6 +21262,11 @@ impl<'a> SectionReader<'a> {
                 280 => {
                     if let Some(v) = pair.as_i16() {
                         def.is_loaded = v != 0;
+                    }
+                }
+                281 => {
+                    if let Some(v) = pair.as_i16() {
+                        def.resolution_unit = crate::objects::ResolutionUnit::from_code(v as i32);
                     }
                 }
                 _ => {}

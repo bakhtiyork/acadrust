@@ -139,7 +139,7 @@ fn dump_object(
         ObjectType::GeoData(value) => geo_spatial::dump_geo_data(_doc, map_handle, value, reader),
         ObjectType::SpatialFilter(value) => geo_spatial::dump_spatial_filter(map_handle, value, reader),
         ObjectType::RasterVariables(value) => dump_raster_variables(map_handle, value),
-        ObjectType::BookColor(value) => dump_book_color(map_handle, value),
+        ObjectType::BookColor(value) => dump_book_color(_doc, map_handle, value),
         ObjectType::PlaceHolder(value) => dump_placeholder(map_handle, value),
         ObjectType::DictionaryVariable(value) => dump_dictionary_variable(map_handle, value),
         ObjectType::SortEntitiesTable(value) => dump_sort_entities(map_handle, value),
@@ -603,7 +603,11 @@ fn dump_layout(handle_value: Handle, value: &Layout, paper_viewport: Option<Hand
 }
 
 fn dump_group(handle_value: Handle, value: &Group) -> Value {
-    let mut p = common("GROUP", 0x48, "AcDbGroup", Some(&value.name), None, None);
+    // DXF groups carry their public Name in the owning dictionary key rather
+    // than in the GROUP body.  An empty model name must therefore remain
+    // unmapped so `enrich_object_record` can project that key.
+    let name = (!value.name.is_empty()).then_some(value.name.as_str());
+    let mut p = common("GROUP", 0x48, "AcDbGroup", name, None, None);
     p.extend([
         ("Description", text(&value.description)),
         ("Entities", handles(value.entities.iter().copied())),
@@ -1215,12 +1219,63 @@ fn dump_raster_variables(handle_value: Handle, value: &crate::objects::RasterVar
     )
 }
 
-fn dump_book_color(handle_value: Handle, value: &crate::objects::BookColor) -> Value {
+fn dump_book_color(
+    doc: &crate::CadDocument,
+    handle_value: Handle,
+    value: &crate::objects::BookColor,
+) -> Value {
+    // ACadSharp computes Name from the two color-book components.  Keep this
+    // local to the compatibility projection: the native model intentionally
+    // stores the components independently.
+    let dictionary_name = owned_dictionary_name(doc, handle_value, value.owner);
+    let dictionary_parts = dictionary_name
+        .as_deref()
+        .and_then(|name| name.split_once('$'));
+    let book_name = if value.book_name.is_empty() {
+        dictionary_parts.map_or("", |(book, _)| book)
+    } else {
+        value.book_name.as_str()
+    };
+    let color_name = if value.color_name.is_empty() {
+        dictionary_parts.map_or("", |(_, color)| color)
+    } else {
+        value.color_name.as_str()
+    };
+    let name = if color_name.is_empty() {
+        String::new()
+    } else {
+        format!("{}${}", book_name, color_name)
+    };
+    // The reference's default Color is ByBlock; native Color remains ByLayer.
+    let source_color = if value.dxf_color_present == Some(false) {
+        crate::types::Color::ByBlock
+    } else {
+        value.color
+    };
+    let mut compat_color = color(source_color);
+    if let (Some((r, g, b)), Some(color_props)) =
+        (source_color.true_color_rgb(), compat_color.as_object_mut())
+    {
+        // ACadSharp's Color packs RGB bytes in host little-endian order for
+        // the exposed TrueColor property (R | G<<8 | B<<16).
+        color_props.insert(
+            "TrueColor".to_string(),
+            json!(i32::from(r) | (i32::from(g) << 8) | (i32::from(b) << 16)),
+        );
+    }
+    let name_value = if color_name.is_empty() {
+        // Older DXF files omit group 430 and keep the full name only as the
+        // owning dictionary key; let the object enrichment pass restore it.
+        text(super::UNMAPPED)
+    } else {
+        text(name.as_str())
+    };
     let mut p = common("DBCOLOR", UNLISTED, "AcDbColor", None, None, None);
+    p.push(("Name", name_value));
     p.extend([
-        ("BookName", text(&value.book_name)),
-        ("Color", color(value.color)),
-        ("ColorName", text(&value.color_name)),
+        ("BookName", text(book_name)),
+        ("Color", compat_color),
+        ("ColorName", text(color_name)),
     ]);
     record(
         handle_value,
@@ -3022,11 +3077,12 @@ fn dump_underlay_definition(
 ) -> Value {
     // Only PDF has a concrete ACadSharp schema in this checklist. Other
     // underlay definitions retain their name through the unknown schema.
+    let name = (!value.name.is_empty()).then_some(value.name.as_str());
     let mut p = common(
         value.underlay_type.definition_name(),
         UNLISTED,
-        value.underlay_type.definition_subclass_marker(),
-        Some(&value.name),
+        "AcDbUnderlayDefinition",
+        name,
         Some(&value.reactors),
         None,
     );
@@ -3034,11 +3090,11 @@ fn dump_underlay_definition(
         ("File", text(&value.file_path)),
         (
             "Name",
-            text(if value.name.is_empty() {
-                &value.page_name
+            if value.name.is_empty() {
+                text(super::UNMAPPED)
             } else {
-                &value.name
-            }),
+                text(&value.name)
+            },
         ),
         ("Page", text(&value.page_name)),
     ]);
@@ -3171,12 +3227,11 @@ fn is_unmapped(value: Option<&Value>) -> bool {
     value.is_none_or(|value| value.as_str() == Some(super::UNMAPPED))
 }
 
-fn dictionary_name(
+fn owned_dictionary_name(
     doc: &crate::CadDocument,
     object_handle: Handle,
-    owner: &Value,
+    owner: Handle,
 ) -> Option<String> {
-    let owner = Handle::new(u64::from_str_radix(owner.as_str()?.strip_prefix('#')?, 16).ok()?);
     let entries = match doc.objects.get(&owner)? {
         ObjectType::Dictionary(dictionary) => &dictionary.entries,
         ObjectType::DictionaryWithDefault(dictionary) => &dictionary.entries,
@@ -3186,6 +3241,15 @@ fn dictionary_name(
         .iter()
         .find(|(_, h)| *h == object_handle)
         .map(|(name, _)| name.clone())
+}
+
+fn dictionary_name(
+    doc: &crate::CadDocument,
+    object_handle: Handle,
+    owner: &Value,
+) -> Option<String> {
+    let owner = Handle::new(u64::from_str_radix(owner.as_str()?.strip_prefix('#')?, 16).ok()?);
+    owned_dictionary_name(doc, object_handle, owner)
 }
 
 fn unknown_non_graphical_record(value: &mut Value) {

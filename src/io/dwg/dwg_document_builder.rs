@@ -6006,6 +6006,7 @@ impl DwgDocumentBuilder {
                 OBJ_DBCOLOR => {
                     let data = objects::read_book_color(&mut reader);
                     let obj = crate::objects::BookColor {
+                        dxf_color_present: None,
                         handle: Handle::from(handle),
                         owner: owner_handle,
                         color: data.color,
