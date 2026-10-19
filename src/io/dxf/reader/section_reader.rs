@@ -4530,7 +4530,7 @@ impl<'a> SectionReader<'a> {
             }
             "BLOCKALIGNMENTGRIP" => DynamicBlockData::AlignmentGrip(BlockOrientedGrip {
                 grip: dynamic_dxf_grip(&fields),
-                orientation: fields.point("AcDbBlockAlignmentGrip", 140),
+                orientation: fields.vector_140("AcDbBlockAlignmentGrip"),
             }),
             "BLOCKFLIPGRIP" => DynamicBlockData::FlipGrip(BlockFlipGrip {
                 grip: dynamic_dxf_grip(&fields),
@@ -4582,12 +4582,20 @@ impl<'a> SectionReader<'a> {
                     value_set: dynamic_dxf_value_set(&fields, section, 96, 141, 307),
                 })
             }
-            "BLOCKLOOKUPPARAMETER" => DynamicBlockData::LookupParameter(BlockLookupParameter {
-                parameter: dynamic_dxf_one_point(&fields),
-                index: fields.i32("AcDbBlockLookupParameter", 94),
-                lookup_name: fields.text("AcDbBlockLookupParameter", 303),
-                lookup_description: fields.text("AcDbBlockLookupParameter", 304),
-            }),
+            "BLOCKLOOKUPPARAMETER" => {
+                // AutoCAD uses LookUp; accept the earlier acadrust spelling too.
+                let section = if fields.sections.contains_key("AcDbBlockLookUpParameter") {
+                    "AcDbBlockLookUpParameter"
+                } else {
+                    "AcDbBlockLookupParameter"
+                };
+                DynamicBlockData::LookupParameter(BlockLookupParameter {
+                    parameter: dynamic_dxf_one_point(&fields),
+                    index: fields.i32(section, 94),
+                    lookup_name: fields.text(section, 303),
+                    lookup_description: fields.text(section, 304),
+                })
+            }
             "BLOCKPOINTPARAMETER" => DynamicBlockData::PointParameter(BlockPointParameter {
                 parameter: dynamic_dxf_one_point(&fields),
                 position_name: fields.text("AcDbBlockPointParameter", 303),
