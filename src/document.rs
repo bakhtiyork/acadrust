@@ -1372,6 +1372,35 @@ pub struct SummaryInfo {
     pub custom_properties: Vec<(String, String)>,
 }
 
+/// One source symbol-table entry in decode order.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct LegacyDxfTableEntry {
+    pub(crate) name: String,
+    pub(crate) handle: Handle,
+    /// Only populated for duplicate unnamed STYLE records, which the native
+    /// name-indexed table cannot address directly.
+    pub(crate) text_style: Option<TextStyle>,
+}
+
+/// One source symbol table, including empty tables, in file order.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct LegacyDxfTable {
+    pub(crate) name: String,
+    pub(crate) handle: Handle,
+    pub(crate) entries: Vec<LegacyDxfTableEntry>,
+}
+
+/// One source BLOCK/ENDBLK pair in decode order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct LegacyDxfBlock {
+    pub(crate) name: String,
+    pub(crate) begin_handle: Handle,
+    pub(crate) end_handle: Handle,
+}
+
 /// A CAD document containing all drawing data
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -1406,6 +1435,33 @@ pub struct CadDocument {
 
     /// Application ID table
     pub app_ids: Table<AppId>,
+
+    /// Application ID names in the order decoded from the source APPID table.
+    /// This is reader provenance for compatibility projections; native table
+    /// semantics continue to come from `app_ids`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) source_app_id_order: Option<Vec<String>>,
+
+    /// Source symbol tables in file order, including empty tables. R12
+    /// compatibility uses this to reproduce ACadSharp's template sequence.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) legacy_dxf_tables: Option<Vec<LegacyDxfTable>>,
+
+    /// Source BLOCK/ENDBLK pairs in decode order, including explicit marker
+    /// handles where the format supplied them.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) legacy_dxf_blocks: Option<Vec<LegacyDxfBlock>>,
+
+    /// Maximum explicit source identity seen by the DXF reader. This keeps a
+    /// stale HANDSEED from causing later generated identities to collide.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) source_explicit_handle_max: Option<u64>,
+
+    /// Source owners for SEQEND/ATTRIB entities and ENTITIES-section
+    /// VIEWPORTs, captured before entity readers normalize child ownership. A
+    /// null value means the source record had no explicit 330.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) source_entity_owners: Option<HashMap<Handle, Handle>>,
 
     /// View table
     pub views: Table<View>,
@@ -1736,6 +1792,11 @@ impl CadDocument {
             block_records: Table::new(),
             dim_styles: Table::new(),
             app_ids: Table::new(),
+            source_app_id_order: None,
+            legacy_dxf_tables: None,
+            legacy_dxf_blocks: None,
+            source_explicit_handle_max: None,
+            source_entity_owners: None,
             views: Table::new(),
             vports: Table::new(),
             ucss: Table::new(),

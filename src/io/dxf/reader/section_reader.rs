@@ -4,7 +4,7 @@ mod associative;
 mod table_content;
 
 use super::stream_reader::{DxfStreamContext, DxfStreamReader, PointReader};
-use crate::document::CadDocument;
+use crate::document::{CadDocument, LegacyDxfBlock, LegacyDxfTable, LegacyDxfTableEntry};
 use crate::entities::*;
 use crate::error::Result;
 use crate::objects::*;
@@ -1476,6 +1476,80 @@ impl<'a> SectionReader<'a> {
             skipped_records: 0,
             recovery_errors: Vec::new(),
         }
+    }
+
+    fn begin_source_table(document: &mut CadDocument, name: &str) {
+        if document.version != DxfVersion::AC1009 {
+            return;
+        }
+        document
+            .legacy_dxf_tables
+            .get_or_insert_with(Vec::new)
+            .push(LegacyDxfTable {
+                name: name.to_owned(),
+                handle: Handle::NULL,
+                entries: Vec::new(),
+            });
+    }
+
+    fn finish_source_table(document: &mut CadDocument, handle: Handle) {
+        if document.version != DxfVersion::AC1009 {
+            return;
+        }
+        let source_handle = if document.version == DxfVersion::AC1009 {
+            Handle::NULL
+        } else {
+            handle
+        };
+        if let Some(table) = document
+            .legacy_dxf_tables
+            .as_mut()
+            .and_then(|tables| tables.last_mut())
+        {
+            // R12 TABLE headers have no handles; the native table handle is
+            // a constructed default and must not be mistaken for source data.
+            table.handle = source_handle;
+        }
+    }
+
+    fn remember_source_table_entry(
+        document: &mut CadDocument,
+        name: &str,
+        handle: Handle,
+        text_style: Option<&TextStyle>,
+    ) {
+        if document.version != DxfVersion::AC1009 {
+            return;
+        }
+        let Some(table) = document
+            .legacy_dxf_tables
+            .as_mut()
+            .and_then(|tables| tables.last_mut())
+        else {
+            return;
+        };
+        table.entries.push(LegacyDxfTableEntry {
+            name: name.to_owned(),
+            handle,
+            text_style: text_style.cloned(),
+        });
+    }
+
+    fn remember_source_block(
+        document: &mut CadDocument,
+        name: &str,
+        block_handle: Handle,
+        block_end_handle: Handle,
+    ) {
+        if document.version != DxfVersion::AC1009 {
+            return;
+        }
+        let entries = document.legacy_dxf_blocks.get_or_insert_with(Vec::new);
+        entries.push(LegacyDxfBlock {
+            name: name.to_owned(),
+            begin_handle: block_handle,
+            end_handle: block_end_handle,
+        });
     }
 
     /// Enable bounded record-level recovery. Strict readers retain the
@@ -3464,7 +3538,9 @@ impl<'a> SectionReader<'a> {
                 // Read table name (code 2)
                 if let Some(name_pair) = self.reader.read_pair()? {
                     if name_pair.code == 2 {
-                        match name_pair.value_string.as_str() {
+                        let table_name = name_pair.value_string.clone();
+                        Self::begin_source_table(document, &table_name);
+                        match table_name.as_str() {
                             "LAYER" => self.read_layer_table(document)?,
                             "LTYPE" => self.read_linetype_table(document)?,
                             "STYLE" => self.read_textstyle_table(document)?,
@@ -3476,6 +3552,19 @@ impl<'a> SectionReader<'a> {
                             "UCS" => self.read_ucs_table(document)?,
                                 _ => self.skip_to_endtab()?,
                             }
+                        let table_handle = match table_name.as_str() {
+                            "LAYER" => document.layers.handle(),
+                            "LTYPE" => document.line_types.handle(),
+                            "STYLE" => document.text_styles.handle(),
+                            "BLOCK_RECORD" => document.block_records.handle(),
+                            "DIMSTYLE" => document.dim_styles.handle(),
+                            "APPID" => document.app_ids.handle(),
+                            "VIEW" => document.views.handle(),
+                            "VPORT" => document.vports.handle(),
+                            "UCS" => document.ucss.handle(),
+                            _ => Handle::NULL,
+                        };
+                        Self::finish_source_table(document, table_handle);
                         }
                     }
                     Ok(())
@@ -3656,6 +3745,12 @@ impl<'a> SectionReader<'a> {
                             document.block_records.add_or_replace(br);
                         }
 
+                        Self::remember_source_block(
+                            document,
+                            &block_name,
+                            handle,
+                            block_end.common.handle,
+                        );
                         if let Some(block_record) = document.block_records.get_mut(&block_name) {
                             block_record.entity_handles = entity_handles;
                             block_record.xref_path = block.xref_path.clone();
@@ -9709,6 +9804,12 @@ impl<'a> SectionReader<'a> {
             if pair.code == 0 && pair.value_string == "LAYER" {
                 self.reader.record_xdata(true);
                 if let Some((layer, xdictionary)) = self.read_layer_entry()? {
+                    Self::remember_source_table_entry(
+                        document,
+                        &layer.name,
+                        layer.handle,
+                        None,
+                    );
                     if let Some(xdictionary) = xdictionary {
                         document.xdic_by_handle.insert(layer.handle, xdictionary);
                     }
@@ -9855,6 +9956,12 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "LTYPE" {
                 self.reader.record_xdata(true);
                 if let Some(linetype) = self.read_linetype_entry()? {
+                    Self::remember_source_table_entry(
+                        document,
+                        &linetype.name,
+                        linetype.handle,
+                        None,
+                    );
                     document.line_types.add_or_replace(linetype);
                     self.decoded_records = self.decoded_records.saturating_add(1);
                 }
@@ -10002,6 +10109,13 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "STYLE" {
                 self.reader.record_xdata(true);
                 if let Some(style) = self.read_textstyle_entry()? {
+                    let retained_style = style.name.is_empty().then_some(&style);
+                    Self::remember_source_table_entry(
+                        document,
+                        &style.name,
+                        style.handle,
+                        retained_style,
+                    );
                     // Shape-file styles all have an empty name; keep each one
                     // (as the DWG reader does) or every shape linetype but
                     // the last loses its shape file.
@@ -10138,6 +10252,12 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "BLOCK_RECORD" {
                 self.reader.record_xdata(true);
                 if let Some((block_record, reactors)) = self.read_block_record_entry()? {
+                    Self::remember_source_table_entry(
+                        document,
+                        &block_record.name,
+                        block_record.handle,
+                        None,
+                    );
                     if !reactors.is_empty() && !block_record.handle.is_null() {
                         document
                             .reactors_by_handle
@@ -10309,6 +10429,12 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "DIMSTYLE" {
                 self.reader.record_xdata(true);
                 if let Some(mut dimstyle) = self.read_dimstyle_entry()? {
+                    Self::remember_source_table_entry(
+                        document,
+                        &dimstyle.name,
+                        dimstyle.handle,
+                        None,
+                    );
                     // DXF names the dimension text style only by handle (group 340);
                     // resolve the name from the STYLE table, which is read first.
                     if !dimstyle.dimtxsty_handle.is_null() {
@@ -10747,6 +10873,7 @@ impl<'a> SectionReader<'a> {
 
     /// Read APPID table
     fn read_appid_table(&mut self, document: &mut CadDocument) -> Result<()> {
+        document.source_app_id_order.get_or_insert_with(Vec::new);
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 && pair.value_string == "ENDTAB" {
                 break;
@@ -10764,6 +10891,17 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "APPID" {
                 self.reader.record_xdata(true);
                 if let Some(appid) = self.read_appid_entry()? {
+                    let name = appid.name.to_uppercase();
+                    Self::remember_source_table_entry(
+                        document,
+                        &appid.name,
+                        appid.handle,
+                        None,
+                    );
+                    let order = document.source_app_id_order.as_mut().unwrap();
+                    if !order.iter().any(|existing| existing == &name) {
+                        order.push(name);
+                    }
                     document.app_ids.add_or_replace(appid);
                     self.decoded_records = self.decoded_records.saturating_add(1);
                 }
@@ -10816,6 +10954,12 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "VIEW" {
                 self.reader.record_xdata(true);
                 if let Some(view) = self.read_view_entry()? {
+                    Self::remember_source_table_entry(
+                        document,
+                        &view.name,
+                        view.handle,
+                        None,
+                    );
                     document.views.add_or_replace(view);
                     self.decoded_records = self.decoded_records.saturating_add(1);
                 }
@@ -11043,6 +11187,12 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "VPORT" {
                 self.reader.record_xdata(true);
                 if let Some(vport) = self.read_vport_entry()? {
+                    Self::remember_source_table_entry(
+                        document,
+                        &vport.name,
+                        vport.handle,
+                        None,
+                    );
                     document.vports.add_allow_duplicate(vport);
                     self.decoded_records = self.decoded_records.saturating_add(1);
                 }
@@ -11402,6 +11552,12 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "UCS" {
                 self.reader.record_xdata(true);
                 if let Some(ucs) = self.read_ucs_entry()? {
+                    Self::remember_source_table_entry(
+                        document,
+                        &ucs.name,
+                        ucs.handle,
+                        None,
+                    );
                     document.ucss.add_or_replace(ucs);
                     self.decoded_records = self.decoded_records.saturating_add(1);
                 }
@@ -22030,6 +22186,59 @@ fn color_from_i32(v: i32) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn r12_source_provenance_keeps_empty_tables_shapes_blocks_and_handle_floor() {
+        let text = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n9\n$HANDSEED\n5\n1\n0\nENDSEC\n0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nVPORT\n70\n0\n0\nENDTAB\n0\nTABLE\n2\nLAYER\n70\n1\n0\nLAYER\n2\nA\n70\n0\n62\n7\n6\nContinuous\n0\nENDTAB\n0\nTABLE\n2\nSTYLE\n70\n2\n0\nSTYLE\n2\n\n70\n1\n3\none.shx\n0\nSTYLE\n2\n\n70\n1\n3\ntwo.shx\n0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nB\n70\n0\n0\nENDBLK\n5\n900\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n901\n8\nA\n10\n0\n20\n0\n11\n1\n21\n1\n0\nSEQEND\n5\nA\n330\nB\n0\nSEQEND\n5\nC\n102\n{ACAD_REACTORS\n330\nD\n102\n}\n0\nENDSEC\n0\nEOF\n";
+        let document = crate::io::dxf::reader::DxfReader::from_reader(
+            std::io::Cursor::new(text.as_bytes()),
+        )
+        .unwrap()
+        .read()
+        .unwrap();
+
+        let tables = document.legacy_dxf_tables.as_ref().unwrap();
+        assert_eq!(
+            tables.iter().map(|table| table.name.as_str()).collect::<Vec<_>>(),
+            ["VPORT", "LAYER", "STYLE"]
+        );
+        assert!(tables[0].entries.is_empty());
+        assert_eq!(tables[1].entries[0].name, "A");
+        assert_eq!(tables[2].entries.len(), 2);
+        assert!(tables[2]
+            .entries
+            .iter()
+            .all(|entry| entry.name.is_empty() && entry.text_style.is_some()));
+
+        let blocks = document.legacy_dxf_blocks.as_ref().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].name, "B");
+        assert!(blocks[0].begin_handle.is_null());
+        assert_eq!(blocks[0].end_handle.value(), 0x900);
+        assert_eq!(document.source_explicit_handle_max, Some(0x901));
+        assert!(document.header.handle_seed >= 0x902);
+        let owners = document.source_entity_owners.as_ref().unwrap();
+        assert_eq!(owners.get(&Handle::new(0xA)), Some(&Handle::new(0xB)));
+        assert_eq!(owners.get(&Handle::new(0xC)), Some(&Handle::NULL));
+    }
+
+    #[test]
+    fn source_entity_owner_provenance_covers_attribs_and_entity_viewports() {
+        let text = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n0\nENDSEC\n0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nB\n70\n0\n0\nATTRIB\n5\n12\n2\nBLOCK_TAG\n1\nblock\n0\nVIEWPORT\n5\n10\n0\nENDBLK\n5\n11\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nATTRIB\n5\n20\n2\nOWNERLESS\n1\nvalue\n0\nATTRIB\n5\n21\n330\n22\n2\nEXPLICIT\n1\nvalue\n0\nVIEWPORT\n5\n23\n0\nENDSEC\n0\nEOF\n";
+        let document = crate::io::dxf::reader::DxfReader::from_reader(
+            std::io::Cursor::new(text.as_bytes()),
+        )
+        .unwrap()
+        .read()
+        .unwrap();
+
+        let owners = document.source_entity_owners.as_ref().unwrap();
+        assert_eq!(owners.get(&Handle::new(0x12)), Some(&Handle::NULL));
+        assert_eq!(owners.get(&Handle::new(0x20)), Some(&Handle::NULL));
+        assert_eq!(owners.get(&Handle::new(0x21)), Some(&Handle::new(0x22)));
+        assert_eq!(owners.get(&Handle::new(0x23)), Some(&Handle::NULL));
+        assert!(owners.get(&Handle::new(0x10)).is_none());
+    }
 
     /// `true_color_bits` reads the raw text of a colour code, so unlike
     /// [`DxfCodePair::as_i32_bits`] it owns the parse: it must trim, accept

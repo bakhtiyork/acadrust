@@ -173,6 +173,11 @@ impl<'a> SemanticInventoryV1<'a> {
             block_records,
             dim_styles,
             app_ids,
+            source_app_id_order: _, // Reader provenance; native table semantics are above.
+            legacy_dxf_tables: _,
+            legacy_dxf_blocks: _,
+            source_explicit_handle_max: _,
+            source_entity_owners: _,
             views,
             vports,
             ucss,
