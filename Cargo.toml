@@ -14,6 +14,7 @@ categories = ["parser-implementations", "encoding"]
 
 [features]
 default = []
+acadsharp-compat = ["dep:serde_json"]
 serde = ["dep:serde", "bitflags/serde", "indexmap/serde"]
 import = ["dep:quick-xml"]
 
@@ -39,6 +40,7 @@ oem_cp = "2.1"
 
 # Serialization (optional)
 serde = { version = "1", features = ["derive", "rc"], optional = true }
+serde_json = { version = "1", features = ["preserve_order"], optional = true }
 
 # XML parsing (optional, for COLLADA import)
 quick-xml = { version = "0.36", optional = true }
@@ -65,6 +67,11 @@ serde_json = "1"
 opt-level = 3
 lto = true
 codegen-units = 1
+
+[[bin]]
+name = "acad-dump"
+path = "src/bin/acad-dump.rs"
+required-features = ["acadsharp-compat"]
 
 [profile.bench]
 inherits = "release"

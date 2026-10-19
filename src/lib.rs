@@ -263,3 +263,6 @@ mod tests {
 mod drawing_variables;
 
 mod hatch_origin;
+
+#[cfg(feature = "acadsharp-compat")]
+pub mod compat;
