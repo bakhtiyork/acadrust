@@ -53,6 +53,7 @@ fn entity_color_book_identity_survives_dxf_roundtrip() {
     document.objects.insert(
         book_handle,
         ObjectType::BookColor(BookColor {
+            dxf_color_present: None,
             handle: book_handle,
             owner: Handle::NULL,
             color: Color::from_rgb(220, 100, 20),
@@ -84,6 +85,7 @@ fn book_color_object_survives_dxf_roundtrip() {
     document.objects.insert(
         handle,
         ObjectType::BookColor(BookColor {
+            dxf_color_present: None,
             handle,
             owner: Handle::NULL,
             color: Color::from_rgb(220, 100, 20),

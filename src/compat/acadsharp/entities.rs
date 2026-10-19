@@ -1579,7 +1579,48 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
 }
 
 fn collect_hatch(doc: &CadDocument, value: &crate::entities::Hatch, out: &mut Vec<Value>) {
-    let paths = value.paths.iter().map(hatch_path).collect::<Vec<_>>();
+    let source = value.dxf_source.as_deref();
+    let dwg = doc.dwg_source_version;
+    let paths = value.paths.iter().map(|p| hatch_path(doc, p));
+    let seeds = source
+        .and_then(|s| s.elevation_point)
+        .into_iter()
+        .chain(value.seed_points.iter().copied());
+    // The DWG solid layout has no scale slot; DXF may explicitly store one.
+    let scale = if source.is_some_and(|s| !s.has_pattern_scale) || (dwg.is_some() && value.is_solid)
+    {
+        0.0
+    } else {
+        value.pattern_scale
+    };
+    let gradient = value
+        .gradient_recovery_source
+        .as_deref()
+        .unwrap_or(&value.gradient_color);
+    let gradient_name = if source.is_some_and(|s| !s.has_gradient_name)
+        || dwg.is_some_and(|v| v < DxfVersion::AC1018)
+        || (source.is_none() && dwg.is_none() && gradient.name.is_empty())
+    {
+        Value::Null
+    } else {
+        Value::String(gradient.name.clone())
+    };
+    let gradient_colors = gradient.colors.iter().enumerate().map(|(i, entry)| {
+        // ACadSharp's DXF callback ignores 421, retaining only the last ACI.
+        let c = source
+            .and_then(|s| s.gradient_indices.get(i))
+            .map(|&index| crate::types::Color::from_index(index))
+            .unwrap_or(entry.color);
+        let mut projected = color(c);
+        if let crate::types::Color::Rgb { r, g, b } = c {
+            projected["TrueColor"] =
+                json!(i32::from(r) | (i32::from(g) << 8) | (i32::from(b) << 16));
+        }
+        inline(
+            "GradientColor",
+            vec![("Color", projected), ("Value", number(entry.value))],
+        )
+    });
     field_common(
         doc,
         &value.common,
@@ -1592,32 +1633,132 @@ fn collect_hatch(doc: &CadDocument, value: &crate::entities::Hatch, out: &mut Ve
             ("Elevation", number(value.elevation)),
             ("IsAssociative", bool_value(value.is_associative)),
             ("IsDouble", bool_value(value.is_double)),
-            ("IsSolid", bool_value(value.is_solid)),
+            (
+                "IsSolid",
+                bool_value(value.is_solid && !source.is_some_and(|s| !s.has_solid)),
+            ),
             ("Normal", vec3(value.normal)),
-            ("Paths", array(paths.into_iter())),
+            ("Paths", array(paths)),
+            (
+                "Pattern",
+                inline(
+                    "HatchPattern",
+                    vec![
+                        ("Name", Value::String(value.pattern.name.clone())),
+                        (
+                            "Description",
+                            if value.pattern.description.is_empty() {
+                                Value::Null
+                            } else {
+                                Value::String(value.pattern.description.clone())
+                            },
+                        ),
+                        (
+                            "Lines",
+                            array(value.pattern.lines.iter().map(|line| {
+                                inline(
+                                    "HatchPattern.Line",
+                                    vec![
+                                        ("Angle", number(line.angle)),
+                                        ("BasePoint", vec2(line.base_point)),
+                                        ("Offset", vec2(line.offset)),
+                                        (
+                                            "DashLengths",
+                                            array(line.dash_lengths.iter().copied().map(number)),
+                                        ),
+                                    ],
+                                )
+                            })),
+                        ),
+                    ],
+                ),
+            ),
+            (
+                "GradientColor",
+                inline(
+                    "HatchGradientPattern",
+                    vec![
+                        ("Angle", number(gradient.angle)),
+                        ("ColorTint", number(gradient.color_tint)),
+                        ("Colors", array(gradient_colors)),
+                        ("Enabled", bool_value(gradient.enabled)),
+                        (
+                            "IsSingleColorGradient",
+                            bool_value(gradient.is_single_color),
+                        ),
+                        ("Name", gradient_name),
+                        ("Shift", number(gradient.shift)),
+                    ],
+                ),
+            ),
             ("PatternAngle", number(value.pattern_angle)),
-            ("PatternScale", number(value.pattern_scale)),
-            ("PatternType", enum_value(value.pattern_type as i64)),
-            ("PixelSize", number(value.pixel_size)),
-            ("SeedPoints", points2(value.seed_points.iter().copied())),
-            ("Style", enum_value(value.style as i64)),
+            ("PatternScale", number(scale)),
+            (
+                "PatternType",
+                enum_value(if source.is_some_and(|s| !s.has_pattern_type) {
+                    0
+                } else {
+                    value.pattern_type as i64
+                }),
+            ),
+            // readPattern consumes the first non-pattern code on exit. Keep the
+            // native pixel size even when the reference loses this trailer slot.
+            (
+                "PixelSize",
+                number(
+                    if source.is_some_and(|s| s.pattern_trailer_code == Some(47)) {
+                        0.0
+                    } else {
+                        value.pixel_size
+                    },
+                ),
+            ),
+            ("SeedPoints", points2(seeds)),
+            (
+                "Style",
+                enum_value(if source.is_some() {
+                    0
+                } else {
+                    value.style as i64
+                }),
+            ),
         ],
         out,
     );
 }
 
-fn hatch_path(path: &crate::entities::BoundaryPath) -> Value {
+fn hatch_path(doc: &CadDocument, path: &crate::entities::BoundaryPath) -> Value {
+    let mut seen = std::collections::HashSet::new();
+    // CadBoundaryPathTemplate uses an insertion-ordered HashSet and only binds
+    // entity references. Native duplicate/dangling handles remain untouched.
+    let entities = path
+        .boundary_handles
+        .iter()
+        .copied()
+        .filter(|h| seen.insert(*h) && doc.get_entity(*h).is_some());
+    let polyline = path
+        .edges
+        .iter()
+        .any(|e| matches!(e, crate::entities::BoundaryEdge::Polyline(_)));
+    let flags = (path.flags.bits() & !2) | if polyline { 2 } else { 0 };
     inline(
         "Hatch.BoundaryPath",
         vec![
-            ("Edges", array(path.edges.iter().map(hatch_edge))),
-            ("Entities", unmapped()),
-            ("Flags", enum_value(path.flags.bits() as i64)),
+            (
+                "Edges",
+                array(
+                    path.edges
+                        .iter()
+                        .map(|edge| hatch_edge(edge, doc.dwg_source_version.is_some())),
+                ),
+            ),
+            ("Entities", handles(entities)),
+            ("Flags", enum_value(flags as i64)),
         ],
     )
 }
 
-fn hatch_edge(edge: &crate::entities::BoundaryEdge) -> Value {
+fn hatch_edge(edge: &crate::entities::BoundaryEdge, dwg: bool) -> Value {
     match edge {
         crate::entities::BoundaryEdge::Line(value) => inline(
             "Hatch.BoundaryPath.Line",
@@ -1656,7 +1797,14 @@ fn hatch_edge(edge: &crate::entities::BoundaryEdge) -> Value {
             vec![
                 (
                     "ControlPoints",
-                    points3(value.control_points.iter().copied()),
+                    points3(value.control_points.iter().copied().map(|mut point| {
+                        // The DWG reference reader uses zero for an absent
+                        // non-rational weight; native splines correctly use one.
+                        if dwg && !value.rational {
+                            point.z = 0.0;
+                        }
+                        point
+                    })),
                 ),
                 ("Degree", integer(value.degree as i64)),
                 ("EndTangent", vec2(value.end_tangent)),
@@ -2088,9 +2236,12 @@ fn collect_surface(doc: &CadDocument, value: &crate::entities::Surface, out: &mu
 
 fn collect_underlay(doc: &CadDocument, value: &crate::entities::Underlay, out: &mut Vec<Value>) {
     let (type_name, object_name, subclass) = match value.underlay_type {
-        crate::entities::UnderlayType::Pdf => ("PdfUnderlay", "PDFUNDERLAY", "AcDbPdfReference"),
-        crate::entities::UnderlayType::Dwf => ("DwfUnderlay", "DWFUNDERLAY", "AcDbDwfReference"),
-        crate::entities::UnderlayType::Dgn => ("DgnUnderlay", "DGNUNDERLAY", "AcDbDgnReference"),
+        // ACadSharp's concrete underlay entities all inherit the same
+        // AcDbUnderlayReference marker; the PDF/DWF/DGN distinction is in
+        // ObjectName and the typed record.
+        crate::entities::UnderlayType::Pdf => ("PdfUnderlay", "PDFUNDERLAY", "AcDbUnderlayReference"),
+        crate::entities::UnderlayType::Dwf => ("DwfUnderlay", "DWFUNDERLAY", "AcDbUnderlayReference"),
+        crate::entities::UnderlayType::Dgn => ("DgnUnderlay", "DGNUNDERLAY", "AcDbUnderlayReference"),
     };
     field_common(
         doc,

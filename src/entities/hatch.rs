@@ -430,12 +430,36 @@ impl Default for HatchGradientPattern {
     }
 }
 
+/// DXF source details which normalization would otherwise discard.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct HatchDxfSource {
+    /// The elevation point's XY coordinates, when code 10 was present.
+    pub elevation_point: Option<Vector2>,
+    /// Presence distinguishes omitted native defaults from explicit values.
+    pub has_pattern_scale: bool,
+    pub has_pattern_type: bool,
+    pub has_solid: bool,
+    pub has_gradient_name: bool,
+    /// First code after the pattern lines (the reference reader consumes it).
+    pub pattern_trailer_code: Option<i32>,
+    /// Original gradient ACI codes, retained alongside the native RGB colors.
+    pub gradient_indices: Vec<i16>,
+}
+
 /// Hatch entity
 ///
 /// Represents a filled or patterned area defined by boundary paths.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Hatch {
+    /// Source provenance; excluded from native drawing-state equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_source: Option<Box<HatchDxfSource>>,
+    /// Original gradient when legacy round-trip metadata restored richer data.
+    /// Like other provenance, this does not affect native equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub gradient_recovery_source: Option<Box<HatchGradientPattern>>,
     pub common: EntityCommon,
     /// True when this record is the class-based AcDbMPolygon variant.
     pub is_mpolygon: bool,
@@ -474,10 +498,37 @@ pub struct Hatch {
     pub mpolygon_invalid_loops: Vec<BoundaryPath>,
 }
 
+// Provenance does not change native geometry, appearance or round-trip equality.
+impl PartialEq for Hatch {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.is_mpolygon == other.is_mpolygon
+            && self.elevation == other.elevation
+            && self.normal == other.normal
+            && self.pattern == other.pattern
+            && self.is_solid == other.is_solid
+            && self.is_associative == other.is_associative
+            && self.pattern_type == other.pattern_type
+            && self.pattern_angle == other.pattern_angle
+            && self.pattern_scale == other.pattern_scale
+            && self.is_double == other.is_double
+            && self.style == other.style
+            && self.paths == other.paths
+            && self.seed_points == other.seed_points
+            && self.pixel_size == other.pixel_size
+            && self.gradient_color == other.gradient_color
+            && self.mpolygon_hatch_color == other.mpolygon_hatch_color
+            && self.mpolygon_x_direction == other.mpolygon_x_direction
+            && self.mpolygon_invalid_loops == other.mpolygon_invalid_loops
+    }
+}
+
 impl Hatch {
     /// Create a new hatch entity
     pub fn new() -> Self {
         Self {
+            dxf_source: None,
+            gradient_recovery_source: None,
             common: EntityCommon::default(),
             is_mpolygon: false,
             elevation: 0.0,

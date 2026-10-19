@@ -1037,9 +1037,13 @@ impl Default for RasterVariables {
 }
 
 /// BookColor (DBCOLOR) — named color definition
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BookColor {
+    /// DXF color-code presence; None for constructed or DWG records.
+    /// Provenance does not participate in native drawing-state equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_color_present: Option<bool>,
     /// Unique handle
     pub handle: Handle,
     /// Owner handle
@@ -1057,12 +1061,23 @@ impl BookColor {
     /// Create a new BookColor
     pub fn new() -> Self {
         BookColor {
+            dxf_color_present: None,
             handle: Handle::NULL,
             owner: Handle::NULL,
             color: Color::default(),
             color_name: String::new(),
             book_name: String::new(),
         }
+    }
+}
+
+impl PartialEq for BookColor {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.owner == other.owner
+            && self.color == other.color
+            && self.color_name == other.color_name
+            && self.book_name == other.book_name
     }
 }
 
