@@ -1551,6 +1551,7 @@ impl<'a> SectionReader<'a> {
     /// Read the HEADER section
     pub fn read_header(&mut self, document: &mut CadDocument) -> Result<()> {
         let hdr = &mut document.header;
+        hdr.dxf_source_variables.get_or_insert_with(Default::default);
         // A $CUSTOMPROPERTYTAG waits for its $CUSTOMPROPERTY value.
         let mut custom_value_pending = false;
         let mut code_page_seen = false;
@@ -1565,6 +1566,7 @@ impl<'a> SectionReader<'a> {
             }
 
             let var_name = pair.value_string.clone();
+            hdr.dxf_source_variables.as_mut().unwrap().insert(var_name.clone());
             match var_name.as_str() {
                 "$VIEWCTR" | "$VIEWDIR" | "$TARGET" | "$SNAPBASE" | "$SNAPUNIT" | "$GRIDUNIT" | "$AXISUNIT" => {
                     let state = hdr.legacy.get_or_insert_with(Default::default);
@@ -1595,7 +1597,10 @@ impl<'a> SectionReader<'a> {
                             "$VIEWMODE" => state.view_mode = value,
                             "$FLATLAND" => state.flatland = value,
                             "$UCSICON" => state.ucs_icon = value,
-                            "$UNITMODE" => state.unit_mode = value,
+                            "$UNITMODE" => {
+                                state.unit_mode = value;
+                                hdr.unit_mode = value;
+                            }
                             _ => unreachable!(),
                         }
                     }
@@ -1628,7 +1633,9 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 "$ACADMAINTVER" => {
-                    self.reader.read_pair()?;
+                    if let Some(value) = self.reader.read_pair()?.and_then(|p| p.as_i32()) {
+                        hdr.maintenance_version = value;
+                    }
                 }
                 "$REQUIREDVERSIONS" => {
                     if let Some(p) = self.reader.read_pair()? {
@@ -1655,6 +1662,7 @@ impl<'a> SectionReader<'a> {
                     if let Some(p) = self.reader.read_pair()? {
                         if let Ok(h) = u64::from_str_radix(&p.value_string, 16) {
                             hdr.handle_seed = h;
+                            hdr.source_handle_seed = Some(h);
                         }
                     }
                 }
@@ -1812,6 +1820,11 @@ impl<'a> SectionReader<'a> {
                 "$DISPSILH" => {
                     if let Some(p) = self.reader.read_pair()? {
                         hdr.display_silhouette = p.as_i16() == Some(1);
+                    }
+                }
+                "$PELLIPSE" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.create_ellipse_as_polyline = p.as_i16() == Some(1);
                     }
                 }
                 "$SPLFRAME" => {
@@ -2132,6 +2145,37 @@ impl<'a> SectionReader<'a> {
                     if let Some(p) = self.reader.read_pair()? {
                         if let Some(v) = p.as_double() {
                             hdr.dim_fixed_ext_line_length = v;
+                        }
+                    }
+                }
+                "$DIMFXLON" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.dim_extension_line_length_fixed = p.as_i16() == Some(1);
+                    }
+                }
+                "$DIMALTMZF" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        if let Some(v) = p.as_double() {
+                            hdr.dim_alt_mzf = v;
+                        }
+                    }
+                }
+                "$DIMALTMZS" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.dim_alt_mzs = Some(p.value_string.clone());
+                    }
+                }
+                "$DIMARCSYM" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        if let Some(v) = p.as_i16() {
+                            hdr.dim_arc_length_symbol_position = v;
+                        }
+                    }
+                }
+                "$CSHADOW" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        if let Some(v) = p.as_i16() {
+                            hdr.shadow_mode = v.clamp(0, u8::MAX as i16) as u8;
                         }
                     }
                 }
@@ -2912,6 +2956,25 @@ impl<'a> SectionReader<'a> {
                         }
                     }
                 }
+                "$DIMUNIT" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        if let Some(v) = p.as_i16() {
+                            hdr.dim_unit = v;
+                        }
+                    }
+                }
+                "$DIMMZF" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        if let Some(v) = p.as_double() {
+                            hdr.dim_mzf = v;
+                        }
+                    }
+                }
+                "$DIMMZS" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.dim_mzs = Some(p.value_string.clone());
+                    }
+                }
                 "$DIMDSEP" => {
                     if let Some(p) = self.reader.read_pair()? {
                         if let Some(v) = p.as_i16() {
@@ -2971,10 +3034,24 @@ impl<'a> SectionReader<'a> {
                         }
                     }
                 }
-                "$DIMATFIT" | "$DIMFIT" => {
+                "$DIMATFIT" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        if let Some(v) = p.as_i16() {
+                            hdr.dim_text_arrow_fit = v;
+                        }
+                    }
+                }
+                "$DIMFIT" => {
                     if let Some(p) = self.reader.read_pair()? {
                         if let Some(v) = p.as_i16() {
                             hdr.dim_fit = v;
+                        }
+                    }
+                }
+                "$DIMTXTDIRECTION" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        if let Some(v) = p.as_i16() {
+                            hdr.dim_text_direction = v;
                         }
                     }
                 }
@@ -3011,6 +3088,26 @@ impl<'a> SectionReader<'a> {
                 "$DIMLDRBLK" => {
                     if let Some(p) = self.reader.read_pair()? {
                         hdr.dim_leader_arrow_block = p.value_string.clone();
+                    }
+                }
+                "$DIMTXSTY" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.dim_text_style_name = p.value_string.clone();
+                    }
+                }
+                "$DIMLTYPE" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.dim_linetype_name = p.value_string.clone();
+                    }
+                }
+                "$DIMLTEX1" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.dim_linetype1_name = p.value_string.clone();
+                    }
+                }
+                "$DIMLTEX2" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.dim_linetype2_name = p.value_string.clone();
                     }
                 }
                 "$DIMLWD" => {
@@ -3103,6 +3200,11 @@ impl<'a> SectionReader<'a> {
                         hdr.ucs_base = p.value_string.clone();
                     }
                 }
+                "$PUCSBASE" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.paper_space_ucs_base_name = p.value_string.clone();
+                    }
+                }
                 "$UCSNAME" => {
                     if let Some(p) = self.reader.read_pair()? {
                         hdr.model_space_ucs_name = p.value_string.clone();
@@ -3122,6 +3224,24 @@ impl<'a> SectionReader<'a> {
                 "$UCSYDIR" => {
                     self.read_header_point3(&mut hdr.model_space_ucs_y_axis)?;
                 }
+                "$UCSORGTOP" => {
+                    self.read_header_point3(&mut hdr.model_space_orthographic_top_origin)?;
+                }
+                "$UCSORGBOTTOM" => {
+                    self.read_header_point3(&mut hdr.model_space_orthographic_bottom_origin)?;
+                }
+                "$UCSORGLEFT" => {
+                    self.read_header_point3(&mut hdr.model_space_orthographic_left_origin)?;
+                }
+                "$UCSORGRIGHT" => {
+                    self.read_header_point3(&mut hdr.model_space_orthographic_right_origin)?;
+                }
+                "$UCSORGFRONT" => {
+                    self.read_header_point3(&mut hdr.model_space_orthographic_front_origin)?;
+                }
+                "$UCSORGBACK" => {
+                    self.read_header_point3(&mut hdr.model_space_orthographic_back_origin)?;
+                }
                 "$PUCSORG" => {
                     self.read_header_point3(&mut hdr.paper_space_ucs_origin)?;
                 }
@@ -3130,6 +3250,24 @@ impl<'a> SectionReader<'a> {
                 }
                 "$PUCSYDIR" => {
                     self.read_header_point3(&mut hdr.paper_space_ucs_y_axis)?;
+                }
+                "$PUCSORGTOP" => {
+                    self.read_header_point3(&mut hdr.paper_space_orthographic_top_origin)?;
+                }
+                "$PUCSORGBOTTOM" => {
+                    self.read_header_point3(&mut hdr.paper_space_orthographic_bottom_origin)?;
+                }
+                "$PUCSORGLEFT" => {
+                    self.read_header_point3(&mut hdr.paper_space_orthographic_left_origin)?;
+                }
+                "$PUCSORGRIGHT" => {
+                    self.read_header_point3(&mut hdr.paper_space_orthographic_right_origin)?;
+                }
+                "$PUCSORGFRONT" => {
+                    self.read_header_point3(&mut hdr.paper_space_orthographic_front_origin)?;
+                }
+                "$PUCSORGBACK" => {
+                    self.read_header_point3(&mut hdr.paper_space_orthographic_back_origin)?;
                 }
                 "$UCSORTHOVIEW" => {
                     if let Some(p) = self.reader.read_pair()? {

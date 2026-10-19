@@ -1347,7 +1347,7 @@ fn write_ac15<W: Write + Seek>(
     fhw.add_section(section_names::OBJ_FREE_SPACE, obj_free_space);
 
     // ── Section: Template ──
-    let template = build_template(&[], document.header.measurement)?;
+    let template = build_document_template(version, document)?;
     fhw.add_section(section_names::TEMPLATE, template);
 
     // ── Section: AuxHeader (uses corrected HANDSEED) ──
@@ -1452,8 +1452,12 @@ fn write_ac18<W: Write + Seek>(
     )?;
 
     // ── Section: SummaryInfo ──
-    let summary_data =
-        build_summary_info(version, &document.summary_info, summary_encoding(document));
+    let summary_data = build_summary_info(
+        version,
+        &document.summary_info,
+        summary_encoding(document),
+        document.dwg_summary_timestamps,
+    );
     fhw.add_section(
         output,
         section_names::SUMMARY_INFO,
@@ -1559,7 +1563,7 @@ fn write_ac18<W: Write + Seek>(
     )?;
 
     // ── Section: Template ──
-    let template = build_template(&[], document.header.measurement)?;
+    let template = build_document_template(version, document)?;
     fhw.add_section(output, section_names::TEMPLATE, &template, true, PAGE_SIZE)?;
 
     // ── Section: Handles (last — needs objects data) ──
@@ -1631,8 +1635,12 @@ fn write_ac21_impl<W: Write + Seek>(
     // from ac21_section_info, so no page_size or compressed flag needed.
 
     // SummaryInfo
-    let summary_data =
-        build_summary_info(version, &document.summary_info, summary_encoding(document));
+    let summary_data = build_summary_info(
+        version,
+        &document.summary_info,
+        summary_encoding(document),
+        document.dwg_summary_timestamps,
+    );
     fhw.add_section(output, section_names::SUMMARY_INFO, &summary_data)?;
 
     // Preview
@@ -1672,7 +1680,7 @@ fn write_ac21_impl<W: Write + Seek>(
     fhw.add_section(output, section_names::OBJ_FREE_SPACE, &obj_free_space)?;
 
     // Template
-    let template = build_template(&[], document.header.measurement)?;
+    let template = build_document_template(version, document)?;
     fhw.add_section(output, section_names::TEMPLATE, &template)?;
 
     // Handles (needs objects data for offsets)
@@ -1777,14 +1785,109 @@ fn build_template(description: &[u8], measurement: i16) -> Result<Vec<u8>> {
     Ok(data)
 }
 
+// Retain the source description while writing the current native measurement.
+// Description lengths count bytes before R2007 and UTF-16 units afterwards.
+fn build_document_template(version: DxfVersion, document: &CadDocument) -> Result<Vec<u8>> {
+    let measurement = document.header.measurement;
+    let Some(raw) = &document.header.dwg_template_data else {
+        return build_template(&[], measurement);
+    };
+    let source_version = document.dwg_source_version.unwrap_or(document.version);
+    let source_width = if source_version >= DxfVersion::AC1021 { 2 } else { 1 };
+    let target_width = if version >= DxfVersion::AC1021 { 2 } else { 1 };
+    let Some(length) = raw.get(..2).map(|b| i16::from_le_bytes([b[0], b[1]])) else {
+        return build_template(&[], measurement);
+    };
+    if length < 0 {
+        return build_template(&[], measurement);
+    }
+    let end = 2 + length as usize * source_width;
+    let Some(description) = raw.get(2..end).filter(|_| raw.len() >= end + 2) else {
+        return build_template(&[], measurement);
+    };
+    let description = if source_width == target_width {
+        std::borrow::Cow::Borrowed(description)
+    } else {
+        let encoding = summary_encoding(document);
+        let text = if source_width == 2 {
+            let units: Vec<_> = description.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+            String::from_utf16_lossy(&units)
+        } else {
+            encoding.decode_without_bom_handling(description).0.into_owned()
+        };
+        let bytes = if target_width == 2 {
+            text.encode_utf16().flat_map(u16::to_le_bytes).collect()
+        } else {
+            crate::io::dxf::code_page::encode_legacy_string(&text, encoding)
+        };
+        std::borrow::Cow::Owned(bytes)
+    };
+    let length = i16::try_from(description.len() / target_width)
+        .map_err(|_| DxfError::InvalidFormat("Template description is too long".into()))?;
+    if !matches!(measurement, 0 | 1) {
+        return Err(DxfError::InvalidFormat(format!("Invalid MEASUREMENT value: {measurement}")));
+    }
+    let mut data = Vec::with_capacity(description.len() + 4);
+    data.extend_from_slice(&length.to_le_bytes());
+    data.extend_from_slice(&description);
+    data.extend_from_slice(&measurement.to_le_bytes());
+    Ok(data)
+}
+
 fn summary_encoding(document: &CadDocument) -> crate::io::dxf::code_page::LegacyEncoding {
     crate::io::dxf::code_page::encoding_from_dwg_code_page(
         crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page),
     )
 }
 
+/// Convert the native Julian day representation into the two raw longs used
+/// by the SummaryInfo section. Dates in the section have millisecond
+/// precision, so round the fraction before encoding it; this keeps a date
+/// decoded from raw longs stable across a read/write cycle despite `f64`
+/// rounding.
+fn summary_julian_to_day_ms(julian: Option<f64>) -> (i32, i32) {
+    const MILLISECONDS_PER_DAY: i64 = 86_400_000;
+    let Some(julian) = julian else {
+        return (0, 0);
+    };
+    if !julian.is_finite() {
+        return (0, 0);
+    }
+
+    let mut day = julian.floor() as i64;
+    let mut milliseconds = ((julian - day as f64) * MILLISECONDS_PER_DAY as f64).round() as i64;
+    if milliseconds >= MILLISECONDS_PER_DAY {
+        day += 1;
+        milliseconds -= MILLISECONDS_PER_DAY;
+    } else if milliseconds < 0 {
+        day -= 1;
+        milliseconds += MILLISECONDS_PER_DAY;
+    }
+    (
+        day.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        milliseconds as i32,
+    )
+}
+
+/// Reuse a source pair when the public SummaryInfo date was not edited. This
+/// preserves unusual but valid source values (including an all-zero absent
+/// sentinel and negative millisecond components) byte-for-byte.
+fn summary_julian_to_day_ms_with_source(
+    julian: Option<f64>,
+    source: Option<(i32, i32)>,
+) -> (i32, i32) {
+    if let Some((day, milliseconds)) = source {
+        let source_julian = (day != 0 || milliseconds != 0)
+            .then(|| day as f64 + milliseconds as f64 / 86_400_000.0);
+        if julian == source_julian {
+            return (day, milliseconds);
+        }
+    }
+    summary_julian_to_day_ms(julian)
+}
+
 ///
-/// Writes empty summary info fields (all empty strings).
+/// Writes the fixed SummaryInfo fields and custom properties.
 ///
 /// **AC1018 (R2004)**: Windows-1252 (ANSI) strings.
 ///   Format: UInt16(byte_count_incl_null) + bytes + null.
@@ -1797,6 +1900,7 @@ fn build_summary_info(
     version: DxfVersion,
     info: &SummaryInfo,
     encoding: crate::io::dxf::code_page::LegacyEncoding,
+    source_timestamps: Option<[(i32, i32); 2]>,
 ) -> Vec<u8> {
     let mut data = Vec::with_capacity(128);
     let is_utf16 = version >= DxfVersion::AC1021;
@@ -1838,13 +1942,20 @@ fn build_summary_info(
     data.extend_from_slice(&0i32.to_le_bytes());
     data.extend_from_slice(&0i32.to_le_bytes());
 
-    // Created date: 8 bytes (zeros)
-    data.extend_from_slice(&0i32.to_le_bytes());
-    data.extend_from_slice(&0i32.to_le_bytes());
-
-    // Modified date: 8 bytes (zeros)
-    data.extend_from_slice(&0i32.to_le_bytes());
-    data.extend_from_slice(&0i32.to_le_bytes());
+    // Created and modified dates: raw Int32 Julian day plus Int32
+    // milliseconds into that day.
+    let (created_day, created_milliseconds) = summary_julian_to_day_ms_with_source(
+        info.created_date_julian,
+        source_timestamps.map(|timestamps| timestamps[0]),
+    );
+    data.extend_from_slice(&created_day.to_le_bytes());
+    data.extend_from_slice(&created_milliseconds.to_le_bytes());
+    let (modified_day, modified_milliseconds) = summary_julian_to_day_ms_with_source(
+        info.modified_date_julian,
+        source_timestamps.map(|timestamps| timestamps[1]),
+    );
+    data.extend_from_slice(&modified_day.to_le_bytes());
+    data.extend_from_slice(&modified_milliseconds.to_le_bytes());
 
     // Custom properties: Int16 count, then name/value string pairs
     let properties: Vec<&(String, String)> = info
@@ -2769,6 +2880,7 @@ mod tests {
             DxfVersion::AC1018,
             &SummaryInfo::default(),
             encoding_rs::WINDOWS_1252.into(),
+            None,
         );
         // 8 × 3 bytes (u16(1) + ANSI null) + 8 + 16 + 2 + 8 = 58
         assert_eq!(d.len(), 58);
@@ -2784,6 +2896,7 @@ mod tests {
             DxfVersion::AC1021,
             &SummaryInfo::default(),
             encoding_rs::WINDOWS_1252.into(),
+            None,
         );
         // 8 × 4 bytes (u16(1) + UTF-16LE null) + 8 + 16 + 2 + 8 = 66
         assert_eq!(d.len(), 66);
@@ -2799,6 +2912,8 @@ mod tests {
     fn test_build_summary_info_writes_properties() {
         let info = SummaryInfo {
             title: "Kanal S\u{fc}d".into(),
+            created_date_julian: Some(2_451_544.25),
+            modified_date_julian: Some(2_451_545.75),
             custom_properties: vec![
                 ("Plan".into(), "B-1".into()),
                 (String::new(), String::new()),
@@ -2806,18 +2921,89 @@ mod tests {
             ..SummaryInfo::default()
         };
         // R2004: drawing code page, one byte per character
-        let d = build_summary_info(DxfVersion::AC1018, &info, encoding_rs::WINDOWS_1252.into());
+        let d = build_summary_info(
+            DxfVersion::AC1018,
+            &info,
+            encoding_rs::WINDOWS_1252.into(),
+            None,
+        );
         assert_eq!(u16::from_le_bytes([d[0], d[1]]), 10);
         assert_eq!(&d[2..12], b"Kanal S\xfcd\0");
+        let created_at = 12 + 7 * 3 + 8;
+        assert_eq!(
+            i32::from_le_bytes(d[created_at..created_at + 4].try_into().unwrap()),
+            2_451_544
+        );
+        assert_eq!(
+            i32::from_le_bytes(d[created_at + 4..created_at + 8].try_into().unwrap()),
+            21_600_000
+        );
+        let modified_at = created_at + 8;
+        assert_eq!(
+            i32::from_le_bytes(d[modified_at..modified_at + 4].try_into().unwrap()),
+            2_451_545
+        );
+        assert_eq!(
+            i32::from_le_bytes(d[modified_at + 4..modified_at + 8].try_into().unwrap()),
+            64_800_000
+        );
         // Seven empty strings, 24 bytes of timers, then one property (the empty pair is skipped)
         let count_at = 12 + 7 * 3 + 24;
         assert_eq!(u16::from_le_bytes([d[count_at], d[count_at + 1]]), 1);
         assert_eq!(&d[count_at + 2..count_at + 9], b"\x05\0Plan\0");
         assert_eq!(d.len(), count_at + 2 + 7 + 6 + 8);
         // R2007+: UTF-16LE, count in code units
-        let d = build_summary_info(DxfVersion::AC1021, &info, encoding_rs::WINDOWS_1252.into());
+        let d = build_summary_info(
+            DxfVersion::AC1021,
+            &info,
+            encoding_rs::WINDOWS_1252.into(),
+            None,
+        );
         assert_eq!(u16::from_le_bytes([d[0], d[1]]), 10);
         assert_eq!(u16::from_le_bytes([d[16], d[17]]), 0xfc);
+    }
+
+    #[test]
+    fn test_build_summary_info_preserves_source_timestamp_pairs_until_edit() {
+        let pair = |data: &[u8], index: usize| {
+            let offset = 8 * 3 + 8 + index * 8;
+            (
+                i32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()),
+                i32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap()),
+            )
+        };
+
+        for (date, source_pair) in [
+            (None, (0, 0)),
+            (Some(42.0 - 1.0 / 86_400_000.0), (42, -1)),
+            (Some(42.0 + 86_400_001.0 / 86_400_000.0), (42, 86_400_001)),
+        ] {
+            let info = SummaryInfo {
+                created_date_julian: date,
+                ..SummaryInfo::default()
+            };
+            let data = build_summary_info(
+                DxfVersion::AC1018,
+                &info,
+                encoding_rs::WINDOWS_1252.into(),
+                Some([source_pair, (0, 0)]),
+            );
+            assert_eq!(pair(&data, 0), source_pair);
+        }
+
+        // Once the native date changes, use the edited value instead of the
+        // retained source pair and normalize its millisecond component.
+        let info = SummaryInfo {
+            created_date_julian: Some(100.25),
+            ..SummaryInfo::default()
+        };
+        let data = build_summary_info(
+            DxfVersion::AC1018,
+            &info,
+            encoding_rs::WINDOWS_1252.into(),
+            Some([(42, -1), (0, 0)]),
+        );
+        assert_eq!(pair(&data, 0), (100, 21_600_000));
     }
 
     #[test]

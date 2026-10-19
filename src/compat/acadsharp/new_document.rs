@@ -22,6 +22,7 @@ use crate::CadDocument;
 /// receives the header's initial handle seed (1).
 pub fn new_document() -> CadDocument {
     let mut doc = CadDocument::new_without_defaults();
+    doc.header = super::header::new_header();
     create_defaults(&mut doc);
     // Native DWG writers require class numbers for Material/TableStyle/etc.
     // These are a writer registry, separate from the empty source class list

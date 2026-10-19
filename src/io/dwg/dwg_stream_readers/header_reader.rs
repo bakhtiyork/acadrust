@@ -362,7 +362,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     }
 
     h.display_silhouette = r.read_bit();
-    let _ = r.read_bit(); // PELLIPSE
+    h.create_ellipse_as_polyline = r.read_bit(); // PELLIPSE
     h.proxy_graphics = r.read_bit_short();
 
     if r13_14_only(v) {
@@ -413,7 +413,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     h.spline_type = r.read_bit_short();
     h.shade_edge = r.read_bit_short();
     h.shade_diffuse = r.read_bit_short();
-    let _ = r.read_bit_short(); // UNITMODE
+    h.unit_mode = r.read_bit_short(); // UNITMODE
     h.max_active_viewports = r.read_bit_short();
     h.isolines = r.read_bit_short();
     h.multiline_justification = r.read_bit_short();
@@ -464,6 +464,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     h.total_editing_time = day_ms_to_timespan(ted, tems);
     let (ued, uems) = r.read_timespan();
     h.user_elapsed_time = day_ms_to_timespan(ued, uems);
+    h.dwg_timestamps = Some([(cd, cms), (ud, ums), (ted, tems), (ued, uems)]);
 
     // ── Current entity color ──
     h.current_entity_color = r.read_cm_color();
@@ -472,6 +473,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     // HANDSEED is written to the main stream (not the handle sub-stream),
     // so we must read it inline from the main stream.
     h.handle_seed = r.read_handle_inline();
+    h.source_handle_seed = Some(h.handle_seed);
 
     // ── Style/layer/linetype handles ──
     h.current_layer_handle = Handle::new(r.read_handle());
@@ -501,20 +503,20 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     h.paper_space_ucs_y_axis = r.read_3bit_double();
 
     // UCSNAME (PSPACE)
-    let _ = r.read_handle();
+    h.paper_space_ucs_handle = Handle::new(r.read_handle());
 
     if r2000_plus(v) {
         h.paper_ucs_ortho_ref = Handle::new(r.read_handle());
         h.paper_ucs_ortho_view = r.read_bit_short();
-        let _ = r.read_handle(); // PUCSBASE
+        h.paper_space_ucs_base_handle = Handle::new(r.read_handle()); // PUCSBASE
 
         // Paper space orthographic origins (6 × 3BD)
-        let _ = r.read_3bit_double(); // PUCSORGTOP
-        let _ = r.read_3bit_double(); // PUCSORGBOTTOM
-        let _ = r.read_3bit_double(); // PUCSORGLEFT
-        let _ = r.read_3bit_double(); // PUCSORGRIGHT
-        let _ = r.read_3bit_double(); // PUCSORGFRONT
-        let _ = r.read_3bit_double(); // PUCSORGBACK
+        h.paper_space_orthographic_top_origin = r.read_3bit_double();
+        h.paper_space_orthographic_bottom_origin = r.read_3bit_double();
+        h.paper_space_orthographic_left_origin = r.read_3bit_double();
+        h.paper_space_orthographic_right_origin = r.read_3bit_double();
+        h.paper_space_orthographic_front_origin = r.read_3bit_double();
+        h.paper_space_orthographic_back_origin = r.read_3bit_double();
     }
 
     // ── Model space extents/limits/UCS ──
@@ -529,20 +531,20 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     h.model_space_ucs_y_axis = r.read_3bit_double();
 
     // UCSNAME (MSPACE)
-    let _ = r.read_handle();
+    h.model_space_ucs_handle = Handle::new(r.read_handle());
 
     if r2000_plus(v) {
         h.ucs_ortho_ref = Handle::new(r.read_handle());
         h.ucs_ortho_view = r.read_bit_short();
-        let _ = r.read_handle(); // UCSBASE
+        h.model_space_ucs_base_handle = Handle::new(r.read_handle()); // UCSBASE
 
         // Model space orthographic origins (6 × 3BD)
-        let _ = r.read_3bit_double(); // UCSORGTOP
-        let _ = r.read_3bit_double(); // UCSORGBOTTOM
-        let _ = r.read_3bit_double(); // UCSORGLEFT
-        let _ = r.read_3bit_double(); // UCSORGRIGHT
-        let _ = r.read_3bit_double(); // UCSORGFRONT
-        let _ = r.read_3bit_double(); // UCSORGBACK
+        h.model_space_orthographic_top_origin = r.read_3bit_double();
+        h.model_space_orthographic_bottom_origin = r.read_3bit_double();
+        h.model_space_orthographic_left_origin = r.read_3bit_double();
+        h.model_space_orthographic_right_origin = r.read_3bit_double();
+        h.model_space_orthographic_front_origin = r.read_3bit_double();
+        h.model_space_orthographic_back_origin = r.read_3bit_double();
 
         // DIMPOST, DIMAPOST
         h.dim_post = r.read_variable_text();
@@ -574,7 +576,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         h.dim_alt_tolerance_zero_suppression = r.read_byte() as i16;
         h.dim_alt_tolerance_zero_tight = r.read_byte() as i16;
         h.dim_text_above = r.read_byte() as i16;
-        let _ = r.read_bit_short(); // DIMUNIT
+        h.dim_unit = r.read_bit_short();
         h.dim_angular_decimal_places = r.read_bit_short();
         h.dim_decimal_places = r.read_bit_short();
         h.dim_tolerance_decimal_places = r.read_bit_short();
@@ -618,7 +620,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
     }
 
     if r2007_plus(v) {
-        let _ = r.read_bit_short(); // DIMARCSYM
+        h.dim_arc_length_symbol_position = r.read_bit_short();
     }
 
     // ── Dimension sizes (Common) ──
@@ -676,30 +678,30 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         h.dim_alt_tolerance_zero_suppression = r.read_bit_short();
         h.dim_alt_tolerance_zero_tight = r.read_bit_short();
         h.dim_user_positioned_text = r.read_bit();
-        h.dim_fit = r.read_bit_short();
+        h.dim_text_arrow_fit = r.read_bit_short();
     }
 
     // R2007+: DIMFXLON
     if r2007_plus(v) {
-        let _ = r.read_bit(); // DimensionIsExtensionLineLengthFixed
+        h.dim_extension_line_length_fixed = r.read_bit();
     }
 
     // R2010+: extra dimension fields
     if r2010_plus(v) {
-        let _ = r.read_bit(); // DIMTXTDIRECTION
-        let _ = r.read_bit_double(); // DIMALTMZF
-        let _ = r.read_variable_text(); // DIMALTMZS
-        let _ = r.read_bit_double(); // DIMMZF
-        let _ = r.read_variable_text(); // DIMMZS
+        h.dim_text_direction = if r.read_bit() { 1 } else { 0 };
+        h.dim_alt_mzf = r.read_bit_double();
+        h.dim_alt_mzs = Some(r.read_variable_text());
+        h.dim_mzf = r.read_bit_double();
+        h.dim_mzs = Some(r.read_variable_text());
     }
 
     // R2000+ dimension handles
     if r2000_plus(v) {
         h.dim_text_style_handle = Handle::new(r.read_handle());
-        let _ = r.read_handle(); // DIMLDRBLK
-        let _ = r.read_handle(); // DIMBLK
-        let _ = r.read_handle(); // DIMBLK1
-        let _ = r.read_handle(); // DIMBLK2
+        h.dim_leader_arrow_block_handle = Handle::new(r.read_handle());
+        h.dim_arrow_block_handle = Handle::new(r.read_handle());
+        h.dim_arrow_block1_handle = Handle::new(r.read_handle());
+        h.dim_arrow_block2_handle = Handle::new(r.read_handle());
     }
 
     // R2007+ dimension linetype handles
@@ -738,8 +740,8 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
 
     // R2000+ dictionaries and flags
     if r2000_plus(v) {
-        let _ = r.read_bit_short(); // TSTACKALIGN
-        let _ = r.read_bit_short(); // TSTACKSIZE
+        h.stacked_text_alignment = r.read_bit_short();
+        h.stacked_text_size_percentage = r.read_bit_short();
 
         h.hyperlink_base = r.read_variable_text();
         h.stylesheet = r.read_variable_text();
@@ -848,7 +850,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
         let _ = r.read_handle(); // INTERFEREVPVS
         let _ = r.read_handle(); // DRAGVS
 
-        let _ = r.read_byte(); // CSHADOW
+        h.shadow_mode = r.read_byte();
         h.shadow_plane_location = r.read_bit_double();
     }
 
@@ -875,6 +877,7 @@ fn read_header_fields(r: &mut SectionReader, v: DxfVersion, h: &mut HeaderVariab
 mod tests {
     use super::*;
     use crate::io::dwg::dwg_stream_writers::header_writer;
+    use crate::types::Vector3;
 
     #[test]
     fn test_header_roundtrip_r2000() {
@@ -968,6 +971,68 @@ mod tests {
         assert!((read.text_height - original.text_height).abs() < 1e-10);
         assert_eq!(read.attribute_visibility, original.attribute_visibility);
         assert_eq!(read.current_layer_handle, original.current_layer_handle);
+    }
+
+    #[test]
+    fn test_header_roundtrip_retained_r2010_fields() {
+        let mut original = HeaderVariables::default();
+        original.create_ellipse_as_polyline = true;
+        original.unit_mode = 1;
+        original.paper_space_ucs_handle = Handle::new(0x31);
+        original.paper_space_ucs_base_handle = Handle::new(0x32);
+        original.model_space_ucs_handle = Handle::new(0x33);
+        original.model_space_ucs_base_handle = Handle::new(0x34);
+        original.paper_space_orthographic_top_origin = Vector3::new(1.0, 2.0, 3.0);
+        original.model_space_orthographic_back_origin = Vector3::new(4.0, 5.0, 6.0);
+        original.dim_arc_length_symbol_position = 2;
+        original.dim_text_arrow_fit = 4;
+        original.dim_extension_line_length_fixed = true;
+        original.dim_text_direction = 1;
+        original.dim_alt_mzf = 0.25;
+        original.dim_alt_mzs = Some(String::new());
+        original.dim_mzf = 0.5;
+        original.dim_mzs = Some("suffix".to_string());
+        original.dim_text_style_handle = Handle::new(0x35);
+        original.dim_leader_arrow_block_handle = Handle::new(0x36);
+        original.dim_arrow_block_handle = Handle::new(0x37);
+        original.dim_arrow_block1_handle = Handle::new(0x38);
+        original.dim_arrow_block2_handle = Handle::new(0x39);
+        original.stacked_text_alignment = 2;
+        original.stacked_text_size_percentage = 80;
+        original.shadow_mode = 3;
+
+        let written = header_writer::write_header(DxfVersion::AC1024, &original, 0);
+        let read = read_header(&written, DxfVersion::AC1024, 0).unwrap();
+
+        assert_eq!(read.create_ellipse_as_polyline, original.create_ellipse_as_polyline);
+        assert_eq!(read.unit_mode, original.unit_mode);
+        assert_eq!(read.paper_space_ucs_handle, original.paper_space_ucs_handle);
+        assert_eq!(read.paper_space_ucs_base_handle, original.paper_space_ucs_base_handle);
+        assert_eq!(read.model_space_ucs_handle, original.model_space_ucs_handle);
+        assert_eq!(read.model_space_ucs_base_handle, original.model_space_ucs_base_handle);
+        assert_eq!(read.paper_space_orthographic_top_origin, original.paper_space_orthographic_top_origin);
+        assert_eq!(read.model_space_orthographic_back_origin, original.model_space_orthographic_back_origin);
+        assert_eq!(read.dim_arc_length_symbol_position, original.dim_arc_length_symbol_position);
+        assert_eq!(read.dim_text_arrow_fit, original.dim_text_arrow_fit);
+        assert_eq!(read.dim_extension_line_length_fixed, original.dim_extension_line_length_fixed);
+        assert_eq!(read.dim_text_direction, original.dim_text_direction);
+        assert!((read.dim_alt_mzf - original.dim_alt_mzf).abs() < 1e-10);
+        assert_eq!(read.dim_alt_mzs, original.dim_alt_mzs);
+        assert!((read.dim_mzf - original.dim_mzf).abs() < 1e-10);
+        assert_eq!(read.dim_mzs, original.dim_mzs);
+        assert_eq!(read.dim_leader_arrow_block_handle, original.dim_leader_arrow_block_handle);
+        assert_eq!(read.dim_arrow_block_handle, original.dim_arrow_block_handle);
+        assert_eq!(read.dim_arrow_block1_handle, original.dim_arrow_block1_handle);
+        assert_eq!(read.dim_arrow_block2_handle, original.dim_arrow_block2_handle);
+        assert_eq!(read.stacked_text_alignment, original.stacked_text_alignment);
+        assert_eq!(read.stacked_text_size_percentage, original.stacked_text_size_percentage);
+        assert_eq!(read.shadow_mode, original.shadow_mode);
+
+        let mut r14_original = HeaderVariables::default();
+        r14_original.dim_unit = 7;
+        let r14_written = header_writer::write_header(DxfVersion::AC1014, &r14_original, 0);
+        let r14_read = read_header(&r14_written, DxfVersion::AC1014, 0).unwrap();
+        assert_eq!(r14_read.dim_unit, r14_original.dim_unit);
     }
 
     #[test]

@@ -718,6 +718,28 @@ fn read_t16(cur: &mut &[u8], utf16: bool, encoding: crate::io::dxf::code_page::L
     }
 }
 
+/// Read one raw eight-byte SummaryInfo date as its source day/millisecond pair.
+///
+/// SummaryInfo dates are byte-aligned raw longs (unlike the bit-coded header
+/// dates): a signed Julian day followed by signed milliseconds in that day.
+fn read_summary_julian_date(cur: &mut &[u8]) -> Option<(i32, i32)> {
+    if cur.len() < 8 {
+        *cur = &[];
+        return None;
+    }
+    let day = i32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
+    let milliseconds = i32::from_le_bytes([cur[4], cur[5], cur[6], cur[7]]);
+    *cur = &cur[8..];
+    Some((day, milliseconds))
+}
+
+fn summary_julian_from_day_ms(day: i32, milliseconds: i32) -> Option<f64> {
+    // Empty SummaryInfo records encode absent dates as an all-zero pair. Keep
+    // the raw pair separately so a source all-zero value can still round-trip.
+    (day != 0 || milliseconds != 0)
+        .then(|| day as f64 + milliseconds as f64 / 86_400_000.0)
+}
+
 fn decode_field_xdata(document: &mut crate::document::CadDocument) {
     let wide = document.version >= crate::types::DxfVersion::AC1021;
     let fields: Vec<_> = document
@@ -781,11 +803,15 @@ fn decode_block_units_xdata(document: &mut crate::document::CadDocument) {
 }
 
 /// Parse the decompressed `AcDb:SummaryInfo` section (R2004+): eight fixed
+/// strings, a total-edit timer, two raw dates, and custom properties.
 fn parse_summary_info(
     buf: &[u8],
     utf16: bool,
     encoding: crate::io::dxf::code_page::LegacyEncoding,
-) -> crate::document::SummaryInfo {
+) -> (
+    crate::document::SummaryInfo,
+    Option<[(i32, i32); 2]>,
+) {
     let mut cur: &[u8] = buf;
     let mut si = crate::document::SummaryInfo {
         title: read_t16(&mut cur, utf16, encoding),
@@ -796,13 +822,30 @@ fn parse_summary_info(
         last_saved_by: read_t16(&mut cur, utf16, encoding),
         revision_number: read_t16(&mut cur, utf16, encoding),
         hyperlink_base: read_t16(&mut cur, utf16, encoding),
+        created_date_julian: None,
+        modified_date_julian: None,
         custom_properties: Vec::new(),
     };
-    // TDINDWG, TDCREATE, TDUPDATE — each a TIMERLL (2×u32 = 8 bytes).
-    if cur.len() >= 24 {
-        cur = &cur[24..];
-    }
-    if cur.len() >= 2 {
+    // TDINDWG is a TIMERLL (2×u32 = 8 bytes), followed by two raw eight-byte
+    // Julian dates (day + milliseconds). Keep the entire fixed prefix aligned
+    // before attempting the custom-property count on malformed sections.
+    let timestamps = if cur.len() >= 24 {
+        cur = &cur[8..];
+        let created = read_summary_julian_date(&mut cur);
+        let modified = read_summary_julian_date(&mut cur);
+        if let Some((day, milliseconds)) = created {
+            si.created_date_julian = summary_julian_from_day_ms(day, milliseconds);
+        }
+        if let Some((day, milliseconds)) = modified {
+            si.modified_date_julian = summary_julian_from_day_ms(day, milliseconds);
+        }
+        created.zip(modified).map(|(created, modified)| [created, modified])
+    } else {
+        None
+    };
+    // The timer and date prefix is mandatory. If it is truncated, do not
+    // reinterpret its bytes as a custom-property count.
+    if timestamps.is_some() && cur.len() >= 2 {
         let n = u16::from_le_bytes([cur[0], cur[1]]) as usize;
         cur = &cur[2..];
         for _ in 0..n.min(256) {
@@ -814,7 +857,7 @@ fn parse_summary_info(
             si.custom_properties.push((tag, val));
         }
     }
-    si
+    (si, timestamps)
 }
 
 pub struct DwgReader<R: Read + Seek> {
@@ -1257,6 +1300,7 @@ impl<R: Read + Seek> DwgReader<R> {
                 ),
                 Err(error) => return Err(error),
             }
+            document.header.dwg_template_data = Some(template_buf.into());
         }
         self.report_progress(40);
 
@@ -1476,7 +1520,9 @@ impl<R: Read + Seek> DwgReader<R> {
                 .map(|v| v.r2007_plus())
                 .unwrap_or(true);
             let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page);
-            document.summary_info = parse_summary_info(&buf, utf16, encoding);
+            let (summary_info, timestamps) = parse_summary_info(&buf, utf16, encoding);
+            document.summary_info = summary_info;
+            document.dwg_summary_timestamps = timestamps;
         }
 
         // R2000/R14 down-saved gradient hatches store their gradient in the
@@ -1546,7 +1592,9 @@ impl<R: Read + Seek> DwgReader<R> {
                 .map(|v| v.r2007_plus())
                 .unwrap_or(true);
             let encoding = crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page);
-            document.summary_info = parse_summary_info(&buf, utf16, encoding);
+            let (summary_info, timestamps) = parse_summary_info(&buf, utf16, encoding);
+            document.summary_info = summary_info;
+            document.dwg_summary_timestamps = timestamps;
         }
 
         // Transfer reader notifications to the document so callers can

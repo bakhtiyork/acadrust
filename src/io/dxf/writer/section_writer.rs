@@ -347,9 +347,16 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             // multiline text of an ATTRIB / ATTDEF only from a file whose
             // maintenance version is that recent (0, 4, 100 and 200 show the
             // value on one line with a literal `\P`).
-            self.write_header_variable("$ACADMAINTVER", |w| w.write_i32(90, 377))?;
+            let maintenance = if hdr.maintenance_version != 0
+                || hdr.dxf_source_variables.as_ref().is_some_and(|vars| vars.contains("$ACADMAINTVER"))
+            {
+                hdr.maintenance_version
+            } else {
+                377
+            };
+            self.write_header_variable("$ACADMAINTVER", |w| w.write_i32(90, maintenance))?;
         } else if self.dxf_version >= DxfVersion::AC1015 {
-            self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, 0))?;
+            self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, hdr.maintenance_version as i16))?;
         }
         self.write_header_variable("$DWGCODEPAGE", |w| w.write_string(3, &hdr.code_page))?;
 
@@ -479,6 +486,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         })?;
         self.write_header_variable("$DISPSILH", |w| {
             w.write_i16(70, if hdr.display_silhouette { 1 } else { 0 })
+        })?;
+        self.write_header_variable("$PELLIPSE", |w| {
+            w.write_i16(70, if hdr.create_ellipse_as_polyline { 1 } else { 0 })
         })?;
         self.write_header_variable("$LWDISPLAY", |w| w.write_bool(290, hdr.lineweight_display))?;
 
@@ -637,7 +647,24 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$DIMALTTZ", |w| {
             w.write_i16(70, hdr.dim_alt_tolerance_zero_tight)
         })?;
-        self.write_header_variable("$DIMATFIT", |w| w.write_i16(70, hdr.dim_fit))?;
+        self.write_header_variable("$DIMATFIT", |w| w.write_i16(70, hdr.dim_text_arrow_fit))?;
+        self.write_header_variable("$DIMFIT", |w| w.write_i16(70, hdr.dim_fit))?;
+        self.write_header_variable("$DIMALTMZF", |w| w.write_double(40, hdr.dim_alt_mzf))?;
+        self.write_header_variable("$DIMALTMZS", |w| {
+            w.write_string(6, hdr.dim_alt_mzs.as_deref().unwrap_or(""))
+        })?;
+        self.write_header_variable("$DIMARCSYM", |w| {
+            w.write_i16(70, hdr.dim_arc_length_symbol_position)
+        })?;
+        self.write_header_variable("$DIMFXLON", |w| {
+            w.write_i16(70, if hdr.dim_extension_line_length_fixed { 1 } else { 0 })
+        })?;
+        self.write_header_variable("$DIMTXTDIRECTION", |w| w.write_i16(70, hdr.dim_text_direction))?;
+        self.write_header_variable("$DIMUNIT", |w| w.write_i16(70, hdr.dim_unit))?;
+        self.write_header_variable("$DIMMZF", |w| w.write_double(40, hdr.dim_mzf))?;
+        self.write_header_variable("$DIMMZS", |w| {
+            w.write_string(6, hdr.dim_mzs.as_deref().unwrap_or(""))
+        })?;
         self.write_header_variable("$DIMDSEP", |w| {
             w.write_i16(70, hdr.dim_decimal_separator as i16)
         })?;
@@ -646,6 +673,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$DIMLWD", |w| w.write_i16(70, hdr.dim_line_weight))?;
         self.write_header_variable("$DIMLWE", |w| w.write_i16(70, hdr.dim_ext_line_weight))?;
         self.write_header_variable("$DIMTFAC", |w| w.write_double(40, hdr.dim_tolerance_scale))?;
+        self.write_header_variable("$DIMTXSTY", |w| w.write_string(7, &hdr.dim_text_style_name))?;
+        self.write_header_variable("$DIMLTYPE", |w| w.write_string(6, &hdr.dim_linetype_name))?;
+        self.write_header_variable("$DIMLTEX1", |w| w.write_string(6, &hdr.dim_linetype1_name))?;
+        self.write_header_variable("$DIMLTEX2", |w| w.write_string(6, &hdr.dim_linetype2_name))?;
         if self.dxf_version >= DxfVersion::AC1021 {
             self.write_header_variable("$DIMFXL", |w| {
                 w.write_double(40, hdr.dim_fixed_ext_line_length)
@@ -712,6 +743,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.write_header_variable("$INTERFERECOLOR", |w| {
                 w.write_i16(62, hdr.interference_color.approximate_index())
             })?;
+            self.write_header_variable("$CSHADOW", |w| w.write_byte(280, hdr.shadow_mode))?;
         }
         self.write_header_variable("$SPLINETYPE", |w| w.write_i16(70, hdr.spline_type))?;
         self.write_header_variable("$SPLINESEGS", |w| w.write_i16(70, hdr.spline_segments))?;
@@ -772,9 +804,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
 
         // === UCS ===
-        if let Some(state) = &hdr.legacy {
-            self.write_header_variable("$UNITMODE", |w| w.write_i16(70, state.unit_mode))?;
-        }
+        let unit_mode = hdr.legacy.as_ref().map_or(hdr.unit_mode, |state| state.unit_mode);
+        self.write_header_variable("$UNITMODE", |w| w.write_i16(70, unit_mode))?;
+        self.write_header_variable("$UCSBASE", |w| w.write_string(2, &hdr.ucs_base))?;
+        self.write_header_variable("$PUCSBASE", |w| {
+            w.write_string(2, &hdr.paper_space_ucs_base_name)
+        })?;
+        self.write_header_variable("$UCSNAME", |w| {
+            w.write_string(2, &hdr.model_space_ucs_name)
+        })?;
+        self.write_header_variable("$PUCSNAME", |w| {
+            w.write_string(2, &hdr.paper_space_ucs_name)
+        })?;
         self.write_header_variable("$UCSORG", |w| {
             let v = &hdr.model_space_ucs_origin;
             w.write_double(10, v.x)?;
@@ -792,6 +833,35 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             w.write_double(10, v.x)?;
             w.write_double(20, v.y)?;
             w.write_double(30, v.z)
+        })?;
+        for (name, value) in [
+            ("$UCSORGTOP", &hdr.model_space_orthographic_top_origin),
+            ("$UCSORGBOTTOM", &hdr.model_space_orthographic_bottom_origin),
+            ("$UCSORGLEFT", &hdr.model_space_orthographic_left_origin),
+            ("$UCSORGRIGHT", &hdr.model_space_orthographic_right_origin),
+            ("$UCSORGFRONT", &hdr.model_space_orthographic_front_origin),
+            ("$UCSORGBACK", &hdr.model_space_orthographic_back_origin),
+            ("$PUCSORG", &hdr.paper_space_ucs_origin),
+            ("$PUCSXDIR", &hdr.paper_space_ucs_x_axis),
+            ("$PUCSYDIR", &hdr.paper_space_ucs_y_axis),
+            ("$PUCSORGTOP", &hdr.paper_space_orthographic_top_origin),
+            ("$PUCSORGBOTTOM", &hdr.paper_space_orthographic_bottom_origin),
+            ("$PUCSORGLEFT", &hdr.paper_space_orthographic_left_origin),
+            ("$PUCSORGRIGHT", &hdr.paper_space_orthographic_right_origin),
+            ("$PUCSORGFRONT", &hdr.paper_space_orthographic_front_origin),
+            ("$PUCSORGBACK", &hdr.paper_space_orthographic_back_origin),
+        ] {
+            self.write_header_variable(name, |w| {
+                w.write_double(10, value.x)?;
+                w.write_double(20, value.y)?;
+                w.write_double(30, value.z)
+            })?;
+        }
+        self.write_header_variable("$UCSORTHOVIEW", |w| {
+            w.write_i16(70, hdr.ucs_ortho_view)
+        })?;
+        self.write_header_variable("$PUCSORTHOVIEW", |w| {
+            w.write_i16(70, hdr.paper_ucs_ortho_view)
         })?;
 
         self.writer.write_section_end()?;
