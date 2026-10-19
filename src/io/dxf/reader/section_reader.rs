@@ -8251,6 +8251,8 @@ impl<'a> SectionReader<'a> {
 
     fn read_geodata(&mut self) -> Result<GeoData> {
         let mut obj = GeoData::new();
+        obj.dxf_present_codes = Some(Vec::new());
+        obj.raw_dxf_definition = Some(String::new());
         let mut group = String::new();
         let mut owner_seen = false;
         let mut source_x = None;
@@ -8259,11 +8261,57 @@ impl<'a> SectionReader<'a> {
         let mut face_first = None;
         let mut face_second = None;
         let mut civil_mode = false;
+        let mut legacy_mesh_remaining = 0usize;
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
                 self.reader.push_back(pair);
                 break;
+            }
+            // R2009 uses 12/22 -> 13/23 for mesh pairs, whereas later
+            // versions use 13/23 -> 14/24. Consume only the actual pairs in
+            // the stream: an untrusted count never drives allocation or reads.
+            if obj.version == 1 && legacy_mesh_remaining > 0 {
+                match pair.code {
+                    12 => source_x = pair.as_double(),
+                    22 => source_y = pair.as_double(),
+                    13 => destination_x = pair.as_double(),
+                    23 => {
+                        if let (Some(x), Some(y), Some(u), Some(v)) = (
+                            source_x.take(),
+                            source_y.take(),
+                            destination_x.take(),
+                            pair.as_double(),
+                        ) {
+                            obj.mesh_points.push(GeoDataMeshPoint {
+                                source: Vector2::new(x, y),
+                                destination: Vector2::new(u, v),
+                            });
+                        }
+                        legacy_mesh_remaining -= 1;
+                    }
+                    _ => legacy_mesh_remaining = 0,
+                }
+                if matches!(pair.code, 12 | 22 | 13 | 23) {
+                    continue;
+                }
+            }
+            if matches!(
+                pair.code,
+                90 | 70 | 91 | 92 | 11 | 21 | 31 | 12 | 22 | 52 | 210 | 220 | 230 | 141
+            ) {
+                let codes = obj.dxf_present_codes.as_mut().expect("DXF source metadata");
+                if !codes.contains(&pair.code) {
+                    codes.push(pair.code);
+                }
+            }
+            if matches!(pair.code, 301 | 303) {
+                let raw = pair.raw_value_string.as_ref().unwrap_or(&pair.value_string);
+                let definition = obj.raw_dxf_definition.as_mut().expect("DXF definition");
+                if pair.code == 301 {
+                    definition.clear();
+                }
+                definition.push_str(raw);
             }
             match pair.code {
                 3 if pair.value_string == "CIVIL3D_DATA_BEGIN" => {
@@ -8293,6 +8341,15 @@ impl<'a> SectionReader<'a> {
                 10 => obj.design_point.x = pair.as_double().unwrap_or(obj.design_point.x),
                 20 => obj.design_point.y = pair.as_double().unwrap_or(obj.design_point.y),
                 30 => obj.design_point.z = pair.as_double().unwrap_or(obj.design_point.z),
+                11 if obj.version == 1 => {
+                    obj.obsolete_observation_point.x = pair.as_double().unwrap_or(0.0)
+                }
+                21 if obj.version == 1 => {
+                    obj.obsolete_observation_point.y = pair.as_double().unwrap_or(0.0)
+                }
+                31 if obj.version == 1 => {
+                    obj.obsolete_observation_point.z = pair.as_double().unwrap_or(0.0)
+                }
                 11 => obj.reference_point.x = pair.as_double().unwrap_or(obj.reference_point.x),
                 21 => obj.reference_point.y = pair.as_double().unwrap_or(obj.reference_point.y),
                 31 => obj.reference_point.z = pair.as_double().unwrap_or(obj.reference_point.z),
@@ -8301,12 +8358,48 @@ impl<'a> SectionReader<'a> {
                 210 => obj.up_direction.x = pair.as_double().unwrap_or(obj.up_direction.x),
                 220 => obj.up_direction.y = pair.as_double().unwrap_or(obj.up_direction.y),
                 230 => obj.up_direction.z = pair.as_double().unwrap_or(obj.up_direction.z),
+                40 if obj.version == 1 => {
+                    obj.reference_point.y = pair.as_double().unwrap_or(obj.reference_point.y)
+                }
+                41 if obj.version == 1 => {
+                    obj.reference_point.x = pair.as_double().unwrap_or(obj.reference_point.x)
+                }
+                42 if obj.version == 1 => {
+                    obj.reference_point.z = pair.as_double().unwrap_or(obj.reference_point.z)
+                }
+                43 if obj.version == 1 => {
+                    obj.obsolete_scale_vector.x = pair.as_double().unwrap_or(1.0)
+                }
+                44 if obj.version == 1 => {
+                    obj.obsolete_scale_vector.y = pair.as_double().unwrap_or(1.0)
+                }
+                45 if obj.version == 1 => {
+                    obj.obsolete_scale_vector.z = pair.as_double().unwrap_or(1.0)
+                }
+                46 if obj.version == 1 => {
+                    obj.horizontal_unit_scale =
+                        pair.as_double().unwrap_or(obj.horizontal_unit_scale);
+                    obj.vertical_unit_scale = obj.horizontal_unit_scale;
+                }
+                52 if obj.version == 1 => {
+                    let angle =
+                        std::f64::consts::FRAC_PI_2 - pair.as_double().unwrap_or(0.0).to_radians();
+                    obj.north_direction = Vector2::new(angle.cos(), angle.sin());
+                }
+                93 if obj.version == 1 && !civil_mode => {
+                    legacy_mesh_remaining = pair.as_i32().unwrap_or(0).max(0) as usize;
+                }
                 40 => {
                     obj.horizontal_unit_scale =
                         pair.as_double().unwrap_or(obj.horizontal_unit_scale)
                 }
                 41 => obj.vertical_unit_scale = pair.as_double().unwrap_or(obj.vertical_unit_scale),
-                91 => obj.horizontal_units = pair.as_i32().unwrap_or(obj.horizontal_units),
+                91 => {
+                    obj.horizontal_units = pair.as_i32().unwrap_or(obj.horizontal_units);
+                    if obj.version == 1 {
+                        obj.vertical_units = obj.horizontal_units;
+                    }
+                }
                 92 => obj.vertical_units = pair.as_i32().unwrap_or(obj.vertical_units),
                 95 => {
                     obj.scale_estimation_method =

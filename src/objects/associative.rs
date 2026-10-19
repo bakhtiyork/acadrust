@@ -1384,6 +1384,11 @@ pub struct AssocDimensionAssociation {
     /// `AcDbOsnapPointRef` records; the on-disk continuation bit links records
     /// within the same slot.
     pub references: [Vec<AssocDimensionReference>; 4],
+    /// Original main-stream bytes and [start, end) bit positions at the first
+    /// reference. Shared immutable storage preserves bit-exact source provenance
+    /// without changing the typed references or duplicating the DWG record.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dwg_reference_stream: Option<(std::sync::Arc<[u8]>, i64, i64)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

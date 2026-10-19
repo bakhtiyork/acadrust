@@ -8,9 +8,9 @@
 
 use crate::objects::{
     BlockEvalValue, Dictionary, DictionaryWithDefault, DynamicBlockData, DynamicBlockObject,
-    GeoData, Group, ImageDefinition, ImageDefinitionReactor, Layout, MLineStyle, Material,
+    Group, ImageDefinition, ImageDefinitionReactor, Layout, MLineStyle, Material,
     MultiLeaderStyle, ObjectContextData, ObjectType, PlotSettings, Scale, SortEntitiesTable,
-    SpatialFilter, TableStyle, VisualStyle, XRecord,
+    TableStyle, VisualStyle, XRecord,
 };
 use crate::tables::TableEntry;
 use crate::types::{Color, Handle, Matrix4, Vector2, Vector3};
@@ -19,11 +19,16 @@ use std::collections::HashSet;
 
 use super::{color, handle, number, optional_handle, props, record, vec2, vec3};
 
+#[path = "geo_spatial.rs"]
+mod geo_spatial;
+#[path = "dimension_association.rs"]
+mod dimension_association;
+
 const UNLISTED: i64 = -999;
 
 /// Emit all non-entity objects.  The document map is handle keyed, but map
 /// iteration is intentionally not part of the dump contract, so sort first.
-pub(super) fn collect(doc: &crate::CadDocument, out: &mut Vec<Value>) {
+pub(super) fn collect(doc: &crate::CadDocument, reader: &str, out: &mut Vec<Value>) {
     let mut handles: Vec<Handle> = doc.objects.keys().copied().collect();
     handles.sort_unstable();
     let mut emitted = HashSet::with_capacity(handles.len());
@@ -32,7 +37,7 @@ pub(super) fn collect(doc: &crate::CadDocument, out: &mut Vec<Value>) {
         let Some(object) = doc.objects.get(&object_handle) else {
             continue;
         };
-        if let Some(value) = dump_object(doc, object_handle, object) {
+        if let Some(value) = dump_object(doc, reader, object_handle, object) {
             out.push(enrich_object_record(
                 doc,
                 object_handle,
@@ -87,6 +92,7 @@ pub(super) fn collect(doc: &crate::CadDocument, out: &mut Vec<Value>) {
 
 fn dump_object(
     _doc: &crate::CadDocument,
+    reader: &str,
     map_handle: Handle,
     object: &ObjectType,
 ) -> Option<Value> {
@@ -100,14 +106,14 @@ fn dump_object(
         ObjectType::MultiLeaderStyle(value) => dump_mleader_style(map_handle, value),
         ObjectType::TableStyle(value) => dump_table_style(map_handle, value),
         ObjectType::Scale(value) => dump_scale(map_handle, value),
-        ObjectType::VisualStyle(value) => dump_visual_style(map_handle, value),
+        ObjectType::VisualStyle(value) => dump_visual_style(map_handle, value, reader),
         ObjectType::Material(value) => dump_material(map_handle, value),
         ObjectType::ImageDefinition(value) => dump_image_definition(map_handle, value),
         ObjectType::ImageDefinitionReactor(value) => {
             dump_image_definition_reactor(map_handle, value)
         }
-        ObjectType::GeoData(value) => dump_geo_data(map_handle, value),
-        ObjectType::SpatialFilter(value) => dump_spatial_filter(map_handle, value),
+        ObjectType::GeoData(value) => geo_spatial::dump_geo_data(_doc, map_handle, value, reader),
+        ObjectType::SpatialFilter(value) => geo_spatial::dump_spatial_filter(map_handle, value, reader),
         ObjectType::RasterVariables(value) => dump_raster_variables(map_handle, value),
         ObjectType::BookColor(value) => dump_book_color(map_handle, value),
         ObjectType::PlaceHolder(value) => dump_placeholder(map_handle, value),
@@ -123,14 +129,19 @@ fn dump_object(
         ObjectType::TableContent(value) => dump_table_content(map_handle, value),
         ObjectType::ProxyObject(value) => dump_proxy_object(map_handle, value),
         ObjectType::UnderlayDefinition(value) => dump_underlay_definition(map_handle, value),
-        ObjectType::Associative(value) => dump_opaque_named(
-            map_handle,
-            value.owner,
-            &value.dxf_name,
-            &value.cpp_class_name,
-            &value.reactors,
-            value.xdictionary_handle,
-        ),
+        ObjectType::Associative(value) => match &value.data {
+            crate::objects::AssociativeData::DimensionAssociation(data) => {
+                dimension_association::dump_object(_doc, map_handle, value, data, reader)
+            }
+            _ => dump_opaque_named(
+                map_handle,
+                value.owner,
+                &value.dxf_name,
+                &value.cpp_class_name,
+                &value.reactors,
+                value.xdictionary_handle,
+            ),
+        },
         ObjectType::ClassObject(value) => dump_opaque_named(
             map_handle,
             value.owner,
@@ -781,7 +792,7 @@ fn dump_image_definition_reactor(handle_value: Handle, value: &ImageDefinitionRe
     )
 }
 
-fn dump_visual_style(handle_value: Handle, value: &VisualStyle) -> Value {
+fn dump_visual_style(handle_value: Handle, value: &VisualStyle, reader: &str) -> Value {
     let mut p = common(
         "VISUALSTYLE",
         UNLISTED,
@@ -790,43 +801,75 @@ fn dump_visual_style(handle_value: Handle, value: &VisualStyle) -> Value {
         Some(&value.reactors),
         value.xdictionary_handle,
     );
+    // ACadSharp DwgObjectReader.readVisualStyle reads only Name and Type.
+    // Project its constructor defaults here; the native property bag remains
+    // intact. The caller supplies provenance, independently of the filename.
+    let defaults = VisualStyle::new();
+    let data = if reader == "dwg" { &defaults } else { value };
     p.extend([
-        ("Brightness", number(property_double(value, 4, 0.6))),
-        ("Color", property_color(value, 6)),
-        ("Description", text(&value.description)),
-        ("DisplaySettings", int(value.style_type as i64)),
-        ("EdgeApplyStyleFlag", int(value.edge_model as i64)),
-        ("EdgeColor", int(value.edge_style as i64)),
-        ("EdgeCreaseAngle", number(property_double(value, 5, 30.0))),
-        ("EdgeIntersectionColor", property_color(value, 9)),
-        ("EdgeIntersectionLineType", int(property_int(value, 11, 1))),
-        ("EdgeIsolineCount", int(property_int(value, 18, 6))),
-        ("EdgeJitter", int(property_int(value, 19, 2))),
-        ("EdgeModifiers", int(value.face_modifier as i64)),
-        ("EdgeObscuredColor", property_color(value, 10)),
-        ("EdgeObscuredLineType", int(property_int(value, 20, 1))),
-        ("EdgeOverhang", int(property_int(value, 22, 5))),
-        ("EdgeSilhouetteColor", property_color(value, 15)),
-        ("EdgeSilhouetteWidth", int(property_int(value, 21, 2))),
-        ("EdgeStyle", int(value.edge_style as i64)),
-        ("EdgeStyleModel", int(value.edge_model as i64)),
-        ("EdgeWidth", int(property_int(value, 17, 1))),
-        ("FaceColorMode", int(value.face_color_mode as i64)),
-        ("FaceLightingModel", int(value.face_lighting_model as i64)),
+        ("Brightness", number(property_double(data, 26, 0.0))),
+        ("Color", property_color(data, 6)),
+        (
+            "Description",
+            if reader == "dwg" {
+                Value::Null
+            } else {
+                text(&value.description)
+            },
+        ),
+        ("DisplaySettings", int(property_int(data, 25, 0))),
+        (
+            "EdgeApplyStyleFlag",
+            int(if data.properties.len() == 24 {
+                match &data.properties[18].value {
+                    crate::objects::VisualStylePropertyValue::Short(v) => *v as i64,
+                    crate::objects::VisualStylePropertyValue::Long(v) => *v as i64,
+                    _ => 0,
+                }
+            } else {
+                0
+            }),
+        ),
+        (
+            "EdgeColor",
+            match property_value(data, 15) {
+                Some(crate::objects::VisualStylePropertyValue::Color(c)) => c
+                    .index()
+                    .map(|index| int(index as i64))
+                    .unwrap_or_else(|| text(super::UNMAPPED)),
+                _ => int(0),
+            },
+        ),
+        ("EdgeCreaseAngle", number(property_double(data, 13, 0.0))),
+        ("EdgeIntersectionColor", property_color(data, 9)),
+        ("EdgeIntersectionLineType", int(property_int(data, 12, 0))),
+        ("EdgeIsolineCount", int(property_int(data, 23, 0))),
+        ("EdgeJitter", int(property_int(data, 19, 0))),
+        ("EdgeModifiers", int(property_int(data, 14, 0))),
+        ("EdgeObscuredColor", property_color(data, 10)),
+        ("EdgeObscuredLineType", int(property_int(data, 11, 0))),
+        ("EdgeOverhang", int(property_int(data, 18, 0))),
+        ("EdgeSilhouetteColor", property_color(data, 20)),
+        ("EdgeSilhouetteWidth", int(property_int(data, 21, 0))),
+        ("EdgeStyle", int(data.edge_style as i64)),
+        ("EdgeStyleModel", int(data.edge_model as i64)),
+        ("EdgeWidth", int(property_int(data, 17, 0))),
+        ("FaceColorMode", int(data.face_color_mode as i64)),
+        ("FaceLightingModel", int(data.face_lighting_model as i64)),
         (
             "FaceLightingQuality",
-            int(value.face_lighting_quality as i64),
+            int(data.face_lighting_quality as i64),
         ),
-        ("FaceModifiers", int(value.face_modifier as i64)),
-        ("FaceOpacityLevel", number(property_double(value, 4, 0.6))),
-        ("FaceSpecularLevel", number(property_double(value, 5, 30.0))),
-        ("FaceStyleMonoColor", property_color(value, 6)),
-        ("HaloGap", int(property_int(value, 12, 1))),
-        ("InternalFlag", bool_value(value.internal_use_only)),
-        ("OpacityLevel", number(property_double(value, 13, 1.0))),
-        ("PrecisionFlag", bool_value(property_bool(value, 25, false))),
-        ("RasterFile", property_text(value, 26)),
-        ("ShadowType", int(property_int(value, 27, 0))),
+        ("FaceModifiers", int(data.face_modifier as i64)),
+        ("FaceOpacityLevel", number(property_double(data, 4, 0.0))),
+        ("FaceSpecularLevel", number(property_double(data, 5, 0.0))),
+        ("FaceStyleMonoColor", property_color(data, 6)),
+        ("HaloGap", int(property_int(data, 22, 0))),
+        ("InternalFlag", bool_value(data.internal_use_only)),
+        ("OpacityLevel", number(property_double(data, 16, 0.0))),
+        ("PrecisionFlag", bool_value(property_bool(data, 24, false))),
+        ("RasterFile", property_text(data, 54)),
+        ("ShadowType", int(property_int(data, 27, 0))),
         ("Type", int(value.style_type as i64)),
     ]);
     record(
@@ -841,6 +884,38 @@ fn property_value(
     value: &VisualStyle,
     index: usize,
 ) -> Option<&crate::objects::VisualStylePropertyValue> {
+    // Legacy records interleave the scalar fields and have a 24-value bag.
+    // Use the modern slot numbers at call sites without converting/cloning
+    // the native bag (conversion for writing also changes signed magnitudes).
+    let index = if value.properties.len() == 24 {
+        match index {
+            4 => 0,
+            5 => 1,
+            6 => 2,
+            9 => 3,
+            10 => 4,
+            11 => 5,
+            12 => 19,
+            13 => 6,
+            14 => 7,
+            15 => 8,
+            16 => 9,
+            17 => 10,
+            18 => 11,
+            19 => 12,
+            20 => 13,
+            21 => 14,
+            22 => 15,
+            23 => 16,
+            24 => 17,
+            25 => 20,
+            26 => 21,
+            27 => 22,
+            _ => return None,
+        }
+    } else {
+        index
+    };
     value.properties.get(index).map(|property| &property.value)
 }
 
@@ -875,14 +950,14 @@ fn property_bool(value: &VisualStyle, index: usize, fallback: bool) -> bool {
 fn property_text(value: &VisualStyle, index: usize) -> Value {
     match property_value(value, index) {
         Some(crate::objects::VisualStylePropertyValue::Text(value)) => text(value),
-        _ => Value::String(String::new()),
+        _ => Value::Null,
     }
 }
 
 fn property_color(value: &VisualStyle, index: usize) -> Value {
     match property_value(value, index) {
         Some(crate::objects::VisualStylePropertyValue::Color(value)) => color(*value),
-        _ => color(Color::ByLayer),
+        _ => color(Color::ByBlock),
     }
 }
 
@@ -1082,131 +1157,6 @@ fn matrix4(value: &Matrix4) -> Value {
             ("M32", number(value.m[3][2])),
             ("M33", number(value.m[3][3])),
         ],
-    )
-}
-
-fn dump_geo_data(handle_value: Handle, value: &GeoData) -> Value {
-    let mut p = common(
-        "GEODATA",
-        UNLISTED,
-        "AcDbGeoData",
-        None,
-        Some(&value.reactors),
-        value.xdictionary_handle,
-    );
-    p.extend([
-        (
-            "CoordinateProjectionRadius",
-            number(value.coordinate_projection_radius),
-        ),
-        (
-            "CoordinateSystemDefinition",
-            text(&value.coordinate_system_definition),
-        ),
-        ("CoordinatesType", int(value.coordinate_type as i64)),
-        ("DesignPoint", vec3(value.design_point)),
-        (
-            "EnableSeaLevelCorrection",
-            bool_value(value.sea_level_correction),
-        ),
-        (
-            "Faces",
-            Value::Array(
-                value
-                    .mesh_faces
-                    .iter()
-                    .map(|face| {
-                        props(
-                            "GeoData.GeoMeshFace",
-                            [
-                                ("Index1", int(face.first as i64)),
-                                ("Index2", int(face.second as i64)),
-                                ("Index3", int(face.third as i64)),
-                            ],
-                        )
-                    })
-                    .collect(),
-            ),
-        ),
-        ("GeoRssTag", text(&value.geo_rss_tag)),
-        ("HorizontalUnitScale", number(value.horizontal_unit_scale)),
-        ("HorizontalUnits", int(value.horizontal_units as i64)),
-        ("HostBlock", handle(value.host_block)),
-        ("NorthDirection", vec2(value.north_direction)),
-        (
-            "ObservationCoverageTag",
-            text(&value.observation_coverage_tag),
-        ),
-        ("ObservationFromTag", text(&value.observation_from_tag)),
-        ("ObservationToTag", text(&value.observation_to_tag)),
-        ("ReferencePoint", vec3(value.reference_point)),
-        (
-            "ScaleEstimationMethod",
-            int(value.scale_estimation_method as i64),
-        ),
-        ("SeaLevelElevation", number(value.sea_level_elevation)),
-        ("UpDirection", vec3(value.up_direction)),
-        ("UserSpecifiedScaleFactor", number(value.user_scale_factor)),
-        ("Version", int(value.version as i64)),
-        ("VerticalUnitScale", number(value.vertical_unit_scale)),
-        ("VerticalUnits", int(value.vertical_units as i64)),
-        (
-            "Points",
-            Value::Array(
-                value
-                    .mesh_points
-                    .iter()
-                    .map(|point| {
-                        props(
-                            "GeoData.GeoMeshPoint",
-                            [
-                                ("Destination", vec2(point.destination)),
-                                ("Source", vec2(point.source)),
-                            ],
-                        )
-                    })
-                    .collect(),
-            ),
-        ),
-    ]);
-    record(handle_value, "GeoData", value.owner, props("GeoData", p))
-}
-
-fn dump_spatial_filter(handle_value: Handle, value: &SpatialFilter) -> Value {
-    let mut p = common(
-        "SPATIAL_FILTER",
-        UNLISTED,
-        "AcDbSpatialFilter",
-        None,
-        None,
-        None,
-    );
-    p.extend([
-        ("BackDistance", number(value.back_clip.unwrap_or_default())),
-        (
-            "BoundaryPoints",
-            Value::Array(value.boundary_points.iter().copied().map(vec2).collect()),
-        ),
-        ("ClipBackPlane", bool_value(value.back_clip.is_some())),
-        ("ClipFrontPlane", bool_value(value.front_clip.is_some())),
-        ("DisplayBoundary", bool_value(value.display_enabled)),
-        (
-            "FrontDistance",
-            number(value.front_clip.unwrap_or_default()),
-        ),
-        ("InsertTransform", matrix4(&value.clip_bound_transform)),
-        (
-            "InverseInsertTransform",
-            matrix4(&value.inverse_block_transform),
-        ),
-        ("Normal", vec3(value.normal)),
-        ("Origin", vec3(value.origin)),
-    ]);
-    record(
-        handle_value,
-        "SpatialFilter",
-        value.owner,
-        props("SpatialFilter", p),
     )
 }
 

@@ -170,7 +170,7 @@ pub fn dump_document(doc: &CadDocument, file: &str, reader: &str) -> Value {
     let mut objects = Vec::new();
     tables::collect(doc, &mut objects);
     entities::collect(doc, &mut objects);
-    objects::collect(doc, &mut objects);
+    objects::collect(doc, reader, &mut objects);
     // A registered handle may be exposed through multiple model collections.
     // Prefer the first (concrete entity/table) representation over sidecar records.
     let mut sorted = BTreeMap::new();

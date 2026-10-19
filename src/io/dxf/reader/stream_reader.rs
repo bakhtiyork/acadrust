@@ -32,6 +32,11 @@ pub struct DxfCodePair {
     /// String representation of the value
     pub value_string: String,
 
+    /// Text before caret-escape decoding, when decoding changed the value.
+    /// Binary DXF strings and unchanged text use `None`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_value_string: Option<String>,
+
     /// Typed value (integer, double, or boolean)
     typed_value: CodePairValue,
 }
@@ -77,6 +82,7 @@ impl DxfCodePair {
             code,
             dxf_code,
             value_string,
+            raw_value_string: None,
             typed_value,
         }
     }
@@ -89,6 +95,7 @@ impl DxfCodePair {
             code,
             dxf_code,
             value_string,
+            raw_value_string: None,
             typed_value,
         }
     }
