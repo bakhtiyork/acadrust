@@ -79,13 +79,6 @@ impl<R: Read + Seek> DxfTextReader<R> {
                 }
             }
         };
-        // Characters outside the code page arrive as MIF escapes.
-        let line = if crate::io::dxf::code_page::has_legacy_escape(&line) {
-            crate::io::dxf::code_page::decode_legacy_escapes(&line)
-        } else {
-            line
-        };
-
         Ok(Some(line))
     }
 
@@ -144,12 +137,33 @@ impl<R: Read + Seek> DxfTextReader<R> {
             }
         };
 
+        // Preserve modeler lexical text before legacy decoding as well as caret
+        // decoding. Other entities retain their existing raw-text semantics.
+        let mut modeler_raw = None;
+        let value_line = if crate::io::dxf::code_page::has_legacy_escape(&value_line) {
+            let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&value_line);
+            if decoded != value_line
+                && matches!(code, 1 | 3)
+                && matches!(
+                    self.context.record_type.as_deref(),
+                    Some("3DSOLID" | "REGION" | "BODY")
+                )
+            {
+                modeler_raw = Some(value_line);
+            }
+            decoded
+        } else {
+            value_line
+        };
+
         // Process special character sequences in strings
         let value = self.process_string_value(&value_line);
 
         let changed = value != value_line;
         let mut pair = DxfCodePair::new(code, value);
-        if changed {
+        if modeler_raw.is_some() {
+            pair.raw_value_string = modeler_raw;
+        } else if changed {
             pair.raw_value_string = Some(value_line);
         }
         self.observe_pair(&pair, pair_offset);

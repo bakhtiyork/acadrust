@@ -987,6 +987,7 @@ fn explode_hatch(hatch: &Hatch) -> Vec<EntityType> {
                         start_parameter: ea_edge.start_angle,
                         end_parameter: ea_edge.end_angle,
                         normal,
+                        thickness: 0.0,
                     }));
                 }
                 BoundaryEdge::Spline(sp_edge) => {

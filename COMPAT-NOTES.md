@@ -36,6 +36,14 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | ACadSharp visibility DWG view | Project the visibility initialization bit as the final ChainActions value and leave Value281 false. | The C# DWG reader overwrites the inherited ChainActions bit and never assigns Value281; preserve both native bits. |
 | ACadSharp visibility DXF view | Expose the default GripId of zero while retaining the native source grip ID. | The C# visibility callback tries its entity-count mapping for code 93 before the inherited one-point mapping, consuming GripId without assignment. |
 
+| Ellipse thickness | Retain DXF group 39 in the ellipse model, write nonzero thickness, and preserve it when circles/arcs become ellipses. | Genuine discarded extrusion data; upstream-PR candidate. DWG ellipses have no thickness slot and retain zero. Coordinate decoding is unchanged. |
+| DXF modeler data | Preserve the explicit modeler version and Region/Body identifiers; accept plain numeric-header SAT alongside encoded SAT. Retain chunk lengths, original line endings, sparse lexical differences and stripped suffixes. | Genuine version/identifier/plain-SAT data-loss bugs; upstream-PR candidates. Compact source metadata reconstructs the source without copying the normalized payload. Native SAT remains normalized. |
+| DWG modeler provenance | Retain a shared immutable record buffer and bounded modeler offsets for Region/Solid3D/Body. | ACadSharp returns early for inline bodies and interprets raw wire types, scalar scales and silhouette gates differently. Source replay stays in compat and does not clone SAT/SAB buffers or scan the document. |
+| ACadSharp primitive getters | Expose signed ellipse rotation and negative arc sweep. | Match the reference getters without changing native coordinates or positive native arc sweep. |
+| ACadSharp spline view | Map retained tolerances, raw/derived flags, version-dependent knot parameterization and computed knot validity/closure/periodicity. | Reference fit-point Flags1 precedence and pre-R2013 scenario defaults belong only in the view; the native spline model is unchanged. |
+| ACadSharp mesh view | Map missing crease values to the reference reader's zero and retrieve UVW texture coordinates from the retained mesh XRecord. | Native optional crease and texture storage stay unchanged. |
+| ACadSharp modeler view | Project source SAT bytes/chunks, modeler version, base subclass marker, source point/wires/silhouettes, and the ACIS-only binary-signature getter. | Preserve C# inline-body early returns, raw wire bytes, scalar-scale parsing and DXF display-cache defaults only in compat. Native ASM/SAB recognition and richer cache data remain intact. |
+
 ## ACadSharp differential dump
 
 The optional `acadsharp-compat` feature exposes `compat::acadsharp` and the `acad-dump` binary:

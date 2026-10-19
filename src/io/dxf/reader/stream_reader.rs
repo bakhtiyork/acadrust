@@ -33,6 +33,7 @@ pub struct DxfCodePair {
     pub value_string: String,
 
     /// Text before caret-escape decoding, when decoding changed the value.
+    /// Modeler SAT chunks also preserve text before legacy-escape decoding.
     /// Binary DXF strings and unchanged text use `None`.
     #[cfg_attr(feature = "serde", serde(default))]
     pub raw_value_string: Option<String>,

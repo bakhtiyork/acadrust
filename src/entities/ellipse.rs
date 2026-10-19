@@ -19,6 +19,9 @@ pub struct Ellipse {
     pub start_parameter: f64,
     /// End parameter (2π = full ellipse)
     pub end_parameter: f64,
+    /// Extrusion thickness (DXF group 39; absent from the DWG ellipse layout).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub thickness: f64,
     /// Normal vector
     pub normal: Vector3,
 }
@@ -33,6 +36,7 @@ impl Ellipse {
             minor_axis_ratio: 0.5,
             start_parameter: 0.0,
             end_parameter: 2.0 * std::f64::consts::PI,
+            thickness: 0.0,
             normal: Vector3::UNIT_Z,
         }
     }

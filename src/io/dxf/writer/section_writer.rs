@@ -3896,6 +3896,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_point3d(11, ellipse.major_axis)?;
         self.writer.write_double(40, ellipse.minor_axis_ratio)?;
         self.write_normal(ellipse.normal)?;
+        if ellipse.thickness != 0.0 {
+            self.writer.write_double(39, ellipse.thickness)?;
+        }
         self.writer.write_double(41, ellipse.start_parameter)?;
         self.writer.write_double(42, ellipse.end_parameter)?;
         Ok(())
