@@ -116,6 +116,13 @@ fn create_defaults(doc: &mut CadDocument) {
     if let Some(ObjectType::MultiLeaderStyle(style)) = doc.objects.get_mut(&mleader_handle) {
         style.text_style_handle = Some(text_style);
         style.line_type_handle = Some(by_layer);
+        // The reference constructor leaves these enums at their zero values.
+        // Apply that policy only to this explicit compatibility constructor.
+        style.path_type = crate::objects::MultiLeaderPathType::Invisible;
+        style.text_left_attachment = crate::objects::TextAttachmentType::TopOfTopLine;
+        style.text_right_attachment = crate::objects::TextAttachmentType::TopOfTopLine;
+        style.text_top_attachment = crate::objects::TextAttachmentType::TopOfTopLine;
+        style.text_bottom_attachment = crate::objects::TextAttachmentType::TopOfTopLine;
     }
     add_object(
         doc,

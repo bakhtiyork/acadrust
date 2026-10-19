@@ -866,6 +866,30 @@ impl Default for MultiLeaderAnnotContext {
 // MultiLeader Entity
 // ============================================================================
 
+/// Bounded DXF field presence, independent of native constructor defaults.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MultiLeaderDxfSource {
+    codes: [u64; 6],
+}
+
+impl MultiLeaderDxfSource {
+    /// Whether a top-level source code was present (nested context is separate).
+    pub fn contains(&self, code: usize) -> bool {
+        self.codes
+            .get(code / 64)
+            .is_some_and(|bits| bits & (1 << (code % 64)) != 0)
+    }
+
+    pub(crate) fn insert(&mut self, code: i32) {
+        if let Ok(code) = usize::try_from(code) {
+            if let Some(bits) = self.codes.get_mut(code / 64) {
+                *bits |= 1 << (code % 64);
+            }
+        }
+    }
+}
+
 /// MultiLeader (MLEADER) entity.
 ///
 /// An advanced annotation object with multiple leader lines connecting to
@@ -888,9 +912,12 @@ impl Default for MultiLeaderAnnotContext {
 ///     Vector3::new(5.0, 5.0, 0.0),
 /// ]);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiLeader {
+    /// Source presence does not affect native drawing-state equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_source: Option<Box<MultiLeaderDxfSource>>,
     /// Common entity data.
     pub common: EntityCommon,
     /// Native DWG MLEADER version (expected value is 2 on R2010+).
@@ -983,10 +1010,55 @@ pub struct MultiLeader {
     pub extend_leader_to_text: bool,
 }
 
+impl PartialEq for MultiLeader {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.dwg_version == other.dwg_version
+            && self.style_handle == other.style_handle
+            && self.content_type == other.content_type
+            && self.context == other.context
+            && self.block_attributes == other.block_attributes
+            && self.arrowhead_overrides == other.arrowhead_overrides
+            && self.path_type == other.path_type
+            && self.line_color == other.line_color
+            && self.line_type_handle == other.line_type_handle
+            && self.line_weight == other.line_weight
+            && self.enable_landing == other.enable_landing
+            && self.enable_dogleg == other.enable_dogleg
+            && self.dogleg_length == other.dogleg_length
+            && self.arrowhead_handle == other.arrowhead_handle
+            && self.arrowhead_size == other.arrowhead_size
+            && self.text_style_handle == other.text_style_handle
+            && self.text_color == other.text_color
+            && self.text_frame == other.text_frame
+            && self.text_height == other.text_height
+            && self.text_left_attachment == other.text_left_attachment
+            && self.text_right_attachment == other.text_right_attachment
+            && self.text_top_attachment == other.text_top_attachment
+            && self.text_bottom_attachment == other.text_bottom_attachment
+            && self.text_attachment_direction == other.text_attachment_direction
+            && self.text_attachment_point == other.text_attachment_point
+            && self.text_alignment == other.text_alignment
+            && self.text_angle_type == other.text_angle_type
+            && self.text_direction_negative == other.text_direction_negative
+            && self.text_align_in_ipe == other.text_align_in_ipe
+            && self.block_content_handle == other.block_content_handle
+            && self.block_content_color == other.block_content_color
+            && self.block_connection_type == other.block_connection_type
+            && self.block_rotation == other.block_rotation
+            && self.block_scale == other.block_scale
+            && self.scale_factor == other.scale_factor
+            && self.property_override_flags == other.property_override_flags
+            && self.enable_annotation_scale == other.enable_annotation_scale
+            && self.extend_leader_to_text == other.extend_leader_to_text
+    }
+}
+
 impl MultiLeader {
     /// Creates a new MultiLeader with default settings.
     pub fn new() -> Self {
         Self {
+            dxf_source: None,
             common: EntityCommon::default(),
             dwg_version: 2,
             style_handle: None,

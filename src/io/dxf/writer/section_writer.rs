@@ -7877,8 +7877,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Dogleg length
         self.writer.write_double(43, style.landing_distance)?;
 
-        // Style name
-        self.writer.write_string(3, &style.name)?;
+        // The style name is stored in its owner dictionary; code 3 is the description.
+        self.writer.write_string(3, &style.description)?;
 
         // Arrow head block handle
         if let Some(h) = style.arrowhead_handle {
@@ -7963,6 +7963,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Break gap size
         self.writer.write_double(143, style.break_gap_size)?;
+
+        if self.dxf_version >= DxfVersion::AC1024 {
+            self.writer
+                .write_i16(271, style.text_attachment_direction as i16)?;
+            self.writer
+                .write_i16(272, style.text_bottom_attachment as i16)?;
+            self.writer
+                .write_i16(273, style.text_top_attachment as i16)?;
+        }
+        if self.dxf_version >= DxfVersion::AC1027 {
+            self.writer.write_bool(298, style.unknown_flag_298)?;
+        }
 
         Ok(())
     }

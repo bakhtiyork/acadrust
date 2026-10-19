@@ -364,9 +364,17 @@ bitflags! {
 /// style.arrowhead_size = 0.25;
 /// style.enable_landing = true;
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MultiLeaderStyle {
+    /// Group codes present in the source DXF record.
+    ///
+    /// DXF readers preserve native constructor defaults for omitted fields;
+    /// the compatibility projection uses this presence mask to reproduce
+    /// ACadSharp's omitted-value defaults without changing drawing state.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dxf_present_codes: Option<[u64; 6]>,
+
     /// Object handle.
     pub handle: Handle,
 
@@ -374,11 +382,12 @@ pub struct MultiLeaderStyle {
     pub owner_handle: Handle,
 
     /// Style name.
-    /// DXF code: 3
+    /// Native DXF writer text (DXF code: 3).  The compatibility view resolves
+    /// the public name from the owning dictionary when available.
     pub name: String,
 
     /// Style description.
-    /// DXF code: 300
+    /// DXF code: 3
     pub description: String,
 
     // ========== Leader Line Properties ==========
@@ -579,6 +588,7 @@ impl MultiLeaderStyle {
     /// Creates a new MultiLeaderStyle with default values.
     pub fn new(name: &str) -> Self {
         MultiLeaderStyle {
+            dxf_present_codes: None,
             handle: Handle::NULL,
             owner_handle: Handle::NULL,
             name: name.to_string(),
@@ -702,6 +712,85 @@ impl MultiLeaderStyle {
     /// Returns true if leaders use spline curves.
     pub fn has_spline_leaders(&self) -> bool {
         self.path_type == MultiLeaderPathType::Spline
+    }
+
+    /// Record a DXF group code while reading the source object.
+    pub(crate) fn record_dxf_code(&mut self, code: i32) {
+        if let Ok(code) = usize::try_from(code) {
+            if let Some(bits) = self
+                .dxf_present_codes
+                .as_mut()
+                .and_then(|codes| codes.get_mut(code / 64))
+            {
+                *bits |= 1 << (code % 64);
+            }
+        }
+    }
+
+    /// Whether the source DXF record contained `code`.
+    pub fn dxf_code_present(&self, code: i32) -> bool {
+        usize::try_from(code)
+            .ok()
+            .and_then(|code| {
+                self.dxf_present_codes
+                    .as_ref()
+                    .and_then(|codes| codes.get(code / 64))
+                    .map(|bits| bits & (1 << (code % 64)) != 0)
+            })
+            .unwrap_or(false)
+    }
+}
+
+impl PartialEq for MultiLeaderStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.owner_handle == other.owner_handle
+            && self.name == other.name
+            && self.description == other.description
+            && self.path_type == other.path_type
+            && self.line_color == other.line_color
+            && self.line_type_handle == other.line_type_handle
+            && self.line_weight == other.line_weight
+            && self.enable_landing == other.enable_landing
+            && self.enable_dogleg == other.enable_dogleg
+            && self.landing_distance == other.landing_distance
+            && self.landing_gap == other.landing_gap
+            && self.arrowhead_handle == other.arrowhead_handle
+            && self.arrowhead_size == other.arrowhead_size
+            && self.content_type == other.content_type
+            && self.text_style_handle == other.text_style_handle
+            && self.text_left_attachment == other.text_left_attachment
+            && self.text_right_attachment == other.text_right_attachment
+            && self.text_top_attachment == other.text_top_attachment
+            && self.text_bottom_attachment == other.text_bottom_attachment
+            && self.text_attachment_direction == other.text_attachment_direction
+            && self.text_angle_type == other.text_angle_type
+            && self.text_alignment == other.text_alignment
+            && self.text_color == other.text_color
+            && self.text_height == other.text_height
+            && self.text_frame == other.text_frame
+            && self.text_always_left == other.text_always_left
+            && self.default_text == other.default_text
+            && self.block_content_handle == other.block_content_handle
+            && self.block_content_color == other.block_content_color
+            && self.block_content_connection == other.block_content_connection
+            && self.block_content_rotation == other.block_content_rotation
+            && self.block_content_scale_x == other.block_content_scale_x
+            && self.block_content_scale_y == other.block_content_scale_y
+            && self.block_content_scale_z == other.block_content_scale_z
+            && self.enable_block_scale == other.enable_block_scale
+            && self.enable_block_rotation == other.enable_block_rotation
+            && self.scale_factor == other.scale_factor
+            && self.align_space == other.align_space
+            && self.break_gap_size == other.break_gap_size
+            && self.max_leader_points == other.max_leader_points
+            && self.first_segment_angle == other.first_segment_angle
+            && self.second_segment_angle == other.second_segment_angle
+            && self.leader_draw_order == other.leader_draw_order
+            && self.multileader_draw_order == other.multileader_draw_order
+            && self.is_annotative == other.is_annotative
+            && self.property_changed == other.property_changed
+            && self.unknown_flag_298 == other.unknown_flag_298
     }
 }
 
