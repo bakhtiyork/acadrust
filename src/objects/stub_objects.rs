@@ -652,11 +652,46 @@ impl Default for MaterialMap {
     }
 }
 
+/// Source presence for a DXF material. Values and textures remain in the native fields.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MaterialDxfSource {
+    /// Present material group codes (bounded to the DXF scalar code range).
+    pub codes: [u64; 8],
+    /// Reused group codes present in the advanced/normal-map tail.
+    pub advanced_codes: [u64; 8],
+    /// Last group 90, which can have a different native semantic role.
+    pub last_color_90: Option<i32>,
+}
+
+impl MaterialDxfSource {
+    pub fn contains(&self, code: usize) -> bool {
+        code < 512 && self.codes[code / 64] & (1 << (code % 64)) != 0
+    }
+
+    pub fn contains_advanced(&self, code: usize) -> bool {
+        code < 512 && self.advanced_codes[code / 64] & (1 << (code % 64)) != 0
+    }
+
+    pub(crate) fn record(&mut self, code: i32, advanced: bool) {
+        if let Ok(code) = usize::try_from(code) {
+            if code < 512 {
+                self.codes[code / 64] |= 1 << (code % 64);
+                if advanced {
+                    self.advanced_codes[code / 64] |= 1 << (code % 64);
+                }
+            }
+        }
+    }
+}
+
 /// Material object — named material for 3D rendering
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct Material {
+    /// DXF field presence; excluded from native material equality.
+    pub dxf_source: Option<Box<MaterialDxfSource>>,
     /// Unique handle
     pub handle: Handle,
     /// Owner handle
@@ -706,6 +741,7 @@ impl Material {
     /// Create a new Material with defaults
     pub fn new() -> Self {
         Material {
+            dxf_source: None,
             handle: Handle::NULL,
             owner: Handle::NULL,
             reactors: Vec::new(),
@@ -762,6 +798,49 @@ impl Material {
             || self.global_illumination != 0
             || self.final_gather != 0
             || self.color_bleed_scale != 1.0
+    }
+}
+
+impl PartialEq for Material {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.owner == other.owner
+            && self.reactors == other.reactors
+            && self.xdictionary_handle == other.xdictionary_handle
+            && self.name == other.name
+            && self.description == other.description
+            && self.ambient_color == other.ambient_color
+            && self.diffuse_color == other.diffuse_color
+            && self.diffuse_map == other.diffuse_map
+            && self.specular_color == other.specular_color
+            && self.specular_map == other.specular_map
+            && self.specular_gloss_factor == other.specular_gloss_factor
+            && self.reflection_map == other.reflection_map
+            && self.opacity_percent == other.opacity_percent
+            && self.opacity_map == other.opacity_map
+            && self.bump_map == other.bump_map
+            && self.refraction_index == other.refraction_index
+            && self.refraction_map == other.refraction_map
+            && self.translucence == other.translucence
+            && self.self_illumination == other.self_illumination
+            && self.reflectivity == other.reflectivity
+            && self.illumination_model == other.illumination_model
+            && self.channel_flags == other.channel_flags
+            && self.mode == other.mode
+            && self.indirect_bump_scale == other.indirect_bump_scale
+            && self.reflectance_scale == other.reflectance_scale
+            && self.transmittance_scale == other.transmittance_scale
+            && self.two_sided_material == other.two_sided_material
+            && self.luminance == other.luminance
+            && self.luminance_mode == other.luminance_mode
+            && self.normal_map_method == other.normal_map_method
+            && self.normal_map_strength == other.normal_map_strength
+            && self.normal_map == other.normal_map
+            && self.is_anonymous == other.is_anonymous
+            && self.global_illumination == other.global_illumination
+            && self.final_gather == other.final_gather
+            && self.color_bleed_scale == other.color_bleed_scale
+            && self.advanced_data_present == other.advanced_data_present
     }
 }
 

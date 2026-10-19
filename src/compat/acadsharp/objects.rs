@@ -13,7 +13,7 @@ use crate::objects::{
     TableStyle, VisualStyle, XRecord,
 };
 use crate::tables::TableEntry;
-use crate::types::{Color, Handle, Matrix4, Vector2, Vector3};
+use crate::types::{Color, DxfVersion, Handle, Matrix4, Vector2, Vector3};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
@@ -126,12 +126,12 @@ fn dump_object(
             paper_viewports.get(&value.block_record).copied().flatten(),
         ),
         ObjectType::Group(value) => dump_group(map_handle, value),
-        ObjectType::MLineStyle(value) => dump_mline_style(_doc, map_handle, value),
+        ObjectType::MLineStyle(value) => dump_mline_style(_doc, reader, map_handle, value),
         ObjectType::MultiLeaderStyle(value) => dump_mleader_style(map_handle, value),
-        ObjectType::TableStyle(value) => dump_table_style(map_handle, value),
+        ObjectType::TableStyle(value) => dump_table_style(_doc, reader, map_handle, value),
         ObjectType::Scale(value) => dump_scale(map_handle, value),
         ObjectType::VisualStyle(value) => dump_visual_style(map_handle, value, reader),
-        ObjectType::Material(value) => dump_material(map_handle, value),
+        ObjectType::Material(value) => dump_material(_doc, reader, map_handle, value),
         ObjectType::ImageDefinition(value) => dump_image_definition(map_handle, value),
         ObjectType::ImageDefinitionReactor(value) => {
             dump_image_definition_reactor(map_handle, value)
@@ -321,12 +321,6 @@ fn tuple2(value: (f64, f64)) -> Value {
 
 fn tuple3(value: (f64, f64, f64)) -> Value {
     vec3(Vector3::new(value.0, value.1, value.2))
-}
-
-fn color_index(value: Option<i32>) -> Value {
-    value
-        .map(|value| color(Color::from_true_color_value(value)))
-        .unwrap_or_else(|| Value::String(super::UNMAPPED.to_owned()))
 }
 
 fn class_name(cpp_name: &str) -> String {
@@ -617,7 +611,12 @@ fn dump_group(handle_value: Handle, value: &Group) -> Value {
     record(handle_value, "Group", value.owner, props("Group", p))
 }
 
-fn dump_mline_style(doc: &crate::CadDocument, handle_value: Handle, value: &MLineStyle) -> Value {
+fn dump_mline_style(
+    doc: &crate::CadDocument,
+    reader: &str,
+    handle_value: Handle,
+    value: &MLineStyle,
+) -> Value {
     let mut p = common(
         "MLINESTYLE",
         0x49,
@@ -627,7 +626,16 @@ fn dump_mline_style(doc: &crate::CadDocument, handle_value: Handle, value: &MLin
         None,
     );
     p.extend([
-        ("Description", text(&value.description)),
+        (
+            "Description",
+            if (reader == "new" || value.dxf_description_present == Some(false))
+                && value.description.is_empty()
+            {
+                Value::Null
+            } else {
+                text(&value.description)
+            },
+        ),
         (
             "Elements",
             Value::Array(
@@ -641,7 +649,11 @@ fn dump_mline_style(doc: &crate::CadDocument, handle_value: Handle, value: &MLin
                                 ("Color", color(element.color)),
                                 (
                                     "LineType",
-                                    optional_handle(doc.line_types.get(&element.linetype).map(|line| line.handle)),
+                                    optional_handle(
+                                        doc.line_types
+                                            .get(&element.linetype)
+                                            .map(|line| line.handle),
+                                    ),
                                 ),
                                 ("Offset", number(element.offset)),
                             ],
@@ -994,7 +1006,43 @@ fn property_color(value: &VisualStyle, index: usize) -> Value {
     }
 }
 
-fn dump_material(handle_value: Handle, value: &Material) -> Value {
+fn dump_material(
+    doc: &crate::CadDocument,
+    reader: &str,
+    handle_value: Handle,
+    value: &Material,
+) -> Value {
+    let dxf = value.dxf_source.as_deref();
+    let absent = |code| dxf.is_some_and(|source| !source.contains(code));
+    let advanced = |code| dxf.is_some_and(|source| source.contains_advanced(code));
+    let scalar = |code, native: i64, default| int(if absent(code) { default } else { native });
+    let string = |code, native: &str| {
+        if (absent(code) || reader == "new") && native.is_empty() {
+            Value::Null
+        } else {
+            text(native)
+        }
+    };
+    let filename = |code, map: &crate::objects::MaterialMap| {
+        if reader == "dwg" && map.source != 1 && map.file_name.is_empty() {
+            Value::Null
+        } else {
+            string(code, &map.file_name)
+        }
+    };
+    // The DXF mapper handles code 90 only; 91/92 leave Color at ByBlock.
+    // DWG reads an RGB only for the Override color method.
+    let ambient_rgb = dxf.map_or(value.ambient_color.rgb, |source| source.last_color_90);
+    let diffuse_rgb = if dxf.is_some() {
+        None
+    } else {
+        value.diffuse_color.rgb
+    };
+    let specular_rgb = if dxf.is_some() {
+        None
+    } else {
+        value.specular_color.rgb
+    };
     let mut p = common(
         "MATERIAL",
         UNLISTED,
@@ -1004,7 +1052,7 @@ fn dump_material(handle_value: Handle, value: &Material) -> Value {
         value.xdictionary_handle,
     );
     p.extend([
-        ("AmbientColor", material_color(&value.ambient_color)),
+        ("AmbientColor", material_color(ambient_rgb)),
         ("AmbientColorFactor", number(value.ambient_color.factor)),
         ("AmbientColorMethod", int(value.ambient_color.flag as i64)),
         (
@@ -1012,33 +1060,49 @@ fn dump_material(handle_value: Handle, value: &Material) -> Value {
             int(value.bump_map.auto_transform as i64),
         ),
         ("BumpMapBlendFactor", number(value.bump_map.blend_factor)),
-        ("BumpMapFileName", text(&value.bump_map.file_name)),
-        ("BumpMapSource", int(value.bump_map.source as i64)),
+        ("BumpMapFileName", filename(8, &value.bump_map)),
+        (
+            "BumpMapSource",
+            scalar(179, value.bump_map.source as i64, 1),
+        ),
         ("BumpMatrix", matrix(value.bump_map.transform)),
         (
             "BumpProjectionMethod",
-            int(value.bump_map.projection as i64),
+            scalar(270, value.bump_map.projection as i64, 1),
         ),
         ("BumpTilingMethod", int(value.bump_map.tiling as i64)),
-        ("ChannelFlags", int(value.channel_flags as i64)),
-        ("Description", text(&value.description)),
+        (
+            "ChannelFlags",
+            int(
+                if absent(94) || (reader == "dwg" && doc.version < crate::types::DxfVersion::AC1021)
+                {
+                    1
+                } else {
+                    value.channel_flags as i64
+                },
+            ),
+        ),
+        ("Description", string(2, &value.description)),
         (
             "DiffuseAutoTransform",
             int(value.diffuse_map.auto_transform as i64),
         ),
-        ("DiffuseColor", material_color(&value.diffuse_color)),
+        ("DiffuseColor", material_color(diffuse_rgb)),
         ("DiffuseColorFactor", number(value.diffuse_color.factor)),
         ("DiffuseColorMethod", int(value.diffuse_color.flag as i64)),
         (
             "DiffuseMapBlendFactor",
             number(value.diffuse_map.blend_factor),
         ),
-        ("DiffuseMapFileName", text(&value.diffuse_map.file_name)),
-        ("DiffuseMapSource", int(value.diffuse_map.source as i64)),
+        ("DiffuseMapFileName", filename(3, &value.diffuse_map)),
+        (
+            "DiffuseMapSource",
+            scalar(72, value.diffuse_map.source as i64, 1),
+        ),
         ("DiffuseMatrix", matrix(value.diffuse_map.transform)),
         (
             "DiffuseProjectionMethod",
-            int(value.diffuse_map.projection as i64),
+            scalar(73, value.diffuse_map.projection as i64, 1),
         ),
         ("DiffuseTilingMethod", int(value.diffuse_map.tiling as i64)),
         ("IlluminationModel", int(value.illumination_model as i64)),
@@ -1052,12 +1116,15 @@ fn dump_material(handle_value: Handle, value: &Material) -> Value {
             "OpacityMapBlendFactor",
             number(value.opacity_map.blend_factor),
         ),
-        ("OpacityMapFileName", text(&value.opacity_map.file_name)),
-        ("OpacityMapSource", int(value.opacity_map.source as i64)),
+        ("OpacityMapFileName", filename(7, &value.opacity_map)),
+        (
+            "OpacityMapSource",
+            scalar(175, value.opacity_map.source as i64, 1),
+        ),
         ("OpacityMatrix", matrix(value.opacity_map.transform)),
         (
             "OpacityProjectionMethod",
-            int(value.opacity_map.projection as i64),
+            scalar(176, value.opacity_map.projection as i64, 1),
         ),
         ("OpacityTilingMethod", int(value.opacity_map.tiling as i64)),
         (
@@ -1068,18 +1135,15 @@ fn dump_material(handle_value: Handle, value: &Material) -> Value {
             "ReflectionMapBlendFactor",
             number(value.reflection_map.blend_factor),
         ),
-        (
-            "ReflectionMapFileName",
-            text(&value.reflection_map.file_name),
-        ),
+        ("ReflectionMapFileName", filename(6, &value.reflection_map)),
         (
             "ReflectionMapSource",
-            int(value.reflection_map.source as i64),
+            scalar(171, value.reflection_map.source as i64, 1),
         ),
         ("ReflectionMatrix", matrix(value.reflection_map.transform)),
         (
             "ReflectionProjectionMethod",
-            int(value.reflection_map.projection as i64),
+            scalar(172, value.reflection_map.projection as i64, 1),
         ),
         (
             "ReflectionTilingMethod",
@@ -1095,29 +1159,33 @@ fn dump_material(handle_value: Handle, value: &Material) -> Value {
             "RefractionMapBlendFactor",
             number(value.refraction_map.blend_factor),
         ),
-        (
-            "RefractionMapFileName",
-            text(&value.refraction_map.file_name),
-        ),
+        ("RefractionMapFileName", filename(9, &value.refraction_map)),
         (
             "RefractionMapSource",
-            int(value.refraction_map.source as i64),
+            scalar(273, value.refraction_map.source as i64, 1),
         ),
         ("RefractionMatrix", matrix(value.refraction_map.transform)),
         (
             "RefractionProjectionMethod",
-            int(value.refraction_map.projection as i64),
+            scalar(274, value.refraction_map.projection as i64, 1),
         ),
         (
             "RefractionTilingMethod",
             int(value.refraction_map.tiling as i64),
         ),
-        ("SelfIllumination", number(value.self_illumination)),
+        (
+            "SelfIllumination",
+            number(if absent(149) {
+                0.0
+            } else {
+                value.self_illumination
+            }),
+        ),
         (
             "SpecularAutoTransform",
             int(value.specular_map.auto_transform as i64),
         ),
-        ("SpecularColor", material_color(&value.specular_color)),
+        ("SpecularColor", material_color(specular_rgb)),
         ("SpecularColorFactor", number(value.specular_color.factor)),
         ("SpecularColorMethod", int(value.specular_color.flag as i64)),
         ("SpecularGlossFactor", number(value.specular_gloss_factor)),
@@ -1125,12 +1193,15 @@ fn dump_material(handle_value: Handle, value: &Material) -> Value {
             "SpecularMapBlendFactor",
             number(value.specular_map.blend_factor),
         ),
-        ("SpecularMapFileName", text(&value.specular_map.file_name)),
-        ("SpecularMapSource", int(value.specular_map.source as i64)),
+        ("SpecularMapFileName", filename(4, &value.specular_map)),
+        (
+            "SpecularMapSource",
+            scalar(77, value.specular_map.source as i64, 1),
+        ),
         ("SpecularMatrix", matrix(value.specular_map.transform)),
         (
             "SpecularProjectionMethod",
-            int(value.specular_map.projection as i64),
+            scalar(78, value.specular_map.projection as i64, 1),
         ),
         (
             "SpecularTilingMethod",
@@ -1138,11 +1209,61 @@ fn dump_material(handle_value: Handle, value: &Material) -> Value {
         ),
         ("Translucence", number(value.translucence)),
     ]);
+    // The reference DXF mapper does not distinguish the advanced tail. Reused
+    // codes overwrite its earlier fields; the native model keeps both maps.
+    for (code, name, projected) in [
+        (
+            42,
+            "DiffuseMapBlendFactor",
+            number(value.normal_map.blend_factor),
+        ),
+        (72, "DiffuseMapSource", int(value.normal_map.source as i64)),
+        (3, "DiffuseMapFileName", text(&value.normal_map.file_name)),
+        (
+            73,
+            "DiffuseProjectionMethod",
+            int(value.normal_map.projection as i64),
+        ),
+        (
+            74,
+            "DiffuseTilingMethod",
+            int(value.normal_map.tiling as i64),
+        ),
+        (
+            75,
+            "DiffuseAutoTransform",
+            int(value.normal_map.auto_transform as i64),
+        ),
+        (43, "DiffuseMatrix", matrix(value.normal_map.transform)),
+        (
+            270,
+            "BumpProjectionMethod",
+            int(value.luminance_mode as i64),
+        ),
+        (271, "BumpTilingMethod", int(value.normal_map_method as i64)),
+        (
+            272,
+            "BumpAutoTransform",
+            int(value.global_illumination as i64),
+        ),
+        (273, "RefractionMapSource", int(value.final_gather as i64)),
+    ] {
+        if advanced(code) {
+            p.push((name, projected));
+        }
+    }
     record(handle_value, "Material", value.owner, props("Material", p))
 }
 
-fn material_color(value: &crate::objects::MaterialColor) -> Value {
-    color_index(value.rgb)
+fn material_color(rgb: Option<i32>) -> Value {
+    let Some(rgb) = rgb else {
+        return color(Color::ByBlock);
+    };
+    let mut result = color(Color::from_true_color_value(rgb));
+    // ACadSharp exposes RGB bytes packed little-endian, independently of the
+    // DWG/DXF integer's BGR packing.
+    result["TrueColor"] = int(((rgb & 0xff) << 16 | (rgb & 0xff00) | ((rgb >> 16) & 0xff)) as i64);
+    result
 }
 
 fn matrix(value: [f64; 16]) -> Value {
@@ -2510,43 +2631,177 @@ fn start_end_pair(value: &crate::entities::multileader::StartEndPointPair) -> Va
     )
 }
 
-fn dump_table_style(handle_value: Handle, value: &TableStyle) -> Value {
+fn dump_table_style(
+    doc: &crate::CadDocument,
+    reader: &str,
+    handle_value: Handle,
+    value: &TableStyle,
+) -> Value {
+    let dxf = value.raw_dxf_codes.as_deref();
+    let is_dxf = dxf.is_some() || reader == "dxf";
+    let modern = !is_dxf && value.modern_style.is_some();
+    let source_modern = reader == "dwg" && modern;
+    let raw = |code| {
+        dxf.and_then(|codes| {
+            codes
+                .iter()
+                .rev()
+                .find(|(c, _)| *c == code)
+                .map(|(_, v)| v.as_str())
+        })
+    };
+    let source_flag = |code, native: bool| {
+        raw(code)
+            .and_then(|v| v.parse::<i16>().ok())
+            .map_or(if dxf.is_some() { false } else { native }, |v| v != 0)
+    };
+    let row = |native: &crate::objects::RowCellStyle,
+               default: crate::objects::RowCellStyle,
+               name,
+               class| {
+        if is_dxf || (reader == "new" && *native == default && !modern) {
+            // DXF creates unnamed cell templates. The builder only installs
+            // named built-ins, so those parsed rows remain unexposed.
+            default_cell_style(name, class)
+        } else if modern {
+            modern_row_style(value, name, class)
+        } else {
+            legacy_row_style(native, name, class, doc.version)
+        }
+    };
+    let name = owned_dictionary_name(doc, handle_value, value.owner_handle)
+        .unwrap_or_else(|| value.name.clone());
     let mut p = common(
         "TABLESTYLE",
         UNLISTED,
         "AcDbTableStyle",
-        Some(&value.name),
+        Some(&name),
         None,
         None,
     );
+    let description = if (reader == "new" || (dxf.is_some() && raw(3).is_none()))
+        && value.description.is_empty()
+    {
+        Value::Null
+    } else {
+        text(&value.description)
+    };
+    let flags = if source_modern {
+        0
+    } else if let Some(codes) = dxf {
+        codes
+            .iter()
+            .rev()
+            .find(|(c, _)| *c == 71)
+            .and_then(|(_, v)| v.parse::<i16>().ok())
+            .unwrap_or(0)
+    } else {
+        value
+            .legacy_source
+            .map_or(value.flags.bits(), |source| source.0)
+    };
     p.extend([
         (
             "CellStyles",
-            Value::Array(
-                value
-                    .modern_overrides
-                    .iter()
-                    .map(|(_, style)| named_cell_style(style))
-                    .collect(),
+            if reader == "dwg" || is_dxf {
+                json!([])
+            } else {
+                Value::Array(
+                    value
+                        .modern_overrides
+                        .iter()
+                        .filter(|(_, style)| {
+                            !["_DATA", "_TITLE", "_HEADER"]
+                                .iter()
+                                .any(|n| style.name.eq_ignore_ascii_case(n))
+                        })
+                        .map(|(_, style)| named_cell_style(style))
+                        .collect(),
+                )
+            },
+        ),
+        (
+            "DataCellStyle",
+            row(
+                &value.data_row_style,
+                crate::objects::RowCellStyle::data_row(),
+                "_DATA",
+                2,
             ),
         ),
-        ("DataCellStyle", row_cell_style(&value.data_row_style)),
-        ("Description", text(&value.description)),
-        ("Flags", int(value.flags.bits() as i64)),
-        ("FlowDirection", int(value.flow_direction as i64)),
-        ("HeaderCellStyle", row_cell_style(&value.header_row_style)),
-        ("HorizontalCellMargin", number(value.horizontal_margin)),
-        ("SuppressHeaderRow", bool_value(value.header_suppressed)),
-        ("SuppressTitle", bool_value(value.title_suppressed)),
-        ("TitleCellStyle", row_cell_style(&value.title_row_style)),
-        ("VerticalCellMargin", number(value.vertical_margin)),
+        (
+            "TitleCellStyle",
+            row(
+                &value.title_row_style,
+                crate::objects::RowCellStyle::title_row(),
+                "_TITLE",
+                1,
+            ),
+        ),
+        (
+            "HeaderCellStyle",
+            row(
+                &value.header_row_style,
+                crate::objects::RowCellStyle::header_row(),
+                "_HEADER",
+                1,
+            ),
+        ),
+        (
+            "TableCellStyle",
+            if modern {
+                named_cell_style(value.modern_style.as_ref().unwrap())
+            } else {
+                default_cell_style("Table", 2)
+            },
+        ),
+        ("Description", description),
+        ("Flags", int(flags as i64)),
+        (
+            "FlowDirection",
+            int(if source_modern {
+                0
+            } else {
+                value.flow_direction as i64
+            }),
+        ),
+        (
+            "HorizontalCellMargin",
+            number(if source_modern {
+                0.06
+            } else {
+                value.horizontal_margin
+            }),
+        ),
+        (
+            "VerticalCellMargin",
+            number(if source_modern {
+                0.06
+            } else {
+                value.vertical_margin
+            }),
+        ),
+        (
+            "SuppressHeaderRow",
+            bool_value(
+                !source_modern
+                    && source_flag(
+                        281,
+                        value.legacy_source.map_or(value.header_suppressed, |s| s.2),
+                    ),
+            ),
+        ),
+        (
+            "SuppressTitle",
+            bool_value(
+                !source_modern
+                    && source_flag(
+                        280,
+                        value.legacy_source.map_or(value.title_suppressed, |s| s.1),
+                    ),
+            ),
+        ),
     ]);
-    // R2010+ stores the named "Table" style separately from the three row
-    // styles.  Do not substitute a legacy row style when that record is
-    // absent: `props` will mark the unavailable member as `!unmapped`.
-    if let Some(style) = value.modern_style.as_ref() {
-        p.push(("TableCellStyle", named_cell_style(style)));
-    }
     record(
         handle_value,
         "TableStyle",
@@ -2555,138 +2810,218 @@ fn dump_table_style(handle_value: Handle, value: &TableStyle) -> Value {
     )
 }
 
-fn row_cell_style(value: &crate::objects::RowCellStyle) -> Value {
+fn default_cell_style(name: &str, style_class: i32) -> Value {
+    let border = |edge| default_border(edge);
     props(
         "TableStyle.CellStyle",
         [
-            ("Alignment", int(value.alignment as i64)),
-            ("BackgroundColor", color(value.fill_color)),
+            ("Alignment", int(0)),
+            ("BackgroundColor", color(Color::ByBlock)),
+            ("BottomBorder", border(4)),
             ("BottomMargin", number(0.0)),
-            ("CellAlignment", int(value.alignment as i64)),
-            ("Color", color(value.text_color)),
-            ("ContentColor", color(value.text_color)),
+            ("CellAlignment", int(0)),
+            ("Color", color(Color::ByBlock)),
+            ("ContentColor", color(Color::ByBlock)),
             ("ContentLayoutFlags", int(0)),
             ("HasData", bool_value(true)),
-            (
-                "HorizontalInsideBorder",
-                table_border(&value.horizontal_inside_border),
-            ),
-            ("HorizontalMargin", number(0.0)),
-            ("IsFillColorOn", bool_value(value.fill_enabled)),
-            ("LeftBorder", table_border(&value.left_border)),
+            ("HorizontalInsideBorder", border(32)),
+            ("HorizontalMargin", number(0.06)),
+            ("IsFillColorOn", bool_value(false)),
+            ("LeftBorder", border(8)),
             ("MarginHorizontalSpacing", number(0.0)),
             ("MarginOverrideFlags", int(0)),
             ("MarginVerticalSpacing", number(0.0)),
-            ("Name", text("")),
+            ("Name", text(name)),
             ("PropertyFlags", int(0)),
             ("PropertyOverrideFlags", int(0)),
-            ("RightBorder", table_border(&value.right_border)),
+            ("RightBorder", border(2)),
             ("RightMargin", number(0.0)),
             ("Rotation", number(0.0)),
-            ("Scale", number(1.0)),
-            ("StyleClass", int(0)),
+            ("Scale", number(0.0)),
+            ("StyleClass", int(style_class as i64)),
             ("TableCellStylePropertyFlags", int(0)),
-            ("TextColor", color(value.text_color)),
-            ("TextHeight", number(value.text_height)),
-            ("TextStyle", optional_handle(value.text_style_handle)),
-            ("TopBorder", table_border(&value.top_border)),
+            ("TextColor", color(Color::ByBlock)),
+            ("TextHeight", number(0.0)),
+            ("TextStyle", handle(Handle::NULL)),
+            ("TopBorder", border(2)),
             ("Type", int(0)),
-            ("ValueDataType", int(value.data_type as i64)),
-            ("ValueFormatString", text(&value.format_string)),
-            ("ValueUnitType", int(value.unit_type as i64)),
-            (
-                "VerticalInsideBorder",
-                table_border(&value.vertical_inside_border),
-            ),
-            ("VerticalMargin", number(0.0)),
+            ("ValueDataType", int(0)),
+            ("ValueFormatString", Value::Null),
+            ("ValueUnitType", int(0)),
+            ("VerticalInsideBorder", border(16)),
+            ("VerticalMargin", number(0.06)),
         ],
     )
 }
 
-fn table_border(value: &crate::objects::TableCellBorder) -> Value {
+fn default_border(edge_flags: i32) -> Value {
     props(
         "TableStyle.CellBorder",
         [
-            ("ApplyBorder", bool_value(!value.is_invisible)),
-            ("Color", color(value.color)),
-            ("DoubleLineSpacing", number(value.double_line_spacing)),
-            ("EdgeFlags", int(value.property_flags.bits() as i64)),
-            ("IsInvisible", bool_value(value.is_invisible)),
-            ("LineWeight", int(value.line_weight.value() as i64)),
+            ("ApplyBorder", bool_value(false)),
+            ("Color", color(Color::ByBlock)),
+            ("DoubleLineSpacing", number(0.0)),
+            ("EdgeFlags", int(edge_flags as i64)),
+            ("IsInvisible", bool_value(false)),
             (
-                "PropertyOverrideFlags",
-                int(value.property_flags.bits() as i64),
+                "LineWeight",
+                int(crate::types::LineWeight::ByBlock.value() as i64),
             ),
-            ("Type", int(value.border_type as i64)),
+            ("PropertyOverrideFlags", int(0)),
+            ("Type", int(1)),
         ],
     )
+}
+
+fn style_color(value: Color) -> Value {
+    // C# treats the CMC "none" marker as RGB black, and exposes true color
+    // in little-endian RGB order. Keep the native color/method unchanged.
+    let value = if value == Color::None {
+        Color::from_rgb(0, 0, 0)
+    } else {
+        value
+    };
+    if let Some(rgb) = value.to_true_color_value() {
+        material_color(Some(rgb))
+    } else {
+        color(value)
+    }
+}
+
+fn legacy_row_style(
+    value: &crate::objects::RowCellStyle,
+    name: &str,
+    style_class: i32,
+    version: DxfVersion,
+) -> Value {
+    let mut result = default_cell_style(name, style_class);
+    for (key, field) in [
+        ("BackgroundColor", style_color(value.fill_color)),
+        ("CellAlignment", int(value.alignment as i64)),
+        ("IsFillColorOn", bool_value(value.fill_enabled)),
+        ("TextColor", style_color(value.text_color)),
+        ("TextHeight", number(value.text_height)),
+        (
+            "TextStyle",
+            handle(value.text_style_handle.unwrap_or(Handle::NULL)),
+        ),
+    ] {
+        result[key] = field;
+    }
+    for (key, edge, border) in [
+        ("TopBorder", 2, &value.top_border),
+        (
+            "HorizontalInsideBorder",
+            32,
+            &value.horizontal_inside_border,
+        ),
+        ("BottomBorder", 4, &value.bottom_border),
+        ("LeftBorder", 8, &value.left_border),
+        ("VerticalInsideBorder", 16, &value.vertical_inside_border),
+        ("RightBorder", 2, &value.right_border),
+    ] {
+        let mut projected = default_border(edge);
+        projected["Color"] = style_color(border.color);
+        projected["LineWeight"] = int(border.line_weight.value() as i64);
+        projected["IsInvisible"] = bool_value(border.is_invisible);
+        result[key] = projected;
+    }
+    if version >= DxfVersion::AC1021 {
+        result["ValueDataType"] = int(value.data_type as i64);
+        result["ValueUnitType"] = int(value.unit_type as i64);
+        result["ValueFormatString"] = text(&value.format_string);
+    }
+    result
+}
+
+fn modern_row_style(value: &TableStyle, name: &str, style_class: i32) -> Value {
+    value
+        .modern_overrides
+        .iter()
+        .find(|(_, style)| style.name.eq_ignore_ascii_case(name))
+        .map(|(_, style)| named_cell_style(style))
+        .unwrap_or_else(|| default_cell_style(name, style_class))
 }
 
 fn named_cell_style(value: &crate::objects::NamedTableCellStyle) -> Value {
     let data = &value.cell_style;
     let format = &data.content_format;
-    let border = |mask: i32| {
-        data.borders
-            .iter()
-            .find(|grid| grid.index_mask == mask)
-            .map(|grid| {
-                let mut value = table_border(&grid.border);
-                if let Value::Object(properties) = &mut value {
-                    // The table-style grid mask is the edge identity exposed
-                    // by ACadSharp's CellBorder.EdgeFlags.
-                    properties.insert("EdgeFlags".into(), int(mask as i64));
-                }
-                value
-            })
-            .map(Some)
-            .unwrap_or(None)
-    };
-    let mut fields = vec![
+    let mut result = default_cell_style(&value.name, value.style_type);
+    result["Type"] = int(data.style_type as i64);
+    result["HasData"] = bool_value(data.data_flags != 0);
+    if data.data_flags == 0 {
+        return result;
+    }
+    // The content-format assignment overwrites the first override flag slot;
+    // Color, ContentColor and TextColor are distinct stored C# properties.
+    for (key, field) in [
         ("Alignment", int(format.cell_alignment as i64)),
-        ("BackgroundColor", color(data.background_color)),
-        ("BottomMargin", number(data.bottom_margin)),
-        ("CellAlignment", int(format.cell_alignment as i64)),
-        ("Color", color(format.content_color)),
-        ("ContentColor", color(format.content_color)),
+        ("BackgroundColor", style_color(data.background_color)),
+        ("Color", style_color(format.content_color)),
         ("ContentLayoutFlags", int(data.content_layout as i64)),
-        ("HasData", bool_value(data.data_flags != 0)),
-        ("HorizontalMargin", number(data.horizontal_margin)),
-        ("MarginHorizontalSpacing", number(data.horizontal_spacing)),
         (
             "MarginOverrideFlags",
             int(data.margin_override_flags as i64),
         ),
-        ("MarginVerticalSpacing", number(data.vertical_spacing)),
-        ("Name", text(&value.name)),
-        ("PropertyFlags", int(format.property_override_flags as i64)),
-        ("PropertyOverrideFlags", int(format.property_flags as i64)),
-        ("RightMargin", number(data.right_margin)),
+        ("PropertyFlags", int(format.property_flags as i64)),
+        (
+            "PropertyOverrideFlags",
+            int(format.property_override_flags as i64),
+        ),
         ("Rotation", number(format.rotation)),
         ("Scale", number(format.block_scale)),
-        ("StyleClass", int(value.style_type as i64)),
         ("TableCellStylePropertyFlags", int(data.merge_flags as i64)),
-        ("TextColor", color(format.content_color)),
         ("TextHeight", number(format.text_height)),
-        ("TextStyle", optional_handle(Some(format.text_style))),
-        ("Type", int(data.style_type as i64)),
+        ("TextStyle", handle(format.text_style)),
         ("ValueDataType", int(format.value_data_type as i64)),
         ("ValueFormatString", text(&format.value_format_string)),
         ("ValueUnitType", int(format.value_unit_type as i64)),
-        ("VerticalMargin", number(data.vertical_margin)),
-    ];
-    for (name, mask) in [
-        ("BottomBorder", 4),
-        ("HorizontalInsideBorder", 2),
-        ("LeftBorder", 8),
-        ("RightBorder", 32),
-        ("TopBorder", 1),
-        ("VerticalInsideBorder", 16),
     ] {
-        if let Some(value) = border(mask) {
-            fields.push((name, value));
+        result[key] = field;
+    }
+    if data.margin_override_flags & 1 != 0 {
+        for (key, field) in [
+            ("HorizontalMargin", data.horizontal_margin),
+            ("VerticalMargin", data.vertical_margin),
+            ("BottomMargin", data.bottom_margin),
+            ("RightMargin", data.right_margin),
+            ("MarginHorizontalSpacing", data.horizontal_spacing),
+            ("MarginVerticalSpacing", data.vertical_spacing),
+        ] {
+            result[key] = number(field);
         }
     }
-    props("TableStyle.CellStyle", fields)
+    for grid in &data.borders {
+        let (key, edge) = match grid.index_mask {
+            // The reference declares its top border with Right's immutable
+            // EdgeFlags, even when the raw source mask is Top.
+            1 => ("TopBorder", 2),
+            2 => ("RightBorder", 2),
+            4 => ("BottomBorder", 4),
+            8 => ("LeftBorder", 8),
+            16 => ("VerticalInsideBorder", 16),
+            32 => ("HorizontalInsideBorder", 32),
+            _ => continue,
+        };
+        let border = &grid.border;
+        let mut projected = default_border(edge);
+        for (key, field) in [
+            ("ApplyBorder", bool_value(true)),
+            ("Color", style_color(border.color)),
+            ("DoubleLineSpacing", number(border.double_line_spacing)),
+            ("IsInvisible", bool_value(!border.is_invisible)),
+            ("LineWeight", int(border.line_weight.value() as i64)),
+            (
+                "PropertyOverrideFlags",
+                int(border.property_flags.bits() as i64),
+            ),
+            ("Type", int(border.border_type as i64)),
+        ] {
+            projected[key] = field;
+        }
+        result[key] = projected;
+    }
+    result
 }
 
 fn table_cell(value: &crate::entities::TableCell) -> Value {

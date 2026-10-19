@@ -171,9 +171,12 @@ impl Default for MLineStyleElement {
 /// style.add_element(MLineStyleElement::new(-0.5));
 /// style.add_element(MLineStyleElement::new(0.5));
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MLineStyle {
+    /// Whether DXF explicitly stored the description; excluded from equality.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dxf_description_present: Option<bool>,
     /// Unique handle
     pub handle: Handle,
     /// Owner handle
@@ -204,6 +207,7 @@ impl MLineStyle {
     /// Create a new multiline style
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            dxf_description_present: None,
             handle: Handle::NULL,
             owner: Handle::NULL,
             name: name.into(),
@@ -376,6 +380,20 @@ impl MLineStyle {
     pub fn with_flags(mut self, flags: MLineStyleFlags) -> Self {
         self.flags = flags;
         self
+    }
+}
+
+impl PartialEq for MLineStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.owner == other.owner
+            && self.name == other.name
+            && self.description == other.description
+            && self.elements == other.elements
+            && self.start_angle == other.start_angle
+            && self.end_angle == other.end_angle
+            && self.fill_color == other.fill_color
+            && self.flags == other.flags
     }
 }
 
