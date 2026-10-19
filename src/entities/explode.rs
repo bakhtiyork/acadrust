@@ -22,16 +22,19 @@ use crate::types::{Handle, Vector3};
 fn inherit_common(source: &EntityCommon) -> EntityCommon {
     EntityCommon {
         handle: Handle::NULL,
-        layer: source.layer.clone(),
-        layer_handle: source.layer_handle,
-        color: source.color,
-        line_weight: source.line_weight,
-        linetype: source.linetype.clone(),
-        linetype_scale: source.linetype_scale,
-        transparency: source.transparency,
-        color_name: source.color_name.clone(),
-        color_book_handle: source.color_book_handle,
-        invisible: source.invisible,
+        properties: std::sync::Arc::new(EntityProperties {
+            layer: source.layer.clone(),
+            layer_handle: source.layer_handle,
+            color: source.color,
+            line_weight: source.line_weight,
+            linetype: source.linetype.clone(),
+            linetype_scale: source.linetype_scale,
+            transparency: source.transparency,
+            color_name: source.color_name.clone(),
+            color_book_handle: source.color_book_handle,
+            invisible: source.invisible,
+            ..EntityProperties::default()
+        }),
         owner_handle: source.owner_handle,
         ..EntityCommon::new()
     }
