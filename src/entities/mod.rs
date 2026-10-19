@@ -329,7 +329,7 @@ impl std::ops::DerefMut for EntityCommon {
 }
 
 /// Entity appearance, references and extended data shared until edited.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntityProperties {
     /// Layer name
@@ -354,6 +354,11 @@ pub struct EntityProperties {
     /// Transparency
     #[cfg_attr(feature = "serde", serde(default))]
     pub transparency: Transparency,
+    /// Original R2004+ DWG ENC word and packed transparency. The word's
+    /// 0x2000 flag indicates whether the second value was present. Kept inline
+    /// with shared properties; native color and transparency remain decoded.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dwg_color_source: Option<(u16, u32)>,
     /// Named/color-book identity from DXF group code 430.
     #[cfg_attr(feature = "serde", serde(default))]
     pub color_name: Option<String>,
@@ -411,12 +416,46 @@ pub struct EntityProperties {
     pub has_ds_data: bool,
 }
 
+// Source encoding is provenance, not part of the native logical appearance.
+// The DWG child-property cache compares it separately before sharing storage.
+impl PartialEq for EntityProperties {
+    fn eq(&self, other: &Self) -> bool {
+        self.layer == other.layer
+            && self.layer_handle == other.layer_handle
+            && self.color == other.color
+            && self.line_weight == other.line_weight
+            && self.linetype == other.linetype
+            && self.linetype_handle == other.linetype_handle
+            && self.linetype_scale == other.linetype_scale
+            && self.transparency == other.transparency
+            && self.color_name == other.color_name
+            && self.invisible == other.invisible
+            && self.extended_data == other.extended_data
+            && self.graphic_data == other.graphic_data
+            && self.reactors == other.reactors
+            && self.xdictionary_handle == other.xdictionary_handle
+            && self.color_book_handle == other.color_book_handle
+            && self.full_visual_style_handle == other.full_visual_style_handle
+            && self.face_visual_style_handle == other.face_visual_style_handle
+            && self.edge_visual_style_handle == other.edge_visual_style_handle
+            && self.material_flags == other.material_flags
+            && self.material_handle == other.material_handle
+            && self.shadow_flags == other.shadow_flags
+            && self.plotstyle_flags == other.plotstyle_flags
+            && self.plotstyle_handle == other.plotstyle_handle
+            && self.entity_mode == other.entity_mode
+            && self.r12_metadata == other.r12_metadata
+            && self.has_ds_data == other.has_ds_data
+    }
+}
+
 impl EntityCommon {
     fn preserve_storage_data_from(&mut self, source: &Self) {
         self.layer_handle = source.layer_handle;
         self.linetype_handle = source.linetype_handle;
         self.graphic_data = source.graphic_data.clone();
         self.color_book_handle = source.color_book_handle;
+        self.dwg_color_source = source.dwg_color_source;
         self.face_visual_style_handle = source.face_visual_style_handle;
         self.edge_visual_style_handle = source.edge_visual_style_handle;
         self.material_flags = source.material_flags;
@@ -465,6 +504,7 @@ impl Default for EntityProperties {
             linetype_handle: None,
             linetype_scale: 1.0,
             transparency: Transparency::BY_LAYER,
+            dwg_color_source: None,
             color_name: None,
             invisible: false,
             extended_data: crate::xdata::ExtendedData::new(),

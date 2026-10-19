@@ -528,7 +528,11 @@ fn block_entities(doc: &CadDocument, b: &crate::tables::BlockRecord, out: &mut V
     // BLOCK/ENDBLK are collapsed into BlockRecord by some readers. Retain their
     // stored identities, but do not invent discarded EntityCommon properties.
     if !b.block_entity_handle.is_null() && doc.get_entity(b.block_entity_handle).is_none() {
-        let mut p = metadata("Block");
+        let mut p = b
+            .block_entity_common
+            .as_ref()
+            .map(|common| super::entities::common(doc, common, "BLOCK", 4, "AcDbBlockBegin", false))
+            .unwrap_or_else(|| metadata("Block"));
         p.extend([
             ("BasePoint", vec3(b.base_point)),
             ("BlockOwner", handle(b.handle)),
@@ -549,7 +553,15 @@ fn block_entities(doc: &CadDocument, b: &crate::tables::BlockRecord, out: &mut V
             b.block_end_handle,
             "BlockEnd",
             b.handle,
-            props("BlockEnd", metadata("BlockEnd")),
+            props(
+                "BlockEnd",
+                b.block_end_common
+                    .as_ref()
+                    .map(|common| {
+                        super::entities::common(doc, common, "ENDBLK", 5, "AcDbBlockEnd", false)
+                    })
+                    .unwrap_or_else(|| metadata("BlockEnd")),
+            ),
         ));
     }
 }
@@ -590,13 +602,7 @@ fn line_type_segments(v: &crate::tables::LineType) -> Value {
 }
 
 fn base(doc: &CadDocument, h: Handle) -> Vec<(&'static str, Value)> {
-    let xdata = if let Some(data) = doc.object_xdata(h) {
-        super::entities::extended_data(doc, data)
-    } else if doc.eed_by_handle.get(&h).is_some_and(|v| !v.is_empty()) {
-        json!(UNMAPPED)
-    } else {
-        json!([])
-    };
+    let xdata = super::xdata::object_extended_data(doc, h);
     vec![
         ("ExtendedData", xdata),
         ("HasDynamicSubclass", json!(false)),
@@ -627,26 +633,28 @@ fn extension_entry(doc: &CadDocument, owner: Handle, key: &str) -> Option<Handle
 
 /// Project a retained source STYLE, including unnamed entries overwritten in the native table.
 pub(super) fn text_style(doc: &CadDocument, v: &crate::tables::TextStyle, out: &mut Vec<Value>) {
-        entry(
-            doc,
-            v.handle,
-            "TextStyle",
-            doc.text_styles.handle(),
-            vec![
-                ("BigFontFilename", json!(v.big_font_file)),
-                ("Filename", json!(v.font_file)),
-                ("Height", json!(number(v.height))),
-                ("IsShapeFile", json!(v.is_shape_file)),
-                ("LastHeight", json!(number(v.last_height))),
-                (
-                    "MirrorFlag",
-                    json!((v.flags.backward as i16 * 2) | (v.flags.upside_down as i16 * 4)),
-                ),
-                ("Name", json!(v.name)),
-                ("ObliqueAngle", json!(number(v.oblique_angle))),
-                ("TrueType", json!(v.true_type_font_flags)),
-                ("Width", json!(number(v.width_factor))),
-            ],
-            out,
-        );
+    entry(
+        doc,
+        v.handle,
+        "TextStyle",
+        doc.text_styles.handle(),
+        vec![
+            ("BigFontFilename", json!(v.big_font_file)),
+            ("Filename", json!(v.font_file)),
+            ("Height", json!(number(v.height))),
+            ("IsShapeFile", json!(v.is_shape_file)),
+            ("LastHeight", json!(number(v.last_height))),
+            (
+                "MirrorFlag",
+                json!((v.flags.backward as i16 * 2) | (v.flags.upside_down as i16 * 4)),
+            ),
+            ("Name", json!(v.name)),
+            ("ObliqueAngle", json!(number(v.oblique_angle))),
+            ("TrueType", json!(v.true_type_font_flags)),
+            ("Width", json!(number(v.width_factor))),
+        ],
+        out,
+    );
+    out.last_mut().expect("text style record")["props"]["ExtendedData"] =
+        super::xdata::text_style_extended_data(doc, v);
 }

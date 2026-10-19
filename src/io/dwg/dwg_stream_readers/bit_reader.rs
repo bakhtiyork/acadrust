@@ -970,10 +970,20 @@ impl DwgBitReader {
     ///
     /// Returns (Color, Transparency, bool has_color_handle).
     pub fn read_en_color(&mut self) -> (Color, Transparency, bool) {
+        let (color, transparency, has_handle, _) = self.read_en_color_with_source();
+        (color, transparency, has_handle)
+    }
+
+    /// Retain the ENC word and optional packed transparency without changing
+    /// the native interpretation. No additional payload allocation is needed.
+    pub(crate) fn read_en_color_with_source(
+        &mut self,
+    ) -> (Color, Transparency, bool, Option<(u16, u32)>) {
         if self.dxf_version >= DxfVersion::AC1018 {
             // R2004+
             let size = self.read_bit_short();
             let mut transparency = Transparency::BY_LAYER;
+            let mut raw_transparency = 0;
 
             if size != 0 {
                 let flags = (size as u16) & 0xFF00;
@@ -1018,12 +1028,18 @@ impl DwgBitReader {
                 // value, matching the entity ENC field order.
                 if (flags & 0x2000) > 0 {
                     let value = self.read_bit_long();
-                    transparency = Transparency::from_alpha_value(value as u32);
+                    raw_transparency = value as u32;
+                    transparency = Transparency::from_alpha_value(raw_transparency);
                 }
 
-                (color, transparency, is_book_color)
+                (
+                    color,
+                    transparency,
+                    is_book_color,
+                    Some((size as u16, raw_transparency)),
+                )
             } else {
-                (Color::ByBlock, Transparency::BY_LAYER, false)
+                (Color::ByBlock, Transparency::BY_LAYER, false, Some((0, 0)))
             }
         } else {
             // Pre-R2004
@@ -1032,6 +1048,7 @@ impl DwgBitReader {
                 Color::from_index(color_number),
                 Transparency::BY_LAYER,
                 false,
+                None,
             )
         }
     }

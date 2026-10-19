@@ -2,7 +2,7 @@
 
 use crate::error::Result;
 use crate::io::dxf::{DxfCode, GroupCodeValueType};
-use crate::types::Vector3;
+use crate::types::{Handle, Vector3};
 
 /// Typed value of a DXF code pair
 #[derive(Debug, Clone)]
@@ -217,6 +217,12 @@ pub trait DxfStreamReader {
     fn take_recorded_xdata(&mut self) -> (Option<String>, Vec<DxfCodePair>) {
         (None, Vec::new())
     }
+
+    /// Return the first owner handle seen outside a defined group in the
+    /// currently-recorded object.
+    fn take_recorded_owner(&mut self) -> Option<Handle> {
+        None
+    }
 }
 
 pub(crate) struct XDataRecorder {
@@ -224,7 +230,14 @@ pub(crate) struct XDataRecorder {
     pending: Vec<DxfCodePair>,
     recording: bool,
     in_xdata: bool,
+    // Defined groups are not XDATA, but object readers that do not model a
+    // common field still need the two standard groups below.  Keep their
+    // pairs in the same record-level side channel so the section reader can
+    // project them after the typed parser has finished.
+    defined_group_depth: usize,
+    record_defined_group: bool,
     handle: Option<String>,
+    owner: Option<Handle>,
     recorded: Vec<DxfCodePair>,
 }
 
@@ -235,7 +248,10 @@ impl XDataRecorder {
             pending: Vec::new(),
             recording: false,
             in_xdata: false,
+            defined_group_depth: 0,
+            record_defined_group: false,
             handle: None,
+            owner: None,
             recorded: Vec::new(),
         }
     }
@@ -249,10 +265,51 @@ impl DxfStreamReader for XDataRecorder {
         let pair = self.inner.read_pair()?;
         if self.recording {
             if let Some(pair) = &pair {
-                if pair.code == 1001 {
+                let marker = pair.value_string.trim();
+                // A code-0 record boundary always wins over a malformed
+                // unterminated 102 group. Without this reset, the next
+                // object's pairs would be treated as part of the old group.
+                if pair.code == 0 {
+                    self.defined_group_depth = 0;
+                    self.record_defined_group = false;
+                    self.in_xdata = false;
+                } else if pair.code == 102 {
+                    if self.defined_group_depth == 0 {
+                        if marker.starts_with('{') {
+                            self.defined_group_depth = 1;
+                            self.record_defined_group =
+                                matches!(marker, "{ACAD_REACTORS" | "{ACAD_XDICTIONARY");
+                            if self.record_defined_group {
+                                self.recorded.push(pair.clone());
+                            }
+                        }
+                    } else {
+                        if self.record_defined_group {
+                            self.recorded.push(pair.clone());
+                        }
+                        if marker == "}" {
+                            self.defined_group_depth = self.defined_group_depth.saturating_sub(1);
+                            if self.defined_group_depth == 0 {
+                                self.record_defined_group = false;
+                            }
+                        } else if marker.starts_with('{') {
+                            self.defined_group_depth = self.defined_group_depth.saturating_add(1);
+                        }
+                    }
+                    self.in_xdata = false;
+                } else if self.defined_group_depth > 0 {
+                    if self.record_defined_group {
+                        self.recorded.push(pair.clone());
+                    }
+                    // Defined groups have their own code ranges.  Do not let
+                    // a nested 1001 or a non-XDATA code alter XDATA state.
+                } else if pair.code == 1001 {
                     self.in_xdata = true;
                 } else if !(1000..=1071).contains(&pair.code) {
                     self.in_xdata = false;
+                    if pair.code == 330 && self.owner.is_none() {
+                        self.owner = pair.as_handle().map(Handle::new);
+                    }
                 }
                 if self.in_xdata {
                     self.recorded.push(pair.clone());
@@ -291,12 +348,19 @@ impl DxfStreamReader for XDataRecorder {
     fn record_xdata(&mut self, on: bool) {
         self.recording = on;
         self.in_xdata = false;
+        self.defined_group_depth = 0;
+        self.record_defined_group = false;
         self.handle = None;
+        self.owner = None;
         self.recorded.clear();
     }
 
     fn take_recorded_xdata(&mut self) -> (Option<String>, Vec<DxfCodePair>) {
         (self.handle.take(), std::mem::take(&mut self.recorded))
+    }
+
+    fn take_recorded_owner(&mut self) -> Option<Handle> {
+        self.owner.take()
     }
 }
 

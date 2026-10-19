@@ -689,6 +689,51 @@ impl ObjectType {
         }
     }
 
+    /// Restore the owner captured from the first code 330 outside a DXF
+    /// defined group. A number of object readers also use 330 for reactor
+    /// members, so their last-seen owner can otherwise be overwritten by a
+    /// `{ACAD_REACTORS` group.
+    pub(crate) fn set_owner(&mut self, owner: Handle) {
+        match self {
+            ObjectType::Dictionary(value) => value.owner = owner,
+            ObjectType::Layout(value) => value.owner = owner,
+            ObjectType::XRecord(value) => value.owner = owner,
+            ObjectType::Group(value) => value.owner = owner,
+            ObjectType::MLineStyle(value) => value.owner = owner,
+            ObjectType::ImageDefinition(value) => value.owner = owner,
+            ObjectType::UnderlayDefinition(value) => value.owner_handle = owner,
+            ObjectType::PlotSettings(value) => value.owner = owner,
+            ObjectType::MultiLeaderStyle(value) => value.owner_handle = owner,
+            ObjectType::TableStyle(value) => value.owner_handle = owner,
+            ObjectType::TableContent(value) => value.common.owner_handle = owner,
+            ObjectType::Scale(value) => value.owner_handle = owner,
+            ObjectType::ObjectContextData(value) => value.owner_handle = owner,
+            ObjectType::SortEntitiesTable(value) => value.owner_handle = owner,
+            ObjectType::DictionaryVariable(value) => value.owner_handle = owner,
+            ObjectType::VisualStyle(value) => value.owner = owner,
+            ObjectType::Material(value) => value.owner = owner,
+            ObjectType::ImageDefinitionReactor(value) => value.owner = owner,
+            ObjectType::GeoData(value) => value.owner = owner,
+            ObjectType::SpatialFilter(value) => value.owner = owner,
+            ObjectType::RasterVariables(value) => value.owner = owner,
+            ObjectType::BookColor(value) => value.owner = owner,
+            ObjectType::PlaceHolder(value) => value.owner = owner,
+            ObjectType::DictionaryWithDefault(value) => value.owner = owner,
+            ObjectType::WipeoutVariables(value) => value.owner = owner,
+            ObjectType::BlockVisibilityParameter(value) => value.owner = owner,
+            ObjectType::DynamicBlock(value) => value.owner = owner,
+            ObjectType::Associative(value) => value.owner = owner,
+            ObjectType::ClassObject(value) => value.owner = owner,
+            ObjectType::DataObject(value) => value.owner = owner,
+            ObjectType::Field(value) => value.owner = owner,
+            ObjectType::FieldList(value) => value.owner = owner,
+            ObjectType::RegisteredClass(value) => value.owner = owner,
+            ObjectType::DgnLineStyle(value) => value.owner = owner,
+            ObjectType::ProxyObject(value) => value.owner = owner,
+            ObjectType::Unknown { owner: value, .. } => *value = owner,
+        }
+    }
+
     /// Whether the object's intrinsic handle is NULL. Used by document
     /// resolution to find records that arrived without a handle.
     pub(crate) fn has_null_handle(&self) -> bool {

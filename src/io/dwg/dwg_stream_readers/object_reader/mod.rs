@@ -76,6 +76,8 @@ pub struct EntityCommonData {
     pub color: Color,
     /// Transparency
     pub transparency: Transparency,
+    /// Original R2004+ ENC word and packed transparency.
+    pub color_source: Option<(u16, u32)>,
     /// Line weight (raw DWG index)
     pub line_weight: u8,
     /// Linetype scale
@@ -542,10 +544,10 @@ impl DwgObjectReader {
         }
 
         // Color
-        let (color, transparency, has_color_handle) = if self.version.r2000_plus() {
-            reader.read_en_color()
+        let (color, transparency, has_color_handle, color_source) = if self.version.r2000_plus() {
+            reader.read_en_color_with_source()
         } else {
-            (reader.read_cm_color(), Transparency::default(), false)
+            (reader.read_cm_color(), Transparency::default(), false, None)
         };
 
         // R2004+: Color book color handle (hard pointer) — only if flagged
@@ -573,7 +575,10 @@ impl DwgObjectReader {
                 xdictionary_handle,
                 color,
                 transparency,
-                line_weight: 0,
+                color_source,
+                // R13/R14 have no lineweight slot; retain the entity's
+                // ByLayer default rather than manufacturing a zero width.
+                line_weight: crate::types::LineWeight::ByLayer.to_dwg_index(),
                 linetype_scale,
                 invisible,
                 layer_handle,
@@ -654,7 +659,7 @@ impl DwgObjectReader {
         let line_weight = if self.version.r2000_plus() {
             reader.read_byte()
         } else {
-            0
+            crate::types::LineWeight::ByLayer.to_dwg_index()
         };
 
         EntityCommonData {
@@ -667,6 +672,7 @@ impl DwgObjectReader {
             xdictionary_handle,
             color,
             transparency,
+            color_source,
             line_weight,
             linetype_scale,
             invisible,

@@ -1,6 +1,7 @@
 //! Block record table entry
 
 use super::TableEntry;
+use crate::entities::EntityCommon;
 use crate::types::{Handle, Vector3};
 
 /// Block record flags
@@ -77,6 +78,14 @@ pub struct BlockRecord {
     pub insert_handles: Vec<Handle>,
     /// Block insertion base point (read from BLOCK entity in DWG)
     pub base_point: Vector3,
+    /// Common properties captured from the BLOCK begin marker in a DXF
+    /// BLOCKS section. The marker is represented by the block record in the
+    /// native model, so retain its common data here instead of discarding it.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub block_entity_common: Option<EntityCommon>,
+    /// Common properties captured from the matching ENDBLK marker.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub block_end_common: Option<EntityCommon>,
 }
 
 impl BlockRecord {
@@ -99,6 +108,8 @@ impl BlockRecord {
             preview_data: Vec::new(),
             insert_handles: Vec::new(),
             base_point: Vector3::ZERO,
+            block_entity_common: None,
+            block_end_common: None,
         }
     }
 
@@ -121,6 +132,8 @@ impl BlockRecord {
             preview_data: Vec::new(),
             insert_handles: Vec::new(),
             base_point: Vector3::ZERO,
+            block_entity_common: None,
+            block_end_common: None,
         }
     }
 
@@ -143,6 +156,8 @@ impl BlockRecord {
             preview_data: Vec::new(),
             insert_handles: Vec::new(),
             base_point: Vector3::ZERO,
+            block_entity_common: None,
+            block_end_common: None,
         }
     }
 
