@@ -14,6 +14,7 @@ fn metadata(ty: &str) -> Vec<(&'static str, Value)> {
             ("SubclassMarker", json!("AcDbUCSTableRecord")),
         ],
         "BlockEnd" => vec![
+            ("ProxyGeometries", json!([])),
             ("ObjectName", json!("ENDBLK")),
             ("ObjectType", json!(5)),
             ("SubclassMarker", json!("AcDbBlockEnd")),
@@ -94,6 +95,7 @@ fn metadata(ty: &str) -> Vec<(&'static str, Value)> {
             ("SubclassMarker", json!("AcDbLinetypeTableRecord")),
         ],
         "Block" => vec![
+            ("ProxyGeometries", json!([])),
             ("ObjectName", json!("BLOCK")),
             ("ObjectType", json!(4)),
             ("SubclassMarker", json!("AcDbBlockBegin")),
@@ -366,6 +368,7 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
                 ("Rounding", json!(number(v.dimrnd))),
                 ("ScaleFactor", json!(number(v.dimscale))),
                 ("SeparateArrowBlocks", json!(v.dimsah)),
+                ("Style", optional_handle(Some(v.dimtxsty_handle))),
                 ("SuppressFirstDimensionLine", json!(v.dimsd1)),
                 ("SuppressFirstExtensionLine", json!(v.dimse1)),
                 ("SuppressOutsideExtensions", json!(v.dimsoxd)),

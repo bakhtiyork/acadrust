@@ -1,7 +1,8 @@
 //! Canonical ACadSharp differential dump, with unavailable values marked `!unmapped`.
 //!
 //! Regenerate `schema.tsv` with CadKit's `Tools/AcadDump/run.sh gen-rust-checklist`.
-//! This view never changes the document or creates missing model objects.
+//! Dumping never changes the document. [`new_document`] explicitly creates
+//! ACadSharp's default graph without changing the native constructor's policy.
 
 use crate::types::{Color, DxfVersion, Handle, Transparency, Vector2, Vector3};
 use crate::CadDocument;
@@ -12,10 +13,13 @@ use std::sync::OnceLock;
 
 mod entities;
 mod header;
+mod new_document;
 mod objects;
 mod palette;
 mod tables;
 mod type_names;
+
+pub use new_document::new_document;
 
 pub const UNMAPPED: &str = "!unmapped";
 pub const SCHEMA: &str = include_str!("schema.tsv");

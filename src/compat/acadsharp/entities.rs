@@ -85,7 +85,9 @@ pub(super) fn common(
         ("Material", optional_handle(common.material_handle)),
         ("ObjectName", Value::String(object_name.to_string())),
         ("ObjectType", enum_value(object_type)),
-        ("ProxyGeometries", unmapped()),
+        // DwgReaderConfiguration.IgnoreProxyGraphics defaults to true; the
+        // DXF builder always ignores them. Retain native graphic_data intact.
+        ("ProxyGeometries", array([])),
         ("Reactors", handles(common.reactors.iter().copied())),
         ("SubclassMarker", Value::String(subclass.to_string())),
         ("Transparency", transparency(common.transparency)),
@@ -270,6 +272,7 @@ fn polyline3d_vertices(
                         ("Location", vec3(vertex.position)),
                         ("ObjectName", Value::String("VERTEX".to_string())),
                         ("ObjectType", enum_value(0x0B)),
+                        ("ProxyGeometries", array([])),
                         (
                             "SubclassMarker",
                             Value::String("AcDb3dPolylineVertex".to_string()),

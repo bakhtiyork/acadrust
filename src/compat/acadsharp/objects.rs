@@ -15,7 +15,7 @@ use crate::objects::{
 use crate::tables::TableEntry;
 use crate::types::{Color, Handle, Matrix4, Vector2, Vector3};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{color, handle, number, optional_handle, props, record, vec2, vec3};
 
@@ -27,12 +27,28 @@ pub(super) fn collect(doc: &crate::CadDocument, out: &mut Vec<Value>) {
     let mut handles: Vec<Handle> = doc.objects.keys().copied().collect();
     handles.sort_unstable();
     let mut emitted = HashSet::with_capacity(handles.len());
+    // Layout.PaperViewport is the first viewport in its associated block,
+    // independent of LastActiveViewport and the source layout's viewport list.
+    // Index once, rather than scanning the document for every layout.
+    let paper_viewports: HashMap<_, _> = doc
+        .block_records
+        .iter()
+        .map(|block| {
+            let first = block.entity_handles.iter().copied().find(|h| {
+                matches!(
+                    doc.get_entity(*h),
+                    Some(crate::entities::EntityType::Viewport(_))
+                )
+            });
+            (block.handle, first)
+        })
+        .collect();
 
     for object_handle in handles {
         let Some(object) = doc.objects.get(&object_handle) else {
             continue;
         };
-        if let Some(value) = dump_object(doc, object_handle, object) {
+        if let Some(value) = dump_object(doc, object_handle, object, &paper_viewports) {
             out.push(enrich_object_record(
                 doc,
                 object_handle,
@@ -89,14 +105,19 @@ fn dump_object(
     _doc: &crate::CadDocument,
     map_handle: Handle,
     object: &ObjectType,
+    paper_viewports: &HashMap<Handle, Option<Handle>>,
 ) -> Option<Value> {
     Some(match object {
         ObjectType::Dictionary(value) => dump_dictionary(map_handle, value),
         ObjectType::DictionaryWithDefault(value) => dump_dictionary_with_default(map_handle, value),
         ObjectType::XRecord(value) => dump_xrecord(_doc, map_handle, value),
-        ObjectType::Layout(value) => dump_layout(map_handle, value),
+        ObjectType::Layout(value) => dump_layout(
+            map_handle,
+            value,
+            paper_viewports.get(&value.block_record).copied().flatten(),
+        ),
         ObjectType::Group(value) => dump_group(map_handle, value),
-        ObjectType::MLineStyle(value) => dump_mline_style(map_handle, value),
+        ObjectType::MLineStyle(value) => dump_mline_style(_doc, map_handle, value),
         ObjectType::MultiLeaderStyle(value) => dump_mleader_style(map_handle, value),
         ObjectType::TableStyle(value) => dump_table_style(map_handle, value),
         ObjectType::Scale(value) => dump_scale(map_handle, value),
@@ -478,7 +499,7 @@ fn hex_bytes(bytes: &[u8]) -> String {
     value
 }
 
-fn dump_layout(handle_value: Handle, value: &Layout) -> Value {
+fn dump_layout(handle_value: Handle, value: &Layout, paper_viewport: Option<Handle>) -> Value {
     let mut p = common(
         "LAYOUT",
         0x52,
@@ -489,12 +510,12 @@ fn dump_layout(handle_value: Handle, value: &Layout) -> Value {
     );
     p.extend([
         ("AssociatedBlock", handle(value.block_record)),
-        ("BaseUCS", handle(value.base_ucs)),
+        ("BaseUCS", optional_handle(Some(value.base_ucs))),
         ("Elevation", number(value.elevation)),
         ("Flags", int(value.plot_flags.to_bits() as i64)),
         ("InsertionBasePoint", tuple3(value.insertion_base)),
         ("IsPaperSpace", bool_value(value.flags & 1 != 0)),
-        ("LastActiveViewport", handle(value.viewport)),
+        ("LastActiveViewport", optional_handle(Some(value.viewport))),
         ("LayoutFlags", int(value.flags as i64)),
         ("MaxExtents", tuple3(value.max_extents)),
         ("MaxLimits", tuple2(value.max_limits)),
@@ -531,7 +552,7 @@ fn dump_layout(handle_value: Handle, value: &Layout) -> Value {
         ("StyleSheet", text(&value.plot_style_sheet)),
         ("SystemPrinterName", text(&value.plot_printer_name)),
         ("TabOrder", int(value.tab_order as i64)),
-        ("UCS", handle(value.named_ucs)),
+        ("UCS", optional_handle(Some(value.named_ucs))),
         ("UcsOrthographicType", int(value.ucs_ortho_type as i64)),
         (
             "UnprintableMargin",
@@ -563,6 +584,7 @@ fn dump_layout(handle_value: Handle, value: &Layout) -> Value {
         }),
     ));
     p.push(("Viewports", handles(value.viewports.iter().copied())));
+    p.push(("PaperViewport", optional_handle(paper_viewport)));
     record(handle_value, "Layout", value.owner, props("Layout", p))
 }
 
@@ -577,7 +599,7 @@ fn dump_group(handle_value: Handle, value: &Group) -> Value {
     record(handle_value, "Group", value.owner, props("Group", p))
 }
 
-fn dump_mline_style(handle_value: Handle, value: &MLineStyle) -> Value {
+fn dump_mline_style(doc: &crate::CadDocument, handle_value: Handle, value: &MLineStyle) -> Value {
     let mut p = common(
         "MLINESTYLE",
         0x49,
@@ -599,6 +621,10 @@ fn dump_mline_style(handle_value: Handle, value: &MLineStyle) -> Value {
                             "MLineStyle.Element",
                             [
                                 ("Color", color(element.color)),
+                                (
+                                    "LineType",
+                                    optional_handle(doc.line_types.get(&element.linetype).map(|line| line.handle)),
+                                ),
                                 ("Offset", number(element.offset)),
                             ],
                         )

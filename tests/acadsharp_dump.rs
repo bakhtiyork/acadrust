@@ -249,7 +249,7 @@ fn cli_new_document() {
         String::from_utf8_lossy(&result.stderr)
     );
     let value: Value = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
-    assert_eq!(value, dump_document(&CadDocument::new(), "", "new"));
+    assert_eq!(value, dump_document(&dump::new_document(), "", "new"));
     assert!(String::from_utf8(result.stdout).unwrap().contains("\t"));
 }
 #[test]

@@ -3301,6 +3301,9 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 if !class.dxf_name.is_empty() {
+                    // Keep the raw source record for the compatibility view
+                    // before merging it into the native writer registry.
+                    document.classes.record_source(class.clone());
                     document.classes.add_or_update(class);
                 }
             }
