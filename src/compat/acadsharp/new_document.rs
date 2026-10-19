@@ -5,7 +5,7 @@
 //! table entries; registering a layout registers its block, markers, then entities.
 //! No identities are remapped after construction and no fixture handles are used.
 
-use crate::entities::{Block, BlockEnd, EntityType, Viewport};
+use crate::entities::{Block, BlockEnd, EntityType, GridFlags, Viewport};
 use crate::objects::{
     Dictionary, DictionaryVariable, Layout, MLineStyle, Material, MultiLeaderStyle, ObjectType,
     Scale, TableStyle,
@@ -182,6 +182,8 @@ fn create_defaults(doc: &mut CadDocument) {
     doc.header.current_text_style_handle = text_style;
     doc.header.dim_text_style_handle = text_style;
     let mut dimension = DimStyle::standard();
+    dimension.dimpost.clear();
+    dimension.dimsah = false;
     dimension.handle = doc.allocate_handle();
     dimension.dimtxsty_handle = text_style;
     doc.header.current_dimstyle_handle = dimension.handle;
@@ -189,6 +191,13 @@ fn create_defaults(doc: &mut CadDocument) {
         .add(dimension)
         .expect("unique default dimension style");
     let mut vport = VPort::active();
+    // ACadSharp's VPort constructor defaults.  The native VPort constructor
+    // keeps AutoCAD writer defaults (100, grid off, and flag 2), so apply the
+    // compatibility values only to this explicit ACadSharp document graph.
+    vport.circle_zoom = 1000;
+    vport.front_clip_at_eye = true;
+    vport.grid_on = true;
+    vport.grid_flags = GridFlags::from_bits(3);
     vport.handle = doc.allocate_handle();
     doc.vports
         .add(vport)
@@ -253,6 +262,7 @@ fn add_scale(doc: &mut CadDocument, paper: i32, drawing: i32) {
 }
 
 fn ensure_line_type(doc: &mut CadDocument, mut value: LineType) -> Handle {
+    value.description.clear();
     if let Some(existing) = doc.line_types.get(&value.name) {
         return existing.handle;
     }
@@ -267,6 +277,8 @@ fn ensure_text_style(doc: &mut CadDocument) -> Handle {
         return existing.handle;
     }
     let mut value = TextStyle::standard();
+    value.font_file.clear();
+    value.last_height = 0.0;
     value.handle = doc.allocate_handle();
     let handle = value.handle;
     doc.text_styles

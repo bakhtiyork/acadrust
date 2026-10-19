@@ -154,6 +154,16 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
             "Layer",
             doc.layers.handle(),
             vec![
+                (
+                    "Flags",
+                    json!(
+                        symbol_flags(doc, v.source_flags) & !23
+                            | i16::from(v.flags.frozen)
+                            | (i16::from(v.flags.frozen_in_new_viewport) << 1)
+                            | (i16::from(v.flags.locked) << 2)
+                            | (i16::from(v.flags.xref_dependent) << 4)
+                    ),
+                ),
                 ("Color", json!(color(v.color))),
                 ("IsOn", json!(!v.flags.off)),
                 (
@@ -165,10 +175,27 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
                         .unwrap_or_else(|| json!(UNMAPPED))),
                 ),
                 ("LineWeight", json!(v.line_weight.value())),
-                ("Material", json!(optional_handle(Some(v.material)))),
+                (
+                    "Material",
+                    if super::registration::source_document(doc) {
+                        Value::Null
+                    } else {
+                        optional_handle(Some(v.material))
+                    },
+                ),
                 ("Name", json!(v.name)),
-                ("PlotFlag", json!(v.is_plottable)),
-                ("PlotStyleName", json!(v.plotstyle_handle.value())),
+                (
+                    "PlotFlag",
+                    json!(v.is_plottable && !v.name.eq_ignore_ascii_case("defpoints")),
+                ),
+                (
+                    "PlotStyleName",
+                    json!(if source_dwg(doc) {
+                        0
+                    } else {
+                        v.plotstyle_handle.value()
+                    }),
+                ),
             ],
             out,
         );
@@ -181,9 +208,28 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
             "LineType",
             doc.line_types.handle(),
             vec![
+                (
+                    "Flags",
+                    json!(
+                        symbol_flags(doc, v.source_flags) & !16
+                            | (i16::from(v.xref_dependent) << 4)
+                    ),
+                ),
                 ("Alignment", character(v.alignment)),
-                ("Description", json!(v.description)),
-                ("Segments", line_type_segments(v)),
+                (
+                    "Description",
+                    if !v.description_present
+                        && (v.description.is_empty()
+                            || (super::registration::source_document(doc)
+                                && v.name.eq_ignore_ascii_case("Continuous")
+                                && v.description == "Solid line"))
+                    {
+                        Value::Null
+                    } else {
+                        json!(v.description)
+                    },
+                ),
+                ("Segments", line_type_segments(doc, v)),
                 (
                     "HasShapes",
                     json!(v
@@ -196,14 +242,32 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
                 ),
                 ("IsComplex", json!(!v.elements.is_empty())),
                 ("Name", json!(v.name)),
-                ("PatternLength", json!(number(v.pattern_length))),
+                (
+                    "PatternLength",
+                    number(v.elements.iter().map(|s| s.length.abs()).sum()),
+                ),
             ],
             out,
         );
     }
     table(doc, &doc.text_styles, "TextStylesTable", out);
+    let mut used_names = std::collections::HashSet::new();
+    let mut unnamed = 0;
     for v in doc.text_styles.iter() {
         text_style(doc, v, out);
+        if v.name.is_empty() {
+            let name = loop {
+                let candidate = format!("unnamed{unnamed}");
+                unnamed += 1;
+                if !used_names.contains(&crate::tables::normalize_name(&candidate)) {
+                    break candidate;
+                }
+            };
+            used_names.insert(crate::tables::normalize_name(&name));
+            out.last_mut().unwrap()["props"]["Name"] = json!(name);
+        } else {
+            used_names.insert(crate::tables::normalize_name(&v.name));
+        }
     }
     table(doc, &doc.block_records, "BlockRecordsTable", out);
     for v in doc.block_records.iter() {
@@ -292,92 +356,7 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
             v.handle,
             "DimensionStyle",
             doc.dim_styles.handle(),
-            vec![
-                (
-                    "Flags",
-                    json!(
-                        (v.xref_dependent as i16) * 16
-                            | (v.xref_resolved as i16) * 32
-                            | (v.xref_reference as i16) * 64
-                    ),
-                ),
-                ("AlternateDimensioningSuffix", json!(v.dimapost)),
-                ("AlternateUnitDecimalPlaces", json!(v.dimaltd)),
-                ("AlternateUnitDimensioning", json!(v.dimalt)),
-                ("AlternateUnitFormat", json!(v.dimaltu)),
-                ("AlternateUnitRounding", json!(number(v.dimaltrnd))),
-                ("AlternateUnitScaleFactor", json!(number(v.dimaltf))),
-                ("AlternateUnitToleranceDecimalPlaces", json!(v.dimalttd)),
-                ("AlternateUnitToleranceZeroHandling", json!(v.dimalttz)),
-                ("AlternateUnitZeroHandling", json!(v.dimaltz)),
-                ("AngularUnit", json!(v.dimaunit)),
-                ("AngularZeroHandling", json!(v.dimazin)),
-                ("ArcLengthSymbolPosition", json!(v.dimarcsym)),
-                ("ArrowSize", json!(number(v.dimasz))),
-                ("CenterMarkSize", json!(number(v.dimcen))),
-                ("CursorUpdate", json!(v.dimupt)),
-                ("DecimalPlaces", json!(v.dimdec)),
-                ("DecimalSeparator", json!(v.dimdsep)),
-                ("DimensionTextArrowFit", json!(v.dimatfit)),
-                (
-                    "ExtensionLineColor",
-                    json!(color(
-                        v.dimclre_true_color
-                            .unwrap_or_else(|| Color::from_index(v.dimclre))
-                    )),
-                ),
-                ("ExtensionLineExtension", json!(number(v.dimexe))),
-                ("ExtensionLineOffset", json!(number(v.dimexo))),
-                ("ExtensionLineWeight", json!(v.dimlwe)),
-                ("FixedExtensionLineLength", json!(number(v.dimfxl))),
-                ("FractionFormat", json!(v.dimfrac)),
-                ("GenerateTolerances", json!(v.dimtol)),
-                ("IsExtensionLineLengthFixed", json!(v.dimfxlon)),
-                (
-                    "JoggedRadiusDimensionTransverseSegmentAngle",
-                    json!(number(v.dimjogang)),
-                ),
-                ("LimitsGeneration", json!(v.dimlim)),
-                ("LinearScaleFactor", json!(number(v.dimlfac))),
-                ("LinearUnitFormat", json!(v.dimlunit)),
-                ("MinusTolerance", json!(number(v.dimtm))),
-                ("Name", json!(v.name)),
-                ("PlusTolerance", json!(number(v.dimtp))),
-                ("PostFix", json!(v.dimpost)),
-                ("Rounding", json!(number(v.dimrnd))),
-                ("ScaleFactor", json!(number(v.dimscale))),
-                ("SeparateArrowBlocks", json!(v.dimsah)),
-                ("Style", optional_handle(Some(v.dimtxsty_handle))),
-                ("SuppressFirstDimensionLine", json!(v.dimsd1)),
-                ("SuppressFirstExtensionLine", json!(v.dimse1)),
-                ("SuppressOutsideExtensions", json!(v.dimsoxd)),
-                ("SuppressSecondDimensionLine", json!(v.dimsd2)),
-                ("SuppressSecondExtensionLine", json!(v.dimse2)),
-                ("TextBackgroundFillMode", json!(v.dimtfill)),
-                (
-                    "TextColor",
-                    json!(color(
-                        v.dimclrt_true_color
-                            .unwrap_or_else(|| Color::from_index(v.dimclrt))
-                    )),
-                ),
-                ("TextDirection", json!(v.dimtxtdirection as i16)),
-                ("TextHeight", json!(number(v.dimtxt))),
-                ("TextHorizontalAlignment", json!(v.dimjust)),
-                ("TextInsideExtensions", json!(v.dimtix)),
-                ("TextInsideHorizontal", json!(v.dimtih)),
-                ("TextMovement", json!(v.dimtmove)),
-                ("TextOutsideExtensions", json!(v.dimtofl)),
-                ("TextOutsideHorizontal", json!(v.dimtoh)),
-                ("TextVerticalAlignment", json!(v.dimtad)),
-                ("TextVerticalPosition", json!(number(v.dimtvp))),
-                ("TickSize", json!(number(v.dimtsz))),
-                ("ToleranceAlignment", json!(v.dimtolj)),
-                ("ToleranceDecimalPlaces", json!(v.dimtdec)),
-                ("ToleranceScaleFactor", json!(number(v.dimtfac))),
-                ("ToleranceZeroHandling", json!(v.dimtzin)),
-                ("ZeroHandling", json!(v.dimzin)),
-            ],
+            super::table_dimstyle::map(doc, v),
             out,
         );
     }
@@ -388,7 +367,10 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
             v.handle,
             "AppId",
             doc.app_ids.handle(),
-            vec![("Name", json!(v.name))],
+            vec![
+                ("Name", json!(v.name)),
+                ("Flags", json!(symbol_flags(doc, v.source_flags))),
+            ],
             out,
         );
     }
@@ -431,7 +413,10 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
                     json!(optional_handle(Some(v.visual_style_handle))),
                 ),
                 ("Width", json!(number(v.width))),
-            ],
+            ]
+            .into_iter()
+            .chain(super::table_viewports::view_overrides(doc, v))
+            .collect(),
             out,
         );
     }
@@ -491,7 +476,10 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
                 ),
                 ("XAxis", json!(vec3(v.ucs_x_axis))),
                 ("YAxis", json!(vec3(v.ucs_y_axis))),
-            ],
+            ]
+            .into_iter()
+            .chain(super::table_viewports::vport_overrides(doc, v))
+            .collect(),
             out,
         );
     }
@@ -554,13 +542,22 @@ fn block_entities(doc: &CadDocument, b: &crate::tables::BlockRecord, out: &mut V
     }
 }
 
-fn line_type_segments(v: &crate::tables::LineType) -> Value {
+fn line_type_segments(doc: &CadDocument, v: &crate::tables::LineType) -> Value {
     use crate::tables::LineTypeComplexContent;
     Value::Array(
         v.elements
             .iter()
             .map(|s| {
-                let mut p = vec![("Length", number(s.length))];
+                let mut p = vec![
+                    ("Length", number(s.length)),
+                    ("Flags", json!(0)),
+                    ("Scale", number(1.0)),
+                    ("Rotation", number(0.0)),
+                    ("Offset", json!([0.0, 0.0])),
+                    ("Style", Value::Null),
+                    ("ShapeNumber", json!(0)),
+                    ("Text", json!("")),
+                ];
                 if let Some(c) = &s.complex {
                     p.extend([
                         (
@@ -574,7 +571,18 @@ fn line_type_segments(v: &crate::tables::LineType) -> Value {
                         ("Scale", number(c.scale)),
                         ("Rotation", number(c.rotation)),
                         ("Offset", json!([number(c.offset[0]), number(c.offset[1])])),
-                        ("Style", optional_handle(Some(c.style_handle))),
+                        (
+                            "Style",
+                            // ACadSharp's DXF segment reader consumes code 340 without
+                            // assigning its template reference; DWG resolves it.
+                            if doc.header.dxf_source_variables.is_none()
+                                && doc.text_styles.iter().any(|s| s.handle == c.style_handle)
+                            {
+                                optional_handle(Some(c.style_handle))
+                            } else {
+                                Value::Null
+                            },
+                        ),
                     ]);
                     match &c.content {
                         LineTypeComplexContent::Shape { shape_number } => {
@@ -627,26 +635,74 @@ fn extension_entry(doc: &CadDocument, owner: Handle, key: &str) -> Option<Handle
 
 /// Project a retained source STYLE, including unnamed entries overwritten in the native table.
 pub(super) fn text_style(doc: &CadDocument, v: &crate::tables::TextStyle, out: &mut Vec<Value>) {
-        entry(
-            doc,
-            v.handle,
-            "TextStyle",
-            doc.text_styles.handle(),
-            vec![
-                ("BigFontFilename", json!(v.big_font_file)),
-                ("Filename", json!(v.font_file)),
-                ("Height", json!(number(v.height))),
-                ("IsShapeFile", json!(v.is_shape_file)),
-                ("LastHeight", json!(number(v.last_height))),
-                (
-                    "MirrorFlag",
-                    json!((v.flags.backward as i16 * 2) | (v.flags.upside_down as i16 * 4)),
+    entry(
+        doc,
+        v.handle,
+        "TextStyle",
+        doc.text_styles.handle(),
+        vec![
+            (
+                "Flags",
+                json!(
+                    symbol_flags(doc, v.source_flags) & !21
+                        | i16::from(v.is_shape_file)
+                        | (i16::from(v.is_vertical) << 2)
+                        | (if source_dwg(doc) {
+                            v.source_flags & 16
+                        } else {
+                            i16::from(v.xref_dependent) << 4
+                        })
                 ),
-                ("Name", json!(v.name)),
-                ("ObliqueAngle", json!(number(v.oblique_angle))),
-                ("TrueType", json!(v.true_type_font_flags)),
-                ("Width", json!(number(v.width_factor))),
-            ],
-            out,
-        );
+            ),
+            (
+                "BigFontFilename",
+                if !v.big_font_file_present && v.big_font_file.is_empty() {
+                    Value::Null
+                } else {
+                    json!(v.big_font_file)
+                },
+            ),
+            (
+                "Filename",
+                if v.dxf_present.is_some_and(|p| p & 1 == 0) && v.font_file == "txt" {
+                    json!("")
+                } else {
+                    json!(v.font_file)
+                },
+            ),
+            ("Height", json!(number(v.height))),
+            ("IsShapeFile", json!(v.is_shape_file)),
+            (
+                "LastHeight",
+                number(
+                    if v.dxf_present.is_some_and(|p| p & 2 == 0) && v.last_height == 2.5 {
+                        0.0
+                    } else {
+                        v.last_height
+                    },
+                ),
+            ),
+            (
+                "MirrorFlag",
+                json!((v.flags.backward as i16 * 2) | (v.flags.upside_down as i16 * 4)),
+            ),
+            ("Name", json!(v.name)),
+            ("ObliqueAngle", json!(number(v.oblique_angle))),
+            ("TrueType", json!(v.font_flags)),
+            ("Width", json!(number(v.width_factor))),
+        ],
+        out,
+    );
+}
+
+// DWG does not assign the DXF-only resolved flag in ACadSharp.
+fn source_dwg(doc: &CadDocument) -> bool {
+    doc.dwg_source_version.is_some()
+}
+fn symbol_flags(doc: &CadDocument, flags: i16) -> i16 {
+    if source_dwg(doc) {
+        flags & !32
+    } else {
+        flags
+    }
 }

@@ -11,6 +11,9 @@ pub struct AppId {
     pub handle: Handle,
     /// Application name
     pub name: String,
+    /// Original symbol-table flags (DXF group 70), including unmodeled bits.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_flags: i16,
 }
 
 impl AppId {
@@ -19,6 +22,7 @@ impl AppId {
         AppId {
             handle: Handle::NULL,
             name: name.into(),
+            source_flags: 0,
         }
     }
 

@@ -58,6 +58,9 @@ pub struct Layer {
     pub handle: Handle,
     /// Layer name
     pub name: String,
+    /// Original symbol-table flags (DXF group 70), including unmodeled bits.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_flags: i16,
     /// Layer flags
     pub flags: LayerFlags,
     /// Layer color
@@ -103,6 +106,7 @@ impl Layer {
         Layer {
             handle: Handle::NULL,
             name: name.into(),
+            source_flags: 0,
             flags: LayerFlags::new(),
             color: Color::WHITE,
             color_name: None,
@@ -124,6 +128,7 @@ impl Layer {
         Layer {
             handle: Handle::NULL,
             name: "0".to_string(),
+            source_flags: 0,
             flags: LayerFlags::standard(),
             color: Color::WHITE,
             color_name: None,

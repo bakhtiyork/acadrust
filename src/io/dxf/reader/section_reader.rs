@@ -9886,9 +9886,20 @@ impl<'a> SectionReader<'a> {
                     layer.book_name = book_name;
                     layer.color_name = color_name;
                 }
+                347 => {
+                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
+                        layer.material = Handle::new(h);
+                    }
+                }
+                390 => {
+                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
+                        layer.plotstyle_handle = Handle::new(h);
+                    }
+                }
                 6 => layer.line_type = pair.value_string.clone(),
                 70 => {
                     if let Some(flags) = pair.as_i16() {
+                        layer.source_flags = flags;
                         layer.flags.frozen = (flags & 1) != 0;
                         layer.flags.frozen_in_new_viewport = (flags & 2) != 0;
                         layer.flags.locked = (flags & 4) != 0;
@@ -9994,11 +10005,19 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 2 => linetype.name = pair.value_string.clone(),
-                3 => linetype.description = pair.value_string.clone(),
+                3 => {
+                    linetype.description = pair.value_string.clone();
+                    linetype.description_present = true;
+                }
                 70 => {
                     if let Some(flags) = pair.as_i16() {
+                        linetype.source_flags = flags;
                         linetype.xref_dependent = (flags & 0x10) != 0;
                     }
+                }
+                72 => {
+                    linetype.alignment =
+                        char::from_u32(pair.as_i16().unwrap_or(65) as u32).unwrap_or('A');
                 }
                 73 => {
                     if let Some(count) = pair.as_i16() {
@@ -10141,6 +10160,7 @@ impl<'a> SectionReader<'a> {
     /// Read a single STYLE entry
     fn read_textstyle_entry(&mut self) -> Result<Option<TextStyle>> {
         let mut style = TextStyle::new("Standard");
+        style.dxf_present = Some(0);
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -10157,13 +10177,21 @@ impl<'a> SectionReader<'a> {
                 2 => style.name = pair.value_string.clone(),
                 70 => {
                     if let Some(f) = pair.as_i16() {
+                        style.source_flags = f;
                         style.is_shape_file = (f & 0x01) != 0;
                         style.is_vertical = (f & 0x04) != 0;
                         style.xref_dependent = (f & 0x10) != 0;
                     }
                 }
-                3 => style.font_file = pair.value_string.clone(),
-                4 => style.big_font_file = pair.value_string.clone(),
+                1071 => style.font_flags = pair.as_i32().unwrap_or(0),
+                3 => {
+                    style.font_file = pair.value_string.clone();
+                    *style.dxf_present.as_mut().unwrap() |= 1;
+                }
+                4 => {
+                    style.big_font_file = pair.value_string.clone();
+                    style.big_font_file_present = true;
+                }
                 40 => {
                     if let Some(height) = pair.as_double() {
                         style.height = height;
@@ -10189,6 +10217,7 @@ impl<'a> SectionReader<'a> {
                 42 => {
                     if let Some(lh) = pair.as_double() {
                         style.last_height = lh;
+                        *style.dxf_present.as_mut().unwrap() |= 2;
                     }
                 }
                 1001 => {
@@ -10465,6 +10494,7 @@ impl<'a> SectionReader<'a> {
     fn read_dimstyle_entry(&mut self) -> Result<Option<DimStyle>> {
         // Omitted groups use the DXF format's built-in defaults.
         let mut ds = DimStyle::dxf_defaults("Standard");
+        ds.dxf_present_codes = Some([0; 6]);
         let mut seen_table_flags = false;
 
         while let Some(pair) = self.reader.read_pair()? {
@@ -10472,6 +10502,9 @@ impl<'a> SectionReader<'a> {
                 self.reader.push_back(pair);
                 break;
             }
+
+            ds.record_dxf_code(pair.code);
+            ds.record_dxf_linear_unit_code(pair.code);
 
             match pair.code {
                 105 => {
@@ -10933,6 +10966,7 @@ impl<'a> SectionReader<'a> {
                         appid.handle = Handle::new(h);
                     }
                 }
+                70 => appid.source_flags = pair.as_i16().unwrap_or(0),
                 2 => appid.name = pair.value_string.clone(),
                 _ => {}
             }
@@ -10982,8 +11016,8 @@ impl<'a> SectionReader<'a> {
         let mut target = PointReader::new();
         let mut direction = PointReader::new();
         let mut ucs_origin = PointReader::new();
-        let mut ucs_x_axis = PointReader::new();
-        let mut ucs_y_axis = PointReader::new();
+        let mut ucs_x_axis_seen = false;
+        let mut ucs_y_axis_seen = false;
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -11011,10 +11045,56 @@ impl<'a> SectionReader<'a> {
                     ucs_origin.add_coordinate(&pair);
                 }
                 111 | 121 | 131 => {
-                    ucs_x_axis.add_coordinate(&pair);
+                    if let Some(v) = pair.as_double() {
+                        if !ucs_x_axis_seen {
+                            // A source record may contain only one axis
+                            // component.  Start that axis at zero so omitted
+                            // components do not inherit View::new defaults.
+                            view.ucs_x_axis = Vector3::ZERO;
+                            ucs_x_axis_seen = true;
+                        }
+                        match pair.code {
+                            111 => {
+                                view.source_field_mask |= View::SOURCE_UCS_X_AXIS_X;
+                                view.ucs_x_axis.x = v;
+                            }
+                            121 => {
+                                view.source_field_mask |= View::SOURCE_UCS_X_AXIS_Y;
+                                view.ucs_x_axis.y = v;
+                            }
+                            131 => {
+                                view.source_field_mask |= View::SOURCE_UCS_X_AXIS_Z;
+                                view.ucs_x_axis.z = v;
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
                 }
                 112 | 122 | 132 => {
-                    ucs_y_axis.add_coordinate(&pair);
+                    if let Some(v) = pair.as_double() {
+                        if !ucs_y_axis_seen {
+                            // See the X-axis branch above: retain each source
+                            // component while defaulting omitted components
+                            // to zero for a partially written axis.
+                            view.ucs_y_axis = Vector3::ZERO;
+                            ucs_y_axis_seen = true;
+                        }
+                        match pair.code {
+                            112 => {
+                                view.source_field_mask |= View::SOURCE_UCS_Y_AXIS_X;
+                                view.ucs_y_axis.x = v;
+                            }
+                            122 => {
+                                view.source_field_mask |= View::SOURCE_UCS_Y_AXIS_Y;
+                                view.ucs_y_axis.y = v;
+                            }
+                            132 => {
+                                view.source_field_mask |= View::SOURCE_UCS_Y_AXIS_Z;
+                                view.ucs_y_axis.z = v;
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
                 }
                 40 => {
                     if let Some(height) = pair.as_double() {
@@ -11061,6 +11141,7 @@ impl<'a> SectionReader<'a> {
                 }
                 71 => {
                     if let Some(v) = pair.as_i16() {
+                        view.source_field_mask |= View::SOURCE_VIEW_MODE;
                         view.perspective = (v & 1) != 0;
                         view.front_clipping = (v & 2) != 0;
                         view.back_clipping = (v & 4) != 0;
@@ -11163,13 +11244,6 @@ impl<'a> SectionReader<'a> {
         if let Some(pt) = ucs_origin.get_point() {
             view.ucs_origin = pt;
         }
-        if let Some(pt) = ucs_x_axis.get_point() {
-            view.ucs_x_axis = pt;
-        }
-        if let Some(pt) = ucs_y_axis.get_point() {
-            view.ucs_y_axis = pt;
-        }
-
         Ok(Some(view))
     }
 
@@ -11352,6 +11426,7 @@ impl<'a> SectionReader<'a> {
                 }
                 60 => {
                     if let Some(v) = pair.as_i16() {
+                        vport.source_field_mask |= VPort::SOURCE_GRID_FLAGS;
                         vport.grid_flags = GridFlags::from_bits(v);
                     }
                 }
@@ -11379,6 +11454,7 @@ impl<'a> SectionReader<'a> {
                 }
                 71 => {
                     if let Some(v) = pair.as_i16() {
+                        vport.source_field_mask |= VPort::SOURCE_VIEW_MODE;
                         vport.perspective = (v & 1) != 0;
                         vport.front_clipping = (v & 2) != 0;
                         vport.back_clipping = (v & 4) != 0;
@@ -11388,6 +11464,7 @@ impl<'a> SectionReader<'a> {
                 }
                 72 => {
                     if let Some(v) = pair.as_i16() {
+                        vport.source_field_mask |= VPort::SOURCE_CIRCLE_ZOOM;
                         vport.circle_zoom = v;
                     }
                 }
@@ -11398,6 +11475,7 @@ impl<'a> SectionReader<'a> {
                 }
                 74 => {
                     if let Some(v) = pair.as_i16() {
+                        vport.source_field_mask |= VPort::SOURCE_UCS_ICON;
                         vport.ucsicon_lower = (v & 1) != 0;
                         vport.ucsicon_origin = (v & 2) != 0;
                     }
@@ -11409,6 +11487,7 @@ impl<'a> SectionReader<'a> {
                 }
                 76 => {
                     if let Some(v) = pair.as_i16() {
+                        vport.source_field_mask |= VPort::SOURCE_SHOW_GRID;
                         vport.grid_on = v != 0;
                     }
                 }
