@@ -8602,13 +8602,30 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i32(90, obj.version)?;
         self.writer.write_handle(330, obj.host_block)?;
         self.writer.write_i16(70, obj.coordinate_type)?;
-        self.writer.write_point3d(10, obj.design_point)?;
-        self.writer.write_point3d(11, obj.reference_point)?;
-        self.writer.write_point2d(12, obj.north_direction)?;
-        self.writer.write_double(40, obj.horizontal_unit_scale)?;
-        self.writer.write_double(41, obj.vertical_unit_scale)?;
-        self.writer.write_i32(91, obj.horizontal_units)?;
-        self.writer.write_i32(92, obj.vertical_units)?;
+        if obj.version == 1 {
+            self.writer.write_double(40, obj.reference_point.y)?;
+            self.writer.write_double(41, obj.reference_point.x)?;
+            self.writer.write_double(42, obj.reference_point.z)?;
+            self.writer.write_i32(91, obj.horizontal_units)?;
+            self.writer.write_point3d(10, obj.design_point)?;
+            self.writer
+                .write_point3d(11, obj.obsolete_observation_point)?;
+            let north_angle =
+                std::f64::consts::FRAC_PI_2 - obj.north_direction.y.atan2(obj.north_direction.x);
+            self.writer.write_double(52, north_angle.to_degrees())?;
+            self.writer.write_double(43, obj.obsolete_scale_vector.x)?;
+            self.writer.write_double(44, obj.obsolete_scale_vector.y)?;
+            self.writer.write_double(45, obj.obsolete_scale_vector.z)?;
+            self.writer.write_double(46, obj.horizontal_unit_scale)?;
+        } else {
+            self.writer.write_point3d(10, obj.design_point)?;
+            self.writer.write_point3d(11, obj.reference_point)?;
+            self.writer.write_point2d(12, obj.north_direction)?;
+            self.writer.write_double(40, obj.horizontal_unit_scale)?;
+            self.writer.write_double(41, obj.vertical_unit_scale)?;
+            self.writer.write_i32(91, obj.horizontal_units)?;
+            self.writer.write_i32(92, obj.vertical_units)?;
+        }
         self.writer.write_point3d(210, obj.up_direction)?;
         self.writer.write_i32(95, obj.scale_estimation_method)?;
         self.writer.write_double(141, obj.user_scale_factor)?;
@@ -8630,8 +8647,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             .write_string(307, &obj.observation_coverage_tag)?;
         self.writer.write_i32(93, obj.mesh_points.len() as i32)?;
         for point in &obj.mesh_points {
-            self.writer.write_point2d(13, point.source)?;
-            self.writer.write_point2d(14, point.destination)?;
+            let source_code = if obj.version == 1 { 12 } else { 13 };
+            self.writer.write_point2d(source_code, point.source)?;
+            self.writer
+                .write_point2d(source_code + 1, point.destination)?;
         }
         self.writer.write_i32(96, obj.mesh_faces.len() as i32)?;
         for face in &obj.mesh_faces {

@@ -841,6 +841,12 @@ pub struct GeoData {
     pub coordinate_projection_radius: f64,
     /// Coordinate system definition (code 301): MapGuide XML (R2010+) or WKT (R2009)
     pub coordinate_system_definition: String,
+    /// Source DXF codes whose presence distinguishes omitted values from defaults.
+    /// Mesh coordinate codes are excluded; `None` means no DXF source metadata.
+    pub dxf_present_codes: Option<Vec<i32>>,
+    /// Source 301/303 text before caret-escape decoding, in source order.
+    /// Kept separately from the native decoded definition and R2009 datum.
+    pub raw_dxf_definition: Option<String>,
     /// R2009 obsolete coordinate-system datum string (code 303).
     pub coordinate_system_datum: String,
     /// R2009 obsolete coordinate-system WKT string (code 304).
@@ -899,6 +905,8 @@ impl GeoData {
             sea_level_elevation: 0.0,
             coordinate_projection_radius: 0.0,
             coordinate_system_definition: String::new(),
+            dxf_present_codes: None,
+            raw_dxf_definition: None,
             coordinate_system_datum: String::new(),
             coordinate_system_wkt: String::new(),
             geo_rss_tag: String::new(),

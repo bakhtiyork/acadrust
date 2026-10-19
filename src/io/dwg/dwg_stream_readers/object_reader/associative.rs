@@ -590,6 +590,11 @@ fn read_dimension_association(reader: &mut DwgMergedReader) -> AssocDimensionAss
     let trans_space = reader.read_bit();
     let rotated_type = reader.read_byte();
     let dimension = handle(reader);
+    let dwg_reference_stream = (associativity & 15 != 0).then(|| {
+        let main = reader.main();
+        let start = main.position_in_bits();
+        (main.shared_data(), start, start + main.remaining_bits())
+    });
     let mut references: [Vec<AssocDimensionReference>; 4] = std::array::from_fn(|_| Vec::new());
     let mut total_references = 0usize;
     for slot in 0..4 {
@@ -670,6 +675,7 @@ fn read_dimension_association(reader: &mut DwgMergedReader) -> AssocDimensionAss
         rotated_type,
         dimension,
         references,
+        dwg_reference_stream,
     }
 }
 

@@ -1066,6 +1066,7 @@ fn read_dimension_association_dxf(record: &AssocDxfRecord) -> AssocDimensionAsso
         rotated_type,
         dimension,
         references,
+        dwg_reference_stream: None,
     }
 }
 

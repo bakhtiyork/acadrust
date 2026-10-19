@@ -147,7 +147,11 @@ impl<R: Read + Seek> DxfTextReader<R> {
         // Process special character sequences in strings
         let value = self.process_string_value(&value_line);
 
-        let pair = DxfCodePair::new(code, value);
+        let changed = value != value_line;
+        let mut pair = DxfCodePair::new(code, value);
+        if changed {
+            pair.raw_value_string = Some(value_line);
+        }
         self.observe_pair(&pair, pair_offset);
         Ok(Some(pair))
     }

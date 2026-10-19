@@ -208,6 +208,11 @@ impl DwgBitReader {
         self.data.as_ref().to_vec()
     }
 
+    /// Share immutable record bytes for bounded source provenance.
+    pub(crate) fn shared_data(&self) -> Arc<[u8]> {
+        Arc::clone(&self.data)
+    }
+
     /// Set the stream position (byte-level) and reset bit shift.
     pub fn set_position(&mut self, pos: usize) {
         if pos > self.data.len() {
