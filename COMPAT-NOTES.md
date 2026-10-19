@@ -17,6 +17,11 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 
 | Area | Change | Reason |
 |---|---|---|
+| DXF structural block state | Retain BLOCK/ENDBLK common metadata on BlockRecord, including appearance, scoped references and XData; retain all BLOCK flag bits and the unloaded flag. Use the existing common parser without adding marker entities to drawable block contents. | Genuine discarded-data fixes; upstream-PR candidates. Optional boxed common state avoids enlarging every entity or introducing document scans. |
+| DXF existing space records | Copy parsed explodability, scaling and preview data when a source BLOCK_RECORD updates an initialized model/paper-space record. | Genuine data-loss bug: the merge previously retained only units, flags and references. Upstream-PR candidate; ordinary named block behavior is unchanged. |
+| Block source provenance | Retain DXF field presence and last-preview-chunk bounds, the original DWG anonymous bit, and marker names replaced by native hydration. Native preview bytes, block naming, flags, scaling and unit recovery remain unchanged. | Additive source retention permits the reference's nullable defaults, final-chunk preview setter, raw BLOCK names and non-recovered flags without degrading native data. |
+| ACadSharp block view | Project retained structural common state, flags, source-block XData references, version-dependent units/explodability, scaling-byte booleans and nullable comments/path/preview. Set the compatibility constructor's block explodability to false. | Reproduce reference getters, constructor defaults and reader semantics only in compat; actual entities take precedence over folded marker state. |
+| ACadSharp Insert view | Resolve SpatialFilter through the typed ACAD_FILTER/SPATIAL dictionary path; exclude legacy ownerless attributes from the Insert collection while retaining their standalone records. | Match the reference getter and R12 builder attachment rules without changing native attributes, dictionary data or child identities. |
 | MultiLeader DXF provenance | Retain bounded top-level code presence separately from embedded context codes, excluded from native equality. | Distinguish omitted fields from explicit native defaults without changing constructor values, geometry, content or reader normalization. The reader adds one fixed-size record per MultiLeader and no document scans. |
 | ACadSharp MultiLeader view | Map overrides, typed references, text settings and ordered block attributes; expose embedded context as the unattached `#0` handle and preserve standalone context/root/line/break ordering and RGB packing. Project ignored DXF colors, block links/attributes, degree conversion and omitted/version-dependent defaults only in compat. | The reference dump serializes CadObject references as handles. Its DXF mapper ignores several fields that Rust correctly retains, and pre-R2010 DWG leaves vertical text attachments at zero; native data remains available and unchanged. |
 | MultiLeaderStyle DXF fields | Read missing draw orders, constraints, attachments, block scales/settings and flags; decode packed colors; read code 3 description and code 300 default text, retaining legacy code 304 fallback. | Genuine discarded/misinterpreted data, upstream-PR candidates. Keep the existing code-3 native name fallback while retaining description independently; the compatibility name comes from the owner dictionary. |
@@ -114,8 +119,8 @@ The default-reader view projects `ProxyGeometries` as empty (ACadSharp ignores t
 native entity's graphic bytes.
 Direct document inventories gather explicit handles from tables, block records, entities and their children, and
 non-graphical objects, then sort numerically. Read dumps separately apply source registration and allocate the
-reader's collection defaults. Retained BLOCK/ENDBLK identities folded into block records are emitted with discarded
-entity properties unmapped.
+reader's collection defaults. DXF BLOCK/ENDBLK markers folded into block records retain their common state and
+are projected through the same entity mapper as explicit DWG markers.
 The normal build does not include this module or its optional JSON dependency.
 
 R12 DXF polyline projection intentionally follows ACadSharp's legacy reader: native

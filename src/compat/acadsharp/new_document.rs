@@ -296,6 +296,7 @@ fn add_layout(doc: &mut CadDocument, name: &str, block_name: &str, paper: bool) 
 
     // Layout.AssignDocument -> AddCadObject(BlockRecord) -> markers -> entities.
     let mut block = BlockRecord::new(block_name);
+    block.explodable = false;
     block.handle = doc.allocate_handle();
     block.layout = layout_handle;
     block.block_entity_handle = doc.allocate_handle();

@@ -295,7 +295,9 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
                     "BlockEntity",
                     json!(optional_handle(Some(v.block_entity_handle))),
                 ),
-                ("CanScale", json!(!v.scale_uniformly)),
+                ("CanScale", json!(block_can_scale(doc, v))),
+                ("Flags", json!(block_flags(doc, v))),
+                ("Source", block_source(doc, v)),
                 (
                     "Entities",
                     json!(v
@@ -324,13 +326,18 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
                         Some(crate::entities::EntityType::AttributeDefinition(_))
                     ))),
                 ),
-                ("IsAnonymous", json!(v.flags.anonymous)),
-                ("IsExplodable", json!(v.explodable)),
+                ("IsAnonymous", json!(block_flags(doc, v) & 1 != 0)),
+                ("IsExplodable", json!(block_explodable(doc, v))),
                 ("IsUnloaded", json!(v.flags.is_xref_unloaded)),
                 ("Layout", json!(optional_handle(Some(v.layout)))),
-                ("Name", json!(v.name)),
-                ("Preview", json!(bytes(&v.preview_data))),
-                ("Units", json!(v.units)),
+                ("Name", json!(block_name(doc, v))),
+                ("Preview", block_preview(doc, v)),
+                (
+                    "Units",
+                    json!(if (source_dwg(doc) && doc.version < crate::types::DxfVersion::AC1021)
+                        || v.dxf_present.is_some_and(|p| p & 32 == 0)
+                    { 0 } else { v.units }),
+                ),
                 (
                     "Viewports",
                     json!(v
@@ -513,32 +520,107 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
 }
 
 fn block_entities(doc: &CadDocument, b: &crate::tables::BlockRecord, out: &mut Vec<Value>) {
-    // BLOCK/ENDBLK are collapsed into BlockRecord by some readers. Retain their
-    // stored identities, but do not invent discarded EntityCommon properties.
+    // Prefer actual entities. Folded DXF markers retain their common state on
+    // the record; implicit source markers use the reference entity defaults.
     if !b.block_entity_handle.is_null() && doc.get_entity(b.block_entity_handle).is_none() {
-        let mut p = metadata("Block");
-        p.extend([
-            ("BasePoint", vec3(b.base_point)),
-            ("BlockOwner", handle(b.handle)),
-            ("Name", json!(b.name)),
-            ("Comments", json!(b.description)),
-            ("XRefPath", json!(b.xref_path)),
-            ("IsUnloaded", json!(b.flags.is_xref_unloaded)),
-        ]);
-        out.push(record(
-            b.block_entity_handle,
-            "Block",
-            b.handle,
-            props("Block", p),
-        ));
+        super::entities::block_record_marker(doc, b, false, out);
     }
     if !b.block_end_handle.is_null() && doc.get_entity(b.block_end_handle).is_none() {
-        out.push(record(
-            b.block_end_handle,
-            "BlockEnd",
-            b.handle,
-            props("BlockEnd", metadata("BlockEnd")),
-        ));
+        super::entities::block_record_marker(doc, b, true, out);
+    }
+}
+
+pub(super) fn block_flags(doc: &CadDocument, b: &crate::tables::BlockRecord) -> i16 {
+    // DWG's has-attributes bit is consumed but never assigned by ACadSharp.
+    if source_dwg(doc) {
+        return b.source_flags & !2;
+    }
+    let attributes = !source_dwg(doc) && b.flags.has_attributes;
+    (b.source_flags & !31)
+        | i16::from(b.flags.anonymous)
+        | (i16::from(attributes) << 1)
+        | (i16::from(b.flags.is_xref) << 2)
+        | (i16::from(b.flags.is_xref_overlay) << 3)
+        | (i16::from(b.flags.is_external) << 4)
+}
+
+pub(super) fn block_name<'a>(doc: &'a CadDocument, b: &'a crate::tables::BlockRecord) -> &'a str {
+    // ACadSharp attaches the parsed BLOCK marker and adopts its name. Native
+    // AutoCAD-style anonymous numbering remains intact in the document.
+    if source_dwg(doc) {
+        if let Some(crate::entities::EntityType::Block(marker)) = doc.get_entity(b.block_entity_handle) {
+            let name = marker.source_name.as_deref().unwrap_or(&marker.name);
+            if b.handle == doc.header.model_space_block_handle && !name.eq_ignore_ascii_case("*Model_Space") {
+                return "*Model_Space";
+            }
+            if b.handle == doc.header.paper_space_block_handle && !name.eq_ignore_ascii_case("*Paper_Space") {
+                return "*Paper_Space";
+            }
+            if !name.is_empty() {
+                return name;
+            }
+        }
+    }
+    &b.name
+}
+
+fn block_can_scale(doc: &CadDocument, b: &crate::tables::BlockRecord) -> bool {
+    if let Some(present) = b.dxf_present {
+        present & 2 == 0 || b.scale_uniformly
+    } else if source_dwg(doc) {
+        doc.version < crate::types::DxfVersion::AC1021 || b.scale_uniformly
+    } else {
+        !b.scale_uniformly
+    }
+}
+
+fn block_explodable(doc: &CadDocument, b: &crate::tables::BlockRecord) -> bool {
+    if let Some(present) = b.dxf_present {
+        present & 1 != 0 && b.explodable
+    } else {
+        (!source_dwg(doc) || doc.version >= crate::types::DxfVersion::AC1021) && b.explodable
+    }
+}
+
+fn block_preview(doc: &CadDocument, b: &crate::tables::BlockRecord) -> Value {
+    if let Some(present) = b.dxf_present {
+        if present & 4 == 0 && b.preview_data.is_empty() {
+            return Value::Null;
+        }
+        // The reference DXF property setter replaces the byte array for each
+        // group 310. Preserve the complete native bitmap and project its last
+        // source chunk only while the retained bounds still fit the payload.
+        if let Some((start, len)) = b.dxf_preview_last_chunk {
+            if len == b.preview_data.len() && start <= len {
+                return json!(bytes(&b.preview_data[start..]));
+            }
+        }
+    } else if b.preview_data.is_empty()
+        && (!source_dwg(doc) || doc.version < crate::types::DxfVersion::AC1015)
+    {
+        return Value::Null;
+    }
+    json!(bytes(&b.preview_data))
+}
+
+fn block_source(doc: &CadDocument, b: &crate::tables::BlockRecord) -> Value {
+    if block_flags(doc, b) & 1 == 0 {
+        return Value::Null;
+    }
+    let Some(data) = doc.object_xdata(b.handle)
+        .and_then(|d| d.records().iter().find(|r| r.application_name.eq_ignore_ascii_case("AcDbBlockRepBTag"))) else {
+        return Value::Null;
+    };
+    let Some(h) = data.values.iter().find_map(|v| match v {
+        crate::xdata::XDataValue::Handle(h) => Some(*h),
+        _ => None,
+    }) else {
+        return json!("!throws:NullReferenceException");
+    };
+    if doc.block_records.iter().any(|b| b.handle == h) {
+        handle(h)
+    } else {
+        Value::Null
     }
 }
 

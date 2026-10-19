@@ -13,6 +13,8 @@ pub struct Block {
     pub common: EntityCommon,
     /// Block name (should match the BlockRecord name)
     pub name: String,
+    /// Original DWG marker name when native block-name hydration changes it.
+    pub source_name: Option<String>,
     /// Base point (insertion point) for the block
     pub base_point: Vector3,
     /// Block description
@@ -27,6 +29,7 @@ impl Block {
         Self {
             common: EntityCommon::default(),
             name: name.into(),
+            source_name: None,
             base_point,
             description: String::new(),
             xref_path: String::new(),

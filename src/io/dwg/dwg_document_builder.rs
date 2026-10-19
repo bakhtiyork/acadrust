@@ -547,7 +547,9 @@ impl DwgDocumentBuilder {
             .collect();
         for (handle, record, name, base_point) in records {
             if let Some(EntityType::Block(marker)) = document.get_entity_mut(handle) {
-                marker.name = name;
+                if marker.name != name {
+                    marker.source_name = Some(std::mem::replace(&mut marker.name, name));
+                }
                 marker.base_point = base_point;
                 marker.common.owner_handle = record;
             }
@@ -1387,6 +1389,10 @@ impl DwgDocumentBuilder {
                     br.flags.is_xref = data.is_xref;
                     br.flags.is_xref_overlay = data.is_xref_overlay;
                     br.flags.is_xref_unloaded = data.is_loaded.unwrap_or(false);
+                    br.source_flags = i16::from(data.source_anonymous)
+                        | (i16::from(data.has_attributes) << 1)
+                        | (i16::from(data.is_xref) << 2)
+                        | (i16::from(data.is_xref_overlay) << 3);
                     br.block_entity_handle = Handle::from(data.block_entity_handle);
                     br.block_end_handle = Handle::from(data.endblk_handle);
                     br.units = data.units.unwrap_or(0);
@@ -8691,5 +8697,34 @@ mod hatch_context_regression_tests {
         assert!(!elevated.evaluate);
         assert_eq!(elevated.main_remaining, 0);
         assert!(elevated.handle_remaining <= 7);
+    }
+}
+
+#[cfg(test)]
+mod block_marker_name_retention_tests {
+    use super::DwgDocumentBuilder;
+    use crate::entities::{Block, EntityType};
+    use crate::tables::BlockRecord;
+    use crate::types::Vector3;
+    use crate::CadDocument;
+
+    #[test]
+    fn hydration_retains_original_marker_name_without_changing_native_name() {
+        let mut doc = CadDocument::new();
+        let mut record = BlockRecord::new("*U24");
+        record.handle = doc.allocate_handle();
+        record.block_entity_handle = doc.allocate_handle();
+        let marker_handle = record.block_entity_handle;
+        let mut marker = Block::new("*U25", Vector3::ZERO);
+        marker.common.handle = marker_handle;
+        marker.common.owner_handle = record.handle;
+        doc.block_records.add(record).unwrap();
+        doc.add_entity(EntityType::Block(marker)).unwrap();
+        DwgDocumentBuilder::hydrate_block_markers(&mut doc);
+        let Some(EntityType::Block(marker)) = doc.get_entity(marker_handle) else {
+            panic!("missing block marker");
+        };
+        assert_eq!(marker.name, "*U24");
+        assert_eq!(marker.source_name.as_deref(), Some("*U25"));
     }
 }

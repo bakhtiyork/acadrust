@@ -378,6 +378,8 @@ pub struct DimStyleData {
 pub struct BlockHeaderData {
     pub name: String,
     pub anonymous: bool,
+    /// Original flag before native dynamic-block name recovery.
+    pub source_anonymous: bool,
     pub has_attributes: bool,
     pub is_xref: bool,
     pub is_xref_overlay: bool,
@@ -1519,6 +1521,7 @@ pub fn read_block_header(reader: &mut DwgMergedReader, version: DwgVersion) -> B
     BlockHeaderData {
         name,
         anonymous,
+        source_anonymous: anonymous,
         has_attributes,
         is_xref,
         is_xref_overlay,

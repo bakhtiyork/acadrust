@@ -3618,8 +3618,9 @@ impl<'a> SectionReader<'a> {
         let mut base_point = Vector3::new(0.0, 0.0, 0.0);
         let mut description = String::new();
         let mut xref_path = String::new();
-        let mut layer = String::from("0");
-        let mut handle = Handle::NULL;
+        let mut common = EntityCommon::default();
+        let mut present = 0u8;
+        let mut unloaded = false;
         // BLOCK entity code 70 = the authoritative block-type flags
         // (1=anonymous, 2=has-attributes, 4=xref, 8=xref-overlay).
         let mut block_flags: i16 = 0;
@@ -3645,20 +3646,12 @@ impl<'a> SectionReader<'a> {
                 4 => {
                     // Description
                     description = pair.value_string.clone();
+                    present |= 8;
                 }
                 1 => {
                     // XRef path
                     xref_path = pair.value_string.clone();
-                }
-                5 => {
-                    // Handle
-                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
-                        handle = Handle::new(h);
-                    }
-                }
-                8 => {
-                    // Layer
-                    layer = pair.value_string.clone();
+                    present |= 16;
                 }
                 10 | 20 | 30 => {
                     // Base point coordinates
@@ -3672,7 +3665,8 @@ impl<'a> SectionReader<'a> {
                         block_flags = v;
                     }
                 }
-                _ => {}
+                71 => unloaded = pair.as_i16().is_some_and(|v| v != 0),
+                _ => { self.try_read_common_entity_code(&pair, &mut common)?; }
             }
         }
 
@@ -3704,8 +3698,8 @@ impl<'a> SectionReader<'a> {
 
         // Create Block entity
         let mut block = Block::new(block_name.clone(), base_point);
-        block.common.handle = handle;
-        block.common.layer = layer.clone();
+        let handle = common.handle;
+        block.common = common;
         block.description = description;
         block.xref_path = xref_path;
 
@@ -3720,6 +3714,7 @@ impl<'a> SectionReader<'a> {
                     "ENDBLK" => {
                         // Read ENDBLK properties
                         let block_end = self.read_block_end()?;
+                        let end_handle = block_end.common.handle;
 
                         // Insert block entities into the document's flat entity map
                         // and collect their handles for the block record.
@@ -3749,15 +3744,20 @@ impl<'a> SectionReader<'a> {
                             document,
                             &block_name,
                             handle,
-                            block_end.common.handle,
+                            end_handle,
                         );
                         if let Some(block_record) = document.block_records.get_mut(&block_name) {
                             block_record.entity_handles = entity_handles;
                             block_record.xref_path = block.xref_path.clone();
                             block_record.base_point = block.base_point;
-                            // The BLOCK marker is not kept in the entity list,
-                            // so its description only survives on the record.
+                            // Preserve marker state separately from drawable block contents.
                             block_record.description = block.description.clone();
+                            block_record.dxf_present = Some(block_record.dxf_present.unwrap_or(0) | present);
+                            block_record.source_flags = block_flags;
+                            block_record.flags.is_external = block_flags & 16 != 0;
+                            block_record.flags.is_xref_unloaded = unloaded;
+                            block_record.block_entity_common = Some(Box::new(block.common));
+                            block_record.block_end_common = Some(Box::new(block_end.common));
                             // Block-type flags come from the BLOCK entity's
                             // code 70 (the BLOCK_RECORD's code 70 is units).
                             block_record.flags.anonymous = (block_flags & 1) != 0;
@@ -3769,7 +3769,7 @@ impl<'a> SectionReader<'a> {
                             // the post-read pass can assign fresh handles after
                             // it has seen every identity in the file.
                             block_record.block_entity_handle = handle;
-                            block_record.block_end_handle = block_end.common.handle;
+                            block_record.block_end_handle = end_handle;
                         }
 
                         // Note: Block and BlockEnd are block definition markers, not drawing entities.
@@ -4036,36 +4036,14 @@ impl<'a> SectionReader<'a> {
 
     /// Read ENDBLK entity
     fn read_block_end(&mut self) -> Result<BlockEnd> {
-        use crate::entities::BlockEnd;
-
         let mut block_end = BlockEnd::new();
-        let mut layer = String::from("0");
-        let mut handle = Handle::NULL;
-
         while let Some(pair) = self.reader.read_pair()? {
-            match pair.code {
-                0 => {
-                    // Next entity - push back and break
-                    self.reader.push_back(pair);
-                    break;
-                }
-                5 => {
-                    // Handle
-                    if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
-                        handle = Handle::new(h);
-                    }
-                }
-                8 => {
-                    // Layer
-                    layer = pair.value_string.clone();
-                }
-                _ => {}
+            if pair.code == 0 {
+                self.reader.push_back(pair);
+                break;
             }
+            self.try_read_common_entity_code(&pair, &mut block_end.common)?;
         }
-
-        block_end.common.handle = handle;
-        block_end.common.layer = layer;
-
         Ok(block_end)
     }
 
@@ -10312,6 +10290,11 @@ impl<'a> SectionReader<'a> {
                             existing.insert_handles = block_record.insert_handles.clone();
                             existing.units = block_record.units;
                             existing.flags = block_record.flags;
+                            existing.explodable = block_record.explodable;
+                            existing.scale_uniformly = block_record.scale_uniformly;
+                            existing.preview_data = block_record.preview_data;
+                            existing.dxf_present = block_record.dxf_present;
+                            existing.dxf_preview_last_chunk = block_record.dxf_preview_last_chunk;
                         }
                     }
                     self.decoded_records = self.decoded_records.saturating_add(1);
@@ -10354,6 +10337,7 @@ impl<'a> SectionReader<'a> {
 
     fn read_block_record_entry(&mut self) -> Result<Option<(BlockRecord, Vec<Handle>)>> {
         let mut block_record = BlockRecord::new("*Model_Space");
+        block_record.dxf_present = Some(0);
         let mut reactors = Vec::new();
         let mut group = String::new();
         // Pre-R2007 files carry the units as ACAD `DesignCenter Data`
@@ -10417,18 +10401,21 @@ impl<'a> SectionReader<'a> {
                     // renderer then fades).
                     if let Some(v) = pair.as_i16() {
                         block_record.units = v;
+                        *block_record.dxf_present.as_mut().unwrap() |= 32;
                     }
                 }
                 280 => {
                     // Block explodability (1 = explodable).
                     if let Some(v) = pair.as_i16() {
                         block_record.explodable = v != 0;
+                        *block_record.dxf_present.as_mut().unwrap() |= 1;
                     }
                 }
                 281 => {
                     // Block scalability (1 = scale uniformly).
                     if let Some(v) = pair.as_i16() {
                         block_record.scale_uniformly = v != 0;
+                        *block_record.dxf_present.as_mut().unwrap() |= 2;
                     }
                 }
                 340 => {
@@ -10437,7 +10424,12 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 // Block preview image (BMP), split over several 310 groups.
-                310 => append_hex_bytes(&mut block_record.preview_data, &pair.value_string),
+                310 => {
+                    let start = block_record.preview_data.len();
+                    append_hex_bytes(&mut block_record.preview_data, &pair.value_string);
+                    *block_record.dxf_present.as_mut().unwrap() |= 4;
+                    block_record.dxf_preview_last_chunk = Some((start, block_record.preview_data.len()));
+                }
                 _ => {}
             }
         }

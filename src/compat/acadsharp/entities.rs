@@ -14,6 +14,8 @@ use super::{color, handle, number, optional_handle, props, record, transparency,
 
 mod modeler;
 mod multileader;
+mod blocks;
+pub(super) use blocks::block_record_marker;
 
 const UNMAPPED: &str = "!unmapped";
 
@@ -538,6 +540,80 @@ fn leader_has_hookline(value: &crate::entities::Leader) -> Value {
     bool_value(angle.abs() <= 1e-12)
 }
 
+/// Resolve the computed `Insert.SpatialFilter` property through the same
+/// dictionary path used by ACadSharp: the insert's extension dictionary owns
+/// an `ACAD_FILTER` dictionary, whose `SPATIAL` entry points at the filter.
+/// Keep this lookup in the compatibility projection; the native model already
+/// retains the dictionaries and the typed filter object independently.
+fn insert_spatial_filter(doc: &CadDocument, value: &crate::entities::Insert) -> Value {
+    let Some(xdictionary) = value
+        .common
+        .xdictionary_handle
+        .filter(|handle| !handle.is_null())
+        .or_else(|| doc.extension_dictionary_handle(value.common.handle))
+    else {
+        return Value::Null;
+    };
+    let Some(crate::objects::ObjectType::Dictionary(extension)) = doc.objects.get(&xdictionary)
+    else {
+        return Value::Null;
+    };
+    let Some(filter_dictionary) = extension
+        .entries
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("ACAD_FILTER"))
+        .map(|(_, handle)| *handle)
+        .and_then(|handle| match doc.objects.get(&handle) {
+            Some(crate::objects::ObjectType::Dictionary(dictionary)) => Some(dictionary),
+            _ => None,
+        })
+    else {
+        return Value::Null;
+    };
+    let Some(filter_handle) = filter_dictionary
+        .entries
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("SPATIAL"))
+        .map(|(_, handle)| *handle)
+        .filter(|handle| {
+            matches!(
+                doc.objects.get(handle),
+                Some(crate::objects::ObjectType::SpatialFilter(_))
+            )
+        })
+    else {
+        return Value::Null;
+    };
+    optional_handle(Some(filter_handle))
+}
+
+/// ACadSharp's R12 DXF registration only links an ATTRIB when its source
+/// record carries an explicit owner handle. Native INSERT parsing groups the
+/// trailing sequence structurally even when the source owner is absent, so
+/// project the collection using the reader's retained source-owner map while
+/// leaving the attribute records themselves available to the block collection.
+fn insert_attributes<'a>(
+    doc: &CadDocument,
+    value: &'a crate::entities::Insert,
+    legacy: bool,
+) -> Vec<&'a crate::entities::AttributeEntity> {
+    if !legacy {
+        return value.attributes.iter().collect();
+    }
+    let Some(source_owners) = doc.source_entity_owners.as_ref() else {
+        return value.attributes.iter().collect();
+    };
+    value
+        .attributes
+        .iter()
+        .filter(|attribute| {
+            source_owners
+                .get(&attribute.common.handle)
+                .is_some_and(|owner| *owner == value.common.handle)
+        })
+        .collect()
+}
+
 /// Visit the backing collection, including structural BLOCK/ENDBLK records
 /// hidden by the public drawing-entity iterator, and retained children.
 pub(super) fn collect(doc: &CadDocument, reader: &str, out: &mut Vec<Value>) {
@@ -893,13 +969,16 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             out,
         ),
         EntityType::Insert(value) => {
-            let attributes = value
-                .attributes
+            let attributes = insert_attributes(doc, value, legacy);
+            // Emit every retained ATTRIB record.  In an R12 file ACadSharp
+            // keeps ownerless attributes in the block collection even though
+            // they are absent from Insert.Attributes.
+            for attribute in &value.attributes {
+                collect_attribute_inline(doc, attribute, value.common.handle, out);
+            }
+            let attribute_handles = attributes
                 .iter()
-                .map(|attribute| {
-                    collect_attribute_inline(doc, attribute, value.common.handle, out);
-                    handle(attribute.common.handle)
-                })
+                .map(|attribute| handle(attribute.common.handle))
                 .collect::<Vec<_>>();
             field_common(
                 doc,
@@ -914,7 +993,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
                 },
                 true,
                 vec![
-                    ("Attributes", array(attributes.into_iter())),
+                    ("Attributes", array(attribute_handles.into_iter())),
                     (
                         "Block",
                         optional_handle(
@@ -925,14 +1004,14 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
                     ),
                     ("ColumnCount", integer(value.column_count as i64)),
                     ("ColumnSpacing", number(value.column_spacing)),
-                    ("HasAttributes", bool_value(value.has_attributes())),
+                    ("HasAttributes", bool_value(!attributes.is_empty())),
                     ("IsMultiple", bool_value(value.is_array())),
                     ("InsertPoint", vec3(value.insert_point)),
                     ("Normal", vec3(value.normal)),
                     ("Rotation", number(value.rotation)),
                     ("RowCount", integer(value.row_count as i64)),
                     ("RowSpacing", number(value.row_spacing)),
-                    ("SpatialFilter", unmapped()),
+                    ("SpatialFilter", insert_spatial_filter(doc, value)),
                     ("XScale", number(value.x_scale())),
                     ("YScale", number(value.y_scale())),
                     ("ZScale", number(value.z_scale())),
@@ -1397,28 +1476,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             vec![("DxfClass", dxf_class(&value.dxf_name))],
             out,
         ),
-        EntityType::Block(value) => field_common(
-            doc,
-            &value.common,
-            "Block",
-            "BLOCK",
-            4,
-            "AcDbBlockBegin",
-            false,
-            vec![
-                ("BasePoint", vec3(value.base_point)),
-                (
-                    "BlockOwner",
-                    optional_handle(Some(value.common.owner_handle)),
-                ),
-                ("Comments", Value::String(value.description.clone())),
-                ("Flags", unmapped()),
-                ("IsUnloaded", unmapped()),
-                ("Name", Value::String(value.name.clone())),
-                ("XRefPath", Value::String(value.xref_path.clone())),
-            ],
-            out,
-        ),
+        EntityType::Block(value) => blocks::block(doc, value, out),
         EntityType::BlockEnd(value) => field_common(
             doc,
             &value.common,
