@@ -4,13 +4,15 @@
 //! whose state is absent or only held in an opaque payload is left as
 //! `!unmapped` by `props`.
 
-use crate::entities::{Dimension, EntityCommon, EntityType};
-use crate::types::{Handle, Transparency, Vector2, Vector3};
+use crate::entities::{Dimension, EntityCommon, EntityType, Spline};
+use crate::types::{DxfVersion, Handle, Transparency, Vector2, Vector3};
 use crate::xdata::XDataValue;
 use crate::CadDocument;
 use serde_json::{json, Value};
 
 use super::{color, handle, number, optional_handle, props, record, transparency, vec2, vec3};
+
+mod modeler;
 
 const UNMAPPED: &str = "!unmapped";
 
@@ -38,11 +40,108 @@ fn enum_value(value: i64) -> Value {
     integer(value)
 }
 
-fn normalized_angle(angle: f64) -> f64 {
-    if angle < 0.0 {
-        angle + std::f64::consts::TAU
+fn spline_flags(doc: &CadDocument, value: &Spline) -> i64 {
+    // DXF retains unknown bits in the raw group-70 word. DWG does not have
+    // that word, so its public Flags value is reconstructed from the typed
+    // five-bit flags. ORing the typed bits also keeps a constructed entity
+    // coherent when its raw DXF word has not been populated.
+    let mut flags = if value.dwg_scenario.is_some() {
+        0
     } else {
-        angle
+        i64::from(value.dxf_flags as u16)
+    };
+    if value.flags.closed {
+        flags |= 1;
+    }
+    // ACadSharp seeds Flags from Flags1.Closed before reading the scenario
+    // body; its scenario-1 closed bit only adds the bit and never clears it.
+    // The native DWG reader replaces the bit with the body value, so restore
+    // the ACadSharp result for R2013+ DWG records here.
+    if value.dwg_scenario.is_some()
+        && doc.version >= DxfVersion::AC1027
+        && value.dwg_flags1 & 4 != 0
+    {
+        flags |= 1;
+    }
+    if value.flags.periodic {
+        flags |= 2;
+    }
+    if value.flags.rational {
+        flags |= 4;
+    }
+    if value.flags.planar {
+        flags |= 8;
+    }
+    if value.flags.linear {
+        flags |= 16;
+    }
+    flags
+}
+
+fn spline_flags1(doc: &CadDocument, value: &Spline) -> i64 {
+    let Some(scenario) = value.dwg_scenario else {
+        // ACadSharp's DXF reader only fills Flags, leaving the DWG-only
+        // Flags1 property at its default value.
+        return 0;
+    };
+    // ACadSharp's SplineFlags1 enum has an underlying ushort; the native
+    // reader stores the bit-long in i32, so project the low 16 bits only.
+    let mut flags = i64::from(value.dwg_flags1 as u16);
+    // Before R2013 the scenario itself is the only creation-method marker;
+    // ACadSharp adds MethodFitPoints when it reads scenario 2.
+    if scenario == 2 && doc.version < DxfVersion::AC1027 {
+        flags |= 1;
+    }
+    flags
+}
+
+fn spline_knot_parameterization(doc: &CadDocument, value: &Spline) -> i64 {
+    let Some(scenario) = value.dwg_scenario else {
+        // KnotParametrization has no DXF assignment in ACadSharp.
+        return 0;
+    };
+    if doc.version < DxfVersion::AC1027 {
+        // The pre-R2013 reader assigns Custom only to control-point records;
+        // fit-point records retain the enum's Chord default.
+        return if scenario == 1 { 15 } else { 0 };
+    }
+    i64::from(value.knot_parameterization)
+}
+
+fn spline_has_valid_knot_count(value: &Spline, closed: bool) -> bool {
+    // Match ACadSharp's unchecked Int32 expression, including negative and
+    // overflowing public Degree values.
+    let multiplier: i32 = if closed { 2 } else { 1 };
+    let expected = (value.control_points.len() as i32)
+        .wrapping_add(multiplier.wrapping_mul(value.degree))
+        .wrapping_add(1);
+    expected == value.knots.len() as i32
+}
+
+fn spline_control_point_tolerance(value: &Spline) -> f64 {
+    if value.dwg_scenario == Some(2) {
+        // Fit-point DWG records do not carry knot/control tolerances.
+        0.0000001
+    } else {
+        value.control_tolerance
+    }
+}
+
+fn spline_fit_tolerance(value: &Spline) -> f64 {
+    if value.dwg_scenario == Some(1) {
+        // Control-point DWG records do not carry fit tolerance.
+        0.0000000001
+    } else {
+        value.fit_tolerance
+    }
+}
+
+fn spline_knot_tolerance(value: &Spline) -> f64 {
+    if value.dwg_scenario == Some(2) {
+        // Fit-point DWG records do not carry knot/control tolerances.
+        0.0000001
+    } else {
+        value.knot_tolerance
     }
 }
 
@@ -440,7 +539,14 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, out: &mut Vec<Value>) 
                 ("Radius", number(value.radius)),
                 ("RadiusRatio", number(1.0)),
                 ("StartAngle", number(value.start_angle)),
-                ("Sweep", number(value.sweep_angle())),
+                (
+                    "Sweep",
+                    number(value.start_angle - if value.end_angle < value.start_angle {
+                        value.end_angle + std::f64::consts::TAU
+                    } else {
+                        value.end_angle
+                    }),
+                ),
                 ("Thickness", number(value.thickness)),
             ],
             out,
@@ -484,12 +590,10 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, out: &mut Vec<Value>) 
                 ("RadiusRatio", number(value.minor_axis_ratio)),
                 (
                     "Rotation",
-                    number(normalized_angle(
-                        value.major_axis.y.atan2(value.major_axis.x),
-                    )),
+                    number(value.major_axis.y.atan2(value.major_axis.x)),
                 ),
                 ("StartParameter", number(value.start_parameter)),
-                ("Thickness", unmapped()),
+                ("Thickness", number(value.thickness)),
             ],
             out,
         ),
@@ -813,30 +917,57 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, out: &mut Vec<Value>) 
             ],
             out,
         ),
-        EntityType::Spline(value) => field_common(
-            doc,
-            &value.common,
-            "Spline",
-            "SPLINE",
-            0x24,
-            "AcDbSpline",
-            false,
-            vec![
-                (
-                    "ControlPoints",
-                    points3(value.control_points.iter().copied()),
-                ),
-                ("Degree", integer(value.degree as i64)),
-                ("EndTangent", vec3(value.end_tangent)),
-                ("FitPoints", points3(value.fit_points.iter().copied())),
-                ("Flags", enum_value(value.dxf_flags as i64)),
-                ("Knots", array(value.knots.iter().copied().map(number))),
-                ("Normal", vec3(value.normal)),
-                ("StartTangent", vec3(value.begin_tangent)),
-                ("Weights", array(value.weights.iter().copied().map(number))),
-            ],
-            out,
-        ),
+        EntityType::Spline(value) => {
+            let flags = spline_flags(doc, value);
+            let flags1 = spline_flags1(doc, value);
+            let is_closed = flags & 1 != 0;
+            let is_periodic = if flags1 & 1 != 0 {
+                flags1 & 4 != 0
+            } else {
+                flags & 2 != 0
+            };
+            field_common(
+                doc,
+                &value.common,
+                "Spline",
+                "SPLINE",
+                0x24,
+                "AcDbSpline",
+                false,
+                vec![
+                    (
+                        "ControlPointTolerance",
+                        number(spline_control_point_tolerance(value)),
+                    ),
+                    (
+                        "ControlPoints",
+                        points3(value.control_points.iter().copied()),
+                    ),
+                    ("Degree", integer(value.degree as i64)),
+                    ("EndTangent", vec3(value.end_tangent)),
+                    ("FitPoints", points3(value.fit_points.iter().copied())),
+                    ("FitTolerance", number(spline_fit_tolerance(value))),
+                    ("Flags", enum_value(flags)),
+                    ("Flags1", enum_value(flags1)),
+                    (
+                        "HasValidKnotCount",
+                        bool_value(spline_has_valid_knot_count(value, is_closed)),
+                    ),
+                    ("IsClosed", bool_value(is_closed)),
+                    ("IsPeriodic", bool_value(is_periodic)),
+                    (
+                        "KnotParametrization",
+                        enum_value(spline_knot_parameterization(doc, value)),
+                    ),
+                    ("KnotTolerance", number(spline_knot_tolerance(value))),
+                    ("Knots", array(value.knots.iter().copied().map(number))),
+                    ("Normal", vec3(value.normal)),
+                    ("StartTangent", vec3(value.begin_tangent)),
+                    ("Weights", array(value.weights.iter().copied().map(number))),
+                ],
+                out,
+            )
+        }
         EntityType::Hatch(value) => collect_hatch(doc, value, out),
         EntityType::Dimension(value) => collect_dimension(doc, value, out),
         EntityType::Leader(value) => field_common(
@@ -940,6 +1071,10 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, out: &mut Vec<Value>) 
                 ),
                 ("OverrideOption", integer(value.override_option as i64)),
                 ("SubdivisionLevel", integer(value.subdivision_level as i64)),
+                (
+                    "TextureCoordinates",
+                    points3(doc.mesh_texture_coordinates(value.common.handle)),
+                ),
                 ("Version", integer(value.version as i64)),
                 ("Vertices", points3(value.vertices.iter().copied())),
             ],
@@ -947,7 +1082,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, out: &mut Vec<Value>) 
         ),
         EntityType::PolyfaceMesh(value) => collect_polyface(doc, value, out),
         EntityType::PolygonMesh(value) => collect_polygon_mesh(doc, value, out),
-        EntityType::Solid3D(value) => collect_modeler(
+        EntityType::Solid3D(value) => collect_modeler_geometry(
             doc,
             &value.common,
             "Solid3D",
@@ -955,26 +1090,35 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, out: &mut Vec<Value>) 
             0x26,
             "AcDb3dSolid",
             &value.acis_data,
+            value.point_of_reference,
+            &value.wires,
+            &value.silhouettes,
             out,
         ),
-        EntityType::Region(value) => collect_modeler(
+        EntityType::Region(value) => collect_modeler_geometry(
             doc,
             &value.common,
             "Region",
             "REGION",
             0x25,
-            "AcDbRegion",
+            "AcDbModelerGeometry",
             &value.acis_data,
+            value.point_of_reference,
+            &value.wires,
+            &value.silhouettes,
             out,
         ),
-        EntityType::Body(value) => collect_modeler(
+        EntityType::Body(value) => collect_modeler_geometry(
             doc,
             &value.common,
             "CadBody",
             "BODY",
             0x27,
-            "AcDbBody",
+            "AcDbModelerGeometry",
             &value.acis_data,
+            value.point_of_reference,
+            &value.wires,
+            &value.silhouettes,
             out,
         ),
         EntityType::Surface(value) => collect_surface(doc, value, out),
@@ -1680,7 +1824,12 @@ fn mesh_edge(value: &crate::entities::MeshEdge) -> Value {
         vec![
             (
                 "Crease",
-                value.crease.map(number).unwrap_or_else(|| Value::Null),
+                // ACadSharp's DXF and DWG readers assign every serialized
+                // crease slot, including the zero sentinel used for an
+                // uncreased edge.  Native acadrust keeps that sentinel as
+                // `None`; project the reader result here without changing
+                // the native model.
+                value.crease.map(number).unwrap_or_else(|| number(0.0)),
             ),
             ("End", integer(value.end as i64)),
             ("Start", integer(value.start as i64)),
@@ -1869,6 +2018,32 @@ fn collect_polygon_mesh(
                 },
             ),
         ],
+        out,
+    );
+}
+
+fn collect_modeler_geometry(
+    doc: &CadDocument,
+    common: &EntityCommon,
+    type_name: &'static str,
+    object_name: &'static str,
+    object_type: i64,
+    subclass: &'static str,
+    data: &crate::entities::AcisData,
+    point: Vector3,
+    wires: &[crate::entities::solid3d::Wire],
+    silhouettes: &[crate::entities::solid3d::Silhouette],
+    out: &mut Vec<Value>,
+) {
+    field_common(
+        doc,
+        common,
+        type_name,
+        object_name,
+        object_type,
+        subclass,
+        false,
+        modeler::properties(data, point, wires, silhouettes),
         out,
     );
 }

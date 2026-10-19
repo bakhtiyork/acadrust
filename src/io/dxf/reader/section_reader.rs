@@ -12739,6 +12739,11 @@ impl<'a> SectionReader<'a> {
                 11 | 21 | 31 => {
                     major_axis.add_coordinate(&pair);
                 }
+                39 => {
+                    if let Some(thickness) = pair.as_double() {
+                        ellipse.thickness = thickness;
+                    }
+                }
                 40 => {
                     if let Some(ratio) = pair.as_double() {
                         ellipse.minor_axis_ratio = ratio;
@@ -19220,7 +19225,14 @@ impl<'a> SectionReader<'a> {
     }
 
     /// Read modeler geometry (ACIS) data — shared between 3DSOLID, REGION, BODY
-    fn read_modeler_geometry(&mut self) -> Result<(EntityCommon, String, String, Option<Handle>)> {
+    fn read_modeler_geometry(
+        &mut self,
+    ) -> Result<(EntityCommon, String, AcisData, Option<Handle>)> {
+        use crate::entities::solid3d::source::{
+            AcisSource, DxfAcisChunk, DxfAcisSource, SatLayout,
+        };
+        let mut chunks = Vec::new();
+        let mut modeler_version = 0;
         let mut common = EntityCommon::new();
         let mut acis_data = String::new();
         let mut uid = String::new();
@@ -19246,11 +19258,16 @@ impl<'a> SectionReader<'a> {
                 }
                 // A group 1 starts a SAT line; group 3 chunks continue it.
                 1 | 3 => {
+                    // Move only changed lexical chunks; unchanged SAT text is
+                    // reconstructed from the native body and chunk boundaries.
+                    let source_override = pair.raw_value_string;
+                    let new_line = pair.code == 1 && !acis_data.is_empty();
                     if pair.code == 3 && acis_data.ends_with('\n') {
                         acis_data.pop();
                     }
                     acis_data.push_str(&pair.value_string);
                     acis_data.push('\n');
+                    chunks.push(DxfAcisChunk::capture(new_line, &pair.value_string, source_override));
                 }
                 2 => uid = pair.value_string.clone(),
                 350 => {
@@ -19260,6 +19277,7 @@ impl<'a> SectionReader<'a> {
                 70 => {
                     if let Some(v) = pair.as_i16() {
                         acis_version = v as u8;
+                        modeler_version = v;
                     }
                 }
                 _ => {
@@ -19268,16 +19286,28 @@ impl<'a> SectionReader<'a> {
             }
         }
 
-        // Version 1: SAT data is stored with a character cipher — decode it.
-        if acis_version == 1 && !acis_data.is_empty() {
-            // The ASCII stream reader has already removed caret escapes.
+        // Accept plain SAT as well as the legacy character-swapped form.
+        let native_encoded = acis_version == 1
+            && acis_data
+                .chars()
+                .find(|c| *c > ' ')
+                .is_some_and(|c| !c.is_ascii_digit());
+        if native_encoded {
             acis_data = AcisData::decode_sat_binary(&acis_data);
         }
-
-        // Normalise: strip "End-of-ACIS-data" / "End-of-ASM-data" terminator.
-        acis_data = crate::entities::solid3d::AcisData::strip_sat_terminator(&acis_data);
-
-        Ok((common, uid, acis_data, history_handle))
+        let layout = SatLayout::capture(&acis_data);
+        let mut data = AcisData::new();
+        data.sat_data = AcisData::strip_sat_terminator(&acis_data);
+        if acis_version == 2 {
+            data.version = crate::entities::solid3d::AcisVersion::Version2;
+        }
+        data.source = Some(std::sync::Arc::new(AcisSource::Dxf(DxfAcisSource {
+            modeler_version,
+            native_encoded,
+            chunks,
+            layout,
+        })));
+        Ok((common, uid, data, history_handle))
     }
 
     /// Read a 3DSOLID entity
@@ -19286,27 +19316,29 @@ impl<'a> SectionReader<'a> {
         let mut solid = Solid3D::new();
         solid.common = common;
         solid.uid = uid;
-        solid.acis_data.sat_data = acis_data;
+        solid.acis_data = acis_data;
         solid.history_handle = history_handle;
         Ok(Some(solid))
     }
 
     /// Read a REGION entity
     fn read_region(&mut self) -> Result<Option<Region>> {
-        let (common, _uid, acis_data, history_handle) = self.read_modeler_geometry()?;
+        let (common, uid, acis_data, history_handle) = self.read_modeler_geometry()?;
         let mut region = Region::new();
         region.common = common;
-        region.acis_data.sat_data = acis_data;
+        region.uid = uid;
+        region.acis_data = acis_data;
         region.history_handle = history_handle;
         Ok(Some(region))
     }
 
     /// Read a BODY entity
     fn read_body(&mut self) -> Result<Option<Body>> {
-        let (common, _uid, acis_data, history_handle) = self.read_modeler_geometry()?;
+        let (common, uid, acis_data, history_handle) = self.read_modeler_geometry()?;
         let mut body = Body::new();
         body.common = common;
-        body.acis_data.sat_data = acis_data;
+        body.uid = uid;
+        body.acis_data = acis_data;
         body.history_handle = history_handle;
         Ok(Some(body))
     }

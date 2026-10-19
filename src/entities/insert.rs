@@ -438,6 +438,7 @@ impl Insert {
                     start_parameter: 0.0,
                     end_parameter: std::f64::consts::TAU,
                     normal: circle.normal,
+                    thickness: circle.thickness,
                 };
                 super::transform::transform_ellipse(&mut ellipse, transform);
                 self.resolve_properties(&mut ellipse.common);
@@ -545,6 +546,7 @@ impl Insert {
             start_parameter: arc.start_angle,
             end_parameter: arc.end_angle,
             normal: arc.normal,
+            thickness: arc.thickness,
         };
         super::transform::transform_ellipse(&mut ellipse, transform);
         self.resolve_properties(&mut ellipse.common);

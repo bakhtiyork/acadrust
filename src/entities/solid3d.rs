@@ -4,6 +4,8 @@
 //! in ACIS/SAT format. It also provides wireframe and silhouette data
 //! for visualization without parsing the full ACIS data.
 
+pub mod source;
+
 use crate::entities::{Entity, EntityCommon};
 use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transparency, Vector3};
 
@@ -290,6 +292,10 @@ pub struct AcisMaterial {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AcisData {
+    /// Shared DWG bits or compact DXF text layout for exact source projection.
+    /// Transient provenance is deliberately excluded from serde output.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub source: Option<std::sync::Arc<source::AcisSource>>,
     /// Version of the modeler format.
     pub version: AcisVersion,
     /// Raw SAT text data (for Version 1 or text Version 2).
@@ -331,6 +337,7 @@ impl AcisData {
     /// Creates empty ACIS data.
     pub fn new() -> Self {
         Self {
+            source: None,
             version: AcisVersion::Version1,
             sat_data: String::new(),
             sab_data: Vec::new(),
@@ -352,6 +359,7 @@ impl AcisData {
     /// stripped if present — the DWG/DXF writers add it back as needed.
     pub fn from_sat(sat: &str) -> Self {
         Self {
+            source: None,
             version: AcisVersion::Version1,
             sat_data: Self::strip_sat_terminator(sat),
             sab_data: Vec::new(),
@@ -370,6 +378,7 @@ impl AcisData {
     /// Creates ACIS data from binary SAB.
     pub fn from_sab(sab: Vec<u8>) -> Self {
         Self {
+            source: None,
             version: AcisVersion::Version2,
             sat_data: String::new(),
             sab_data: sab,

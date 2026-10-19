@@ -5017,6 +5017,10 @@ impl DwgDocumentBuilder {
 
                 // ── ACIS entities (3DSOLID, REGION, BODY) ───────────
                 OBJ_3DSOLID => {
+                    let source = crate::entities::solid3d::source::DwgAcisSource::capture(
+                        reader.main_mut(),
+                        self.obj_reader.dxf_version(),
+                    );
                     let data = entities::read_acis_entity(
                         &mut reader,
                         self.obj_reader.version(),
@@ -5030,6 +5034,9 @@ impl DwgDocumentBuilder {
                     } else {
                         crate::entities::solid3d::AcisVersion::Version1
                     };
+                    e.acis_data.source = Some(std::sync::Arc::new(
+                        crate::entities::solid3d::source::AcisSource::Dwg(source),
+                    ));
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
@@ -5067,6 +5074,10 @@ impl DwgDocumentBuilder {
                     let _ = document.add_entity(EntityType::Solid3D(e));
                 }
                 OBJ_REGION => {
+                    let source = crate::entities::solid3d::source::DwgAcisSource::capture(
+                        reader.main_mut(),
+                        self.obj_reader.dxf_version(),
+                    );
                     let data = entities::read_acis_entity(
                         &mut reader,
                         self.obj_reader.version(),
@@ -5080,6 +5091,9 @@ impl DwgDocumentBuilder {
                     } else {
                         crate::entities::solid3d::AcisVersion::Version1
                     };
+                    e.acis_data.source = Some(std::sync::Arc::new(
+                        crate::entities::solid3d::source::AcisSource::Dwg(source),
+                    ));
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
@@ -5108,6 +5122,10 @@ impl DwgDocumentBuilder {
                     let _ = document.add_entity(EntityType::Region(e));
                 }
                 OBJ_BODY => {
+                    let source = crate::entities::solid3d::source::DwgAcisSource::capture(
+                        reader.main_mut(),
+                        self.obj_reader.dxf_version(),
+                    );
                     let data = entities::read_acis_entity(
                         &mut reader,
                         self.obj_reader.version(),
@@ -5121,6 +5139,9 @@ impl DwgDocumentBuilder {
                     } else {
                         crate::entities::solid3d::AcisVersion::Version1
                     };
+                    e.acis_data.source = Some(std::sync::Arc::new(
+                        crate::entities::solid3d::source::AcisSource::Dwg(source),
+                    ));
                     e.acis_data.sat_data = data.sat_data;
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
