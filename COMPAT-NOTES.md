@@ -23,6 +23,10 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | IMAGEDEF DXF units | Read group 281 into the existing resolution-unit enum. | Genuine discarded-data bug; candidate for an upstream PR. Native defaults and explicit values remain unchanged. |
 | BookColor DXF provenance | Retain whether a DXF color code was present; exclude provenance from native equality. | ACadSharp's absent-color default is ByBlock while native Color defaults to ByLayer. Project the difference only in compat and preserve explicit ByLayer. |
 | ACadSharp media identities | Resolve empty group/underlay/book-color names from owner dictionary entries, split color-book components, expose the base underlay markers and little-endian TrueColor packing. | Match the reference's name getters and inherited markers without changing native names, page identity, RGB values or common entity appearance. |
+| Compound entity identity | Retain inline common state on 2D/3D vertices and full Seqend records on INSERTs and polyline/mesh parents; DXF captures child handles, owners, appearance, XData and scoped references. DWG serial and rayon assembly move the retained state into children, including polygon-mesh flags and the implicit DWG face-record flag (also initialized by face constructors); the shared postpass decodes child/Seqend XData after APPID resolution. | Genuine reader data-loss fixes, candidates for an upstream PR. Seqends are boxed once per compound parent to keep the entity enum narrow; no separate allocation per vertex or per-object document scan; 3D vertex `handle`/`layer` access delegates to common state rather than duplicating strings (struct literals now use `common`). |
+| DXF polyline source values | Retain raw parent/2D vertex widths alongside native effective widths; retain 3D thickness and polyface parent geometry fields previously discarded. | Native width inheritance remains unchanged; raw widths permit the ACadSharp view to reproduce its non-inheriting reader. The discarded geometry fields are upstream-PR candidates. |
+| Child handle allocation | Reserve inline child handles in document add/load, allocator synchronization and collision repair. | Retained vertex/Seqend identities must not collide with later entity/table allocation; allocation-free local traversal, an upstream-PR candidate. |
+| Compound entity writers | Preserve non-null child/Seqend identities and common metadata, reserve allocator space above retained child handles, and keep heavy 2D polylines when converting to LWPOLYLINE would lose child identity. | Genuine round-trip data-loss/collision fixes, candidates for an upstream PR. Newly constructed plain 2D polylines without child identities still down-save as before. |
 | DXF string provenance | Retain the original caret-escaped value only when text decoding changes it; the decoded native value is unchanged. GeoData keeps source definition text and scalar-code presence. | ACadSharp exposes raw DXF definition text and distinct omitted-field defaults. Additive source retention; not a decoder-semantic change. |
 | R2009 GeoData DXF | Read version-1 reference/obsolete points, scale, north angle and legacy mesh coordinate codes; write the matching version-1 layout. Mesh counts do not drive allocation or unbounded reads. | Genuine version-layout/data-loss bugs, candidates for an upstream PR. Keep both native points and matching native horizontal/vertical units and scales. |
 | ACadSharp VisualStyle view | For DWG, expose the read name/type and C# constructor defaults; correct modern/legacy property-slot mappings for other sources. | C# leaves the DWG reader incomplete. Rich native visual-style values remain intact; this projection is not an upstream decoder fix. |
@@ -84,3 +88,20 @@ Registered handles are gathered from tables, block records, entities and their c
 then sorted numerically. Retained BLOCK/ENDBLK identities folded into block records are emitted with discarded
 entity properties unmapped. Objects without registered handles are not assigned synthetic identities.
 The normal build does not include this module or its optional JSON dependency.
+
+R12 DXF polyline projection intentionally follows ACadSharp's legacy reader: native
+flag-based types remain intact, while the view exposes Polyline2D/Vertex2D, including
+polyface face records. Child appearance follows ACadSharp's MatchProperties callback;
+identity, reactors, XData and extension dictionaries remain the child's. DWG/modern DXF
+retain subtype-specific views. Seqends are emitted only from retained records, never
+invented from guessed handles. These oracle quirks are not native reader fixes.
+
+Remaining oracle registration differences: modern DXF can register the default
+Seqend when the first child is added, before the parsed terminator replaces the
+collection reference (`SeqendCollection.Add`/`Seqend`, `CadPolyLineTemplate.build`,
+`CadDocument.RegisterCollection`). The registry then exposes a constructor-default
+terminator allocated from HANDSEED, rather than the source handle/common data.
+The current view keeps the source record; reproducing that registry requires the
+document-wide registration order, not a per-file handle substitution. Legacy DXF
+INSERT terminators without an owner are registered as block entities by
+`DxfEntitiesSectionReader`, another difference from native compound ownership.

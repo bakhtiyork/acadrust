@@ -20,6 +20,8 @@ const SCALE_EPSILON: f64 = 1e-12;
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Insert {
     pub common: EntityCommon,
+    /// Retained sequence terminator, including its identity and common metadata.
+    pub seqend: Option<Box<super::Seqend>>,
     /// Block name (references a BlockRecord)
     pub block_name: String,
     /// Insertion point (in WCS)
@@ -62,6 +64,7 @@ impl Insert {
     pub fn new(block_name: impl Into<String>, insert_point: Vector3) -> Self {
         Self {
             common: EntityCommon::default(),
+            seqend: None,
             block_name: block_name.into(),
             insert_point,
             x_scale: 1.0,

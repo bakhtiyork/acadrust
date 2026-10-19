@@ -226,17 +226,24 @@ fn count_extra_handles(document: &CadDocument, version: crate::types::DxfVersion
                 {
                     continue;
                 }
-                // Vertices + SEQEND all use allocate_handle()
-                count += polyline.vertices.len() as u64 + 1;
+                count += polyline
+                    .vertices
+                    .iter()
+                    .filter(|vertex| vertex.common.handle.is_null())
+                    .count() as u64;
+                if polyline.seqend.as_ref().is_none_or(|seqend| seqend.common.handle.is_null()) {
+                    count += 1;
+                }
             }
             EntityType::Polyline3D(polyline) => {
                 for vertex in &polyline.vertices {
-                    if vertex.handle.is_null() {
+                    if vertex.common.handle.is_null() {
                         count += 1;
                     }
                 }
-                // SEQEND always written
-                count += 1;
+                if polyline.seqend.as_ref().is_none_or(|seqend| seqend.common.handle.is_null()) {
+                    count += 1;
+                }
             }
             EntityType::PolyfaceMesh(mesh) => {
                 for vertex in &mesh.vertices {
@@ -249,7 +256,9 @@ fn count_extra_handles(document: &CadDocument, version: crate::types::DxfVersion
                         count += 1;
                     }
                 }
-                if mesh.seqend_handle.is_none() {
+                let has_seqend_handle = mesh.seqend.as_ref().is_some_and(|seqend| !seqend.common.handle.is_null())
+                    || mesh.seqend_handle.is_some_and(|handle| !handle.is_null());
+                if !has_seqend_handle {
                     count += 1;
                 }
             }
@@ -259,18 +268,25 @@ fn count_extra_handles(document: &CadDocument, version: crate::types::DxfVersion
                         count += 1;
                     }
                 }
-                // SEQEND always needs a handle
-                count += 1;
+                if mesh.seqend.as_ref().is_none_or(|seqend| seqend.common.handle.is_null()) {
+                    count += 1;
+                }
             }
             EntityType::Insert(insert) => {
-                if insert.has_attributes() {
+                let has_sequence = insert.has_attributes()
+                    || insert.seqend.is_some()
+                    || insert.seqend_handle.is_some();
+                if has_sequence {
                     count += insert
                         .attributes
                         .iter()
                         .filter(|attribute| attribute.common.handle.is_null())
                         .count() as u64;
-                    // SEQEND for attribute sequence
-                    count += 1;
+                    let has_seqend_handle = insert.seqend.as_ref().is_some_and(|seqend| !seqend.common.handle.is_null())
+                        || insert.seqend_handle.is_some_and(|handle| !handle.is_null());
+                    if !has_seqend_handle {
+                        count += 1;
+                    }
                 }
             }
             _ => {}
@@ -306,11 +322,9 @@ fn compute_max_handle(document: &CadDocument) -> u64 {
         if h >= max {
             max = h + 1;
         }
-        if let EntityType::Insert(insert) = entity {
-            for attribute in &insert.attributes {
-                max = max.max(attribute.common.handle.value().saturating_add(1));
-            }
-        }
+        entity.for_each_child_handle(|handle| {
+            max = max.max(handle.value().saturating_add(1));
+        });
     }
     for (handle, _) in &document.objects {
         let h = handle.value();

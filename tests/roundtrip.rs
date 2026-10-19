@@ -642,12 +642,42 @@ fn normalize_entity_for_comparison(entity: &mut EntityType) {
     // ── Common handles ─────────────────────────────────────────
     normalize_entity_common(entity.common_mut());
 
+    // A writer must create the required terminator when a programmatic
+    // compound entity has none. Compare its expected default common data
+    // with the retained record, using the same identity normalization as
+    // top-level entities; keep explicit appearance/XData in the comparison.
+    let (seqend, parent) = match entity {
+        EntityType::Polyline2D(p) => (Some(&mut p.seqend), Some(&p.common)),
+        EntityType::Polyline3D(p) => (Some(&mut p.seqend), Some(&p.common)),
+        EntityType::PolyfaceMesh(p) => (Some(&mut p.seqend), Some(&p.common)),
+        EntityType::PolygonMesh(p) => (Some(&mut p.seqend), Some(&p.common)),
+        EntityType::Insert(p) if !p.attributes.is_empty() || p.seqend.is_some() =>
+            (Some(&mut p.seqend), Some(&p.common)),
+        _ => (None, None),
+    };
+    if let (Some(seqend), Some(parent)) = (seqend, parent) {
+        let seqend = seqend.get_or_insert_with(|| {
+            let mut seqend = acadrust::entities::Seqend::new();
+            seqend.common.layer = parent.layer.clone();
+            seqend.common.color = parent.color;
+            Box::new(seqend)
+        });
+        normalize_entity_common(&mut seqend.common);
+    }
+
     // ── Entity-specific handles & computed fields ──────────────
     match entity {
+        EntityType::Polyline2D(p) => {
+            p.source_widths = None;
+            for v in &mut p.vertices {
+                normalize_entity_common(&mut v.common);
+                v.source_widths = None;
+            }
+        }
         // Polyline3D: vertex handles and layers
         EntityType::Polyline3D(p) => {
             for v in &mut p.vertices {
-                v.handle = Handle::NULL;
+                normalize_entity_common(&mut v.common);
                 // Layer may be inherited from the polyline after write/read
                 v.layer = String::new();
             }

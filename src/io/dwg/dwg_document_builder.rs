@@ -153,7 +153,7 @@ fn read_hatch_scale_context_data(
 
 /// Pending vertex data collected during Pass 2, keyed by owner (parent polyline) handle.
 enum PendingVertex {
-    V2D(entities::Vertex2DData),
+    V2D(entities::Vertex2DData, EntityCommon),
     V3D(entities::Vertex3DData, EntityCommon),
     PfaceFace(entities::PfaceFaceData, EntityCommon),
 }
@@ -161,7 +161,7 @@ enum PendingVertex {
 impl PendingVertex {
     fn handle(&self) -> Handle {
         match self {
-            PendingVertex::V2D(data) => data.handle,
+            PendingVertex::V2D(data, _) => data.handle,
             PendingVertex::V3D(data, _) => data.handle,
             PendingVertex::PfaceFace(data, _) => data.handle,
         }
@@ -180,8 +180,8 @@ fn read_owned_vertex_handles(reader: &mut DwgMergedReader, owned_count: i32) -> 
 struct PendingPolylines {
     /// Vertex data keyed by owner (parent polyline) handle.
     vertices: HashMap<u64, Vec<PendingVertex>>,
-    /// SEQEND handle keyed by owner (parent polyline) handle.
-    seqends: HashMap<u64, crate::types::Handle>,
+    /// Retained SEQEND keyed by owner (parent polyline or INSERT) handle.
+    seqends: HashMap<u64, crate::entities::Seqend>,
     /// Owned vertex handles, in list order, keyed by owner (parent polyline) handle.
     vertex_order: HashMap<u64, Vec<u64>>,
     /// Polyline entities awaiting vertex assembly, keyed by their handle.
@@ -1952,12 +1952,12 @@ impl DwgDocumentBuilder {
                         chunk.pending.polylines.retain(|(h, _)| *h != handle);
                         for vertices in chunk.pending.vertices.values_mut() {
                             vertices.retain(|vertex| match vertex {
-                                PendingVertex::V2D(data) => data.handle.value() != handle,
+                                PendingVertex::V2D(data, _) => data.handle.value() != handle,
                                 PendingVertex::V3D(data, _) => data.handle.value() != handle,
                                 PendingVertex::PfaceFace(data, _) => data.handle.value() != handle,
                             });
                         }
-                        chunk.pending.seqends.retain(|_, h| h.value() != handle);
+                        chunk.pending.seqends.retain(|_, s| s.common.handle.value() != handle);
                         for attributes in chunk.pending_attributes.values_mut() {
                             attributes.retain(|attribute| attribute.common.handle.value() != handle);
                         }
@@ -2022,7 +2022,7 @@ impl DwgDocumentBuilder {
                         }
                     }
                     for (&owner, handle) in &chunk.pending.seqends {
-                        document.raw_record_owners.insert(handle.value(), owner);
+                        document.raw_record_owners.insert(handle.common.handle.value(), owner);
                     }
                     for (&owner, attributes) in &chunk.pending_attributes {
                         for attribute in attributes {
@@ -2159,8 +2159,10 @@ impl DwgDocumentBuilder {
                         e.vertices = verts
                             .into_iter()
                             .filter_map(|v| {
-                                if let PendingVertex::V2D(d) = v {
+                                if let PendingVertex::V2D(d, ec) = v {
                                     Some(crate::entities::polyline::Vertex2D {
+                                        common: ec,
+                                        source_widths: None,
                                         location: crate::types::Vector3::new(d.x, d.y, d.z),
                                         flags: crate::entities::polyline::VertexFlags::from_bits(
                                             d.flags,
@@ -2181,10 +2183,9 @@ impl DwgDocumentBuilder {
                         e.vertices = verts
                             .into_iter()
                             .filter_map(|v| {
-                                if let PendingVertex::V3D(d, _ec) = v {
+                                if let PendingVertex::V3D(d, ec) = v {
                                     Some(crate::entities::polyline3d::Vertex3DPolyline {
-                                        handle: d.handle,
-                                        layer: String::new(),
+                                        common: ec,
                                         position: d.position,
                                         flags: d.flags as i32,
                                     })
@@ -2212,7 +2213,7 @@ impl DwgDocumentBuilder {
                                 PendingVertex::PfaceFace(f, ec) => {
                                     e.faces.push(crate::entities::polyface_mesh::PolyfaceFace {
                                         common: ec,
-                                        flags: crate::entities::polyface_mesh::PolyfaceVertexFlags::NONE,
+                                        flags: crate::entities::polyface_mesh::PolyfaceVertexFlags::POLYFACE_MESH,
                                         index1: f.index1,
                                         index2: f.index2,
                                         index3: f.index3,
@@ -2223,22 +2224,17 @@ impl DwgDocumentBuilder {
                                 _ => {}
                             }
                         }
-                        // Restore the seqend handle for this polyface mesh
-                        if let Some(sh) = pending.seqends.get(&poly_handle).copied() {
-                            e.seqend_handle = Some(sh);
-                        }
                     }
                     EntityType::PolygonMesh(ref mut e) => {
                         e.vertices = verts
                             .into_iter()
                             .filter_map(|v| {
-                                if let PendingVertex::V3D(d, _ec) = v {
-                                    let mut c = crate::entities::EntityCommon::new();
-                                    c.handle = d.handle;
+                                if let PendingVertex::V3D(d, ec) = v {
+
                                     Some(crate::entities::polygon_mesh::PolygonMeshVertex {
-                                        common: c,
+                                        common: ec,
                                         location: d.position,
-                                        flags: 0,
+                                        flags: d.flags as i16,
                                     })
                                 } else {
                                     None
@@ -2246,6 +2242,18 @@ impl DwgDocumentBuilder {
                             })
                             .collect();
                     }
+                    _ => {}
+                }
+            }
+            if let Some(seqend) = pending.seqends.remove(&poly_handle) {
+                match &mut entity {
+                    EntityType::Polyline2D(e) => e.seqend = Some(Box::new(seqend)),
+                    EntityType::Polyline3D(e) => e.seqend = Some(Box::new(seqend)),
+                    EntityType::PolyfaceMesh(e) => {
+                        e.seqend_handle = Some(seqend.common.handle);
+                        e.seqend = Some(Box::new(seqend));
+                    }
+                    EntityType::PolygonMesh(e) => e.seqend = Some(Box::new(seqend)),
                     _ => {}
                 }
             }
@@ -2258,16 +2266,19 @@ impl DwgDocumentBuilder {
         }
 
         // ── Post-pass: Attach pending attribute entities to parent INSERTs ──
-        if !pending_attributes.is_empty() {
+        if !pending_attributes.is_empty() || !pending.seqends.is_empty() {
             for entity in &mut document.entities {
-                let entity = std::sync::Arc::make_mut(entity);
-                if let EntityType::Insert(ref mut ins) = entity {
-                    let insert_handle = ins.common.handle.value();
+                let EntityType::Insert(ins) = entity.as_ref() else { continue; };
+                let insert_handle = ins.common.handle.value();
+                if !pending_attributes.contains_key(&insert_handle)
+                    && !pending.seqends.contains_key(&insert_handle) { continue; }
+                if let EntityType::Insert(ins) = std::sync::Arc::make_mut(entity) {
                     if let Some(attribs) = pending_attributes.remove(&insert_handle) {
                         ins.attributes = attribs;
                     }
-                    if let Some(seqend) = pending.seqends.get(&insert_handle).copied() {
-                        ins.seqend_handle = Some(seqend);
+                    if let Some(seqend) = pending.seqends.remove(&insert_handle) {
+                        ins.seqend_handle = Some(seqend.common.handle);
+                        ins.seqend = Some(Box::new(seqend));
                     }
                 }
             }
@@ -2950,35 +2961,64 @@ impl DwgDocumentBuilder {
                 .map(|l| (l.handle.value(), l.name.clone()))
                 .collect();
             if !app_name_by_handle.is_empty() {
-                for_each_mut(&mut document.entities, |entity| {
-                    let records: Vec<crate::xdata::ExtendedDataRecord> = {
-                        let xd = &entity.common().extended_data;
-                        xd.raw_dwg_eed
-                            .iter()
-                            .filter_map(|(app_handle, bytes)| {
-                                let Some(name) = app_name_by_handle.get(app_handle) else {
-                                    return None;
-                                };
-                                if xd.get_record(name).is_some() {
-                                    return None;
-                                }
-                                crate::io::dwg::eed_codec::decode_values(bytes, wide, |h| {
-                                    layer_name_by_handle.get(&h).cloned()
-                                })
-                                .map(|values| {
-                                    let mut rec =
-                                        crate::xdata::ExtendedDataRecord::new(name.clone());
-                                    rec.values = values;
-                                    rec
-                                })
+                let decode_records = |xd: &crate::xdata::ExtendedData| {
+                    xd.raw_dwg_eed
+                        .iter()
+                        .filter_map(|(app_handle, bytes)| {
+                            let name = app_name_by_handle.get(app_handle)?;
+                            if xd.get_record(name).is_some() { return None; }
+                            crate::io::dwg::eed_codec::decode_values(bytes, wide, |h| {
+                                layer_name_by_handle.get(&h).cloned()
+                            }).map(|values| {
+                                let mut record = crate::xdata::ExtendedDataRecord::new(name.clone());
+                                record.values = values;
+                                record
                             })
-                            .collect()
-                    };
+                        })
+                        .collect::<Vec<_>>()
+                };
+                for_each_mut(&mut document.entities, |entity| {
+                    let records = decode_records(&entity.common().extended_data);
                     if !records.is_empty() {
                         let xd = &mut std::sync::Arc::make_mut(entity).common_mut().extended_data;
                         for record in records {
                             xd.add_record(record);
                         }
+                    }
+                    // Children retain raw EED too. Decode them after APPID/layer
+                    // resolution, using the same pass for serial and rayon reads.
+                    if matches!(entity.as_ref(), EntityType::Insert(_) | EntityType::Polyline2D(_)
+                        | EntityType::Polyline3D(_) | EntityType::PolyfaceMesh(_) | EntityType::PolygonMesh(_)) {
+                        let decode_child = |common: &mut EntityCommon| {
+                            for record in decode_records(&common.extended_data) {
+                                common.extended_data.add_record(record);
+                            }
+                        };
+                        let seqend = match std::sync::Arc::make_mut(entity) {
+                            EntityType::Insert(e) => {
+                                for child in &mut e.attributes { decode_child(&mut child.common); }
+                                e.seqend.as_deref_mut()
+                            }
+                            EntityType::Polyline2D(e) => {
+                                for child in &mut e.vertices { decode_child(&mut child.common); }
+                                e.seqend.as_deref_mut()
+                            }
+                            EntityType::Polyline3D(e) => {
+                                for child in &mut e.vertices { decode_child(&mut child.common); }
+                                e.seqend.as_deref_mut()
+                            }
+                            EntityType::PolyfaceMesh(e) => {
+                                for child in &mut e.vertices { decode_child(&mut child.common); }
+                                for child in &mut e.faces { decode_child(&mut child.common); }
+                                e.seqend.as_deref_mut()
+                            }
+                            EntityType::PolygonMesh(e) => {
+                                for child in &mut e.vertices { decode_child(&mut child.common); }
+                                e.seqend.as_deref_mut()
+                            }
+                            _ => None,
+                        };
+                        if let Some(seqend) = seqend { decode_child(&mut seqend.common); }
                     }
                     if self.obj_reader.version().r13_14_only() {
                         if let EntityType::Viewport(viewport) = std::sync::Arc::make_mut(entity) {
@@ -4824,12 +4864,12 @@ impl DwgDocumentBuilder {
                 }
                 OBJ_SEQEND => {
                     // SEQEND terminates a polyline vertex or INSERT
-                    // attribute sequence. Store the seqend handle so
-                    // it can be preserved on the parent polyline.
+                    // attribute sequence. Keep its common state until
+                    // the owning compound entity is assembled.
                     entities::read_seqend(&mut reader);
                     pending
                         .seqends
-                        .insert(entity_data.owner_handle, entity_common.handle);
+                        .insert(entity_data.owner_handle, crate::entities::Seqend { common: entity_common });
                 }
 
                 // ── Vertex child entities ──────────────────────────
@@ -4844,7 +4884,7 @@ impl DwgDocumentBuilder {
                         .vertices
                         .entry(entity_data.owner_handle)
                         .or_default()
-                        .push(PendingVertex::V2D(data));
+                        .push(PendingVertex::V2D(data, entity_common));
                 }
                 OBJ_VERTEX_3D | OBJ_VERTEX_MESH => {
                     let mut data = entities::read_vertex3d(&mut reader);

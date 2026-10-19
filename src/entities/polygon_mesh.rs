@@ -96,6 +96,8 @@ bitflags::bitflags! {
 pub struct PolygonMesh {
     /// Common entity data
     pub common: EntityCommon,
+    /// Retained sequence terminator, including its identity and common metadata.
+    pub seqend: Option<Box<super::Seqend>>,
     /// Mesh flags (always includes POLYGON_MESH)
     pub flags: PolygonMeshFlags,
     /// Number of vertices in the M direction
@@ -121,6 +123,7 @@ impl PolygonMesh {
     pub fn new() -> Self {
         PolygonMesh {
             common: EntityCommon::new(),
+            seqend: None,
             flags: PolygonMeshFlags::POLYGON_MESH,
             m_vertex_count: 0,
             n_vertex_count: 0,

@@ -95,7 +95,27 @@ fn assert_geometry(expected: &CadDocument, actual: &CadDocument, handles: [Handl
                 assert_eq!(points(actual), points(expected));
             }
             (EntityType::Polyline2D(expected), EntityType::Polyline2D(actual)) => {
-                assert_eq!(actual.vertices, expected.vertices);
+                assert_eq!(actual.vertices.len(), expected.vertices.len());
+                for (actual, expected) in actual.vertices.iter().zip(&expected.vertices) {
+                    assert!(!actual.common.handle.is_null());
+                    assert_eq!(actual.common.owner_handle, handle);
+                    if !expected.common.handle.is_null() {
+                        assert_eq!(actual.common.handle, expected.common.handle);
+                    }
+                    // Vertex2D now retains the same file identity/provenance
+                    // as other entities. Compare all geometry and appearance
+                    // after normalizing only those serialization fields.
+                    let normalize = |vertex: &Vertex2D| {
+                        let mut vertex = vertex.clone();
+                        vertex.common.handle = Handle::NULL;
+                        vertex.common.owner_handle = Handle::NULL;
+                        vertex.common.layer_handle = None;
+                        vertex.common.entity_mode = None;
+                        vertex.common.raw_record = None;
+                        vertex
+                    };
+                    assert_eq!(normalize(actual), normalize(expected));
+                }
             }
             (EntityType::Insert(expected), EntityType::Insert(actual)) => {
                 assert_eq!(actual.insert_point, expected.insert_point);

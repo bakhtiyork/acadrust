@@ -125,22 +125,32 @@ impl SmoothSurfaceType {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vertex3DPolyline {
-    /// Vertex handle
-    pub handle: Handle,
-    /// Layer name
-    pub layer: String,
+    /// Persistent child identity and appearance, stored inline.
+    pub common: EntityCommon,
     /// Vertex position
     pub position: Vector3,
     /// Vertex flags
     pub flags: i32,
 }
 
+// Keep direct vertex.handle / vertex.layer access without duplicating strings.
+impl std::ops::Deref for Vertex3DPolyline {
+    type Target = EntityCommon;
+    fn deref(&self) -> &Self::Target {
+        &self.common
+    }
+}
+impl std::ops::DerefMut for Vertex3DPolyline {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.common
+    }
+}
+
 impl Vertex3DPolyline {
     /// Create a new 3D vertex
     pub fn new(position: Vector3) -> Self {
         Self {
-            handle: Handle::NULL,
-            layer: "0".to_string(),
+            common: EntityCommon::new(),
             position,
             flags: 32, // 3D polyline vertex flag
         }
@@ -183,6 +193,8 @@ impl Default for Vertex3DPolyline {
 pub struct Polyline3D {
     /// Common entity properties
     pub common: EntityCommon,
+    /// Retained sequence terminator, including its identity and common metadata.
+    pub seqend: Option<Box<super::Seqend>>,
     /// Polyline flags
     pub flags: Polyline3DFlags,
     /// Smooth surface type
@@ -201,6 +213,8 @@ pub struct Polyline3D {
     pub smooth_n_density: u16,
     /// Elevation (for 2D polylines, not used in 3D)
     pub elevation: f64,
+    /// Extrusion thickness retained from DXF.
+    pub thickness: f64,
     /// Normal vector (extrusion direction)
     pub normal: Vector3,
     /// Vertex list
@@ -212,6 +226,7 @@ impl Polyline3D {
     pub fn new() -> Self {
         Self {
             common: EntityCommon::default(),
+            seqend: None,
             flags: Polyline3DFlags::polyline_3d(),
             smooth_type: SmoothSurfaceType::None,
             default_start_width: 0.0,
@@ -221,6 +236,7 @@ impl Polyline3D {
             smooth_m_density: 0,
             smooth_n_density: 0,
             elevation: 0.0,
+            thickness: 0.0,
             normal: Vector3::UNIT_Z,
             vertices: Vec::new(),
         }
