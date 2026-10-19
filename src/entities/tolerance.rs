@@ -10,6 +10,20 @@ use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transparency, Vecto
 // Tolerance Entity
 // ============================================================================
 
+/// DXF source details that are not represented by the normalized TOLERANCE
+/// fields. These are retained only so compatibility projections can mirror
+/// source-sensitive ACadSharp properties without changing native values.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ToleranceDxfSource {
+    /// Whether the DXF record contained any direction coordinate (11/21/31).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub has_direction: bool,
+    /// Original code-1 spelling when caret decoding changed the public text.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_text: Option<String>,
+}
+
 /// Tolerance entity (Feature Control Frame).
 ///
 /// Represents a geometric dimensioning and tolerancing (GD&T) feature
@@ -42,9 +56,13 @@ use crate::types::{BoundingBox3D, Color, Handle, LineWeight, Transparency, Vecto
 /// tol.text = "{\\Fgdt;p}%%v0.5%%v%%v%%v%%v".to_string();
 /// tol.dimension_style_name = "Standard".to_string();
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Tolerance {
+    /// Source-sensitive DXF fields retained for compatibility projections.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_source: Option<ToleranceDxfSource>,
+
     /// Common entity data.
     pub common: EntityCommon,
 
@@ -83,6 +101,22 @@ pub struct Tolerance {
     pub dwg_unknown_short: i16,
 }
 
+/// Compare native drawing state; source spelling/presence is provenance only.
+impl PartialEq for Tolerance {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.insertion_point == other.insertion_point
+            && self.direction == other.direction
+            && self.normal == other.normal
+            && self.text == other.text
+            && self.dimension_style_name == other.dimension_style_name
+            && self.dimension_style_handle == other.dimension_style_handle
+            && self.text_height == other.text_height
+            && self.dimension_gap == other.dimension_gap
+            && self.dwg_unknown_short == other.dwg_unknown_short
+    }
+}
+
 impl Tolerance {
     /// Entity type name.
     pub const ENTITY_NAME: &'static str = "TOLERANCE";
@@ -96,6 +130,7 @@ impl Tolerance {
     /// Creates a new tolerance entity with default values.
     pub fn new() -> Self {
         Tolerance {
+            dxf_source: None,
             common: EntityCommon::default(),
             insertion_point: Vector3::ZERO,
             direction: Vector3::UNIT_X,

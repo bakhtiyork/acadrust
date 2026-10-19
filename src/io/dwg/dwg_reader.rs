@@ -3510,6 +3510,7 @@ pub(crate) fn recover_mtext_bg_roundtrip(document: &mut crate::document::CadDocu
     }
     for (h, flags, scale, color, transp) in recovered {
         if let Some(EntityType::MText(m)) = document.get_entity_mut(h) {
+            m.background_from_xdata = true;
             m.background_fill_flags = flags;
             m.background_scale = scale;
             m.background_color = color;

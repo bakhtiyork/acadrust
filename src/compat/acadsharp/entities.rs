@@ -4,8 +4,8 @@
 //! whose state is absent or only held in an opaque payload is left as
 //! `!unmapped` by `props`.
 
-use crate::entities::{Dimension, EntityCommon, EntityType, Spline};
-use crate::types::{DxfVersion, Handle, Transparency, Vector2, Vector3};
+use crate::entities::{Dimension, DimensionType, EntityCommon, EntityType, Spline};
+use crate::types::{DxfVersion, Handle, Vector2, Vector3};
 use crate::xdata::XDataValue;
 use crate::CadDocument;
 use serde_json::{json, Value};
@@ -738,50 +738,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, out: &mut Vec<Value>) 
             0x2C,
             "AcDbMText",
             false,
-            vec![
-                (
-                    "AlignmentPoint",
-                    value.dwg_x_direction.map(vec3).unwrap_or_else(unmapped),
-                ),
-                ("AttachmentPoint", enum_value(value.attachment_point as i64)),
-                ("BackgroundColor", color(value.background_color)),
-                (
-                    "BackgroundFillFlags",
-                    enum_value(value.background_fill_flags as i64),
-                ),
-                ("BackgroundScale", number(value.background_scale)),
-                (
-                    "BackgroundTransparency",
-                    transparency_from_raw(value.background_transparency),
-                ),
-                ("ColumnData", mtext_columns(&value.column_data)),
-                (
-                    "DrawingDirection",
-                    enum_value(value.drawing_direction as i64),
-                ),
-                ("Height", number(value.height)),
-                ("HorizontalWidth", number(value.extents_width)),
-                ("InsertPoint", vec3(value.insertion_point)),
-                ("IsAnnotative", bool_value(value.is_annotative)),
-                ("LineSpacing", number(value.line_spacing_factor)),
-                (
-                    "LineSpacingStyle",
-                    enum_value(value.line_spacing_style as i64),
-                ),
-                ("Normal", vec3(value.normal)),
-                (
-                    "RectangleHeight",
-                    value.rectangle_height.map(number).unwrap_or_else(unmapped),
-                ),
-                ("RectangleWidth", number(value.rectangle_width)),
-                ("Rotation", number(value.rotation)),
-                (
-                    "Style",
-                    optional_handle(doc.text_styles.get(&value.style).map(|style| style.handle)),
-                ),
-                ("Value", Value::String(value.value.clone())),
-                ("VerticalHeight", number(value.extents_height)),
-            ],
+            super::mtext::properties(doc, value),
             out,
         ),
         EntityType::AttributeDefinition(value) => field_common(
@@ -1019,11 +976,40 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, out: &mut Vec<Value>) 
             "AcDbFcf",
             false,
             vec![
-                ("Direction", vec3(value.direction)),
+                (
+                    "Direction",
+                    vec3(
+                        if value
+                            .dxf_source
+                            .as_ref()
+                            .is_some_and(|source| !source.has_direction)
+                        {
+                            Vector3::ZERO
+                        } else {
+                            value.direction
+                        },
+                    ),
+                ),
                 ("InsertionPoint", vec3(value.insertion_point)),
                 ("Normal", vec3(value.normal)),
                 ("Style", optional_handle(value.dimension_style_handle)),
-                ("Text", Value::String(value.text.clone())),
+                (
+                    "Text",
+                    Value::String(
+                        value
+                            .dxf_source
+                            .as_ref()
+                            .and_then(|source| source.raw_text.as_ref())
+                            .filter(|raw| {
+                                raw.replace("^J", "\n")
+                                    .replace("^M", "\r")
+                                    .replace("^I", "\t")
+                                    .replace("^ ", "^") == value.text
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| value.text.clone()),
+                    ),
+                ),
             ],
             out,
         ),
@@ -1333,25 +1319,6 @@ fn text_vertical(value: crate::entities::TextVerticalAlignment) -> i64 {
     }
 }
 
-fn transparency_from_raw(value: i32) -> Value {
-    transparency(Transparency::Explicit(value.clamp(0, 255) as u8))
-}
-
-fn mtext_columns(value: &crate::entities::MTextColumnData) -> Value {
-    inline(
-        "MText.TextColumnData",
-        vec![
-            ("AutoHeight", bool_value(value.auto_height)),
-            ("ColumnCount", integer(value.column_count as i64)),
-            ("ColumnType", enum_value(value.column_type as i64)),
-            ("FlowReversed", bool_value(value.flow_reversed)),
-            ("Gutter", number(value.gutter)),
-            ("Heights", array(value.heights.iter().copied().map(number))),
-            ("Width", number(value.width)),
-        ],
-    )
-}
-
 fn attribute_definition_props(
     value: &crate::entities::AttributeDefinition,
 ) -> Vec<(&'static str, Value)> {
@@ -1475,6 +1442,10 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
                 ("ExtLineRotation", number(value.ext_line_rotation)),
                 ("Rotation", number(value.rotation)),
                 ("Measurement", number(value.measurement())),
+                (
+                    "Offset",
+                    number(value.second_point.distance(&value.definition_point)),
+                ),
             ],
         ),
         Dimension::Radius(value) => dimension_common(
@@ -1484,8 +1455,13 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
             0x19,
             "AcDbRadialDimension",
             vec![
-                ("DefinitionPoint", vec3(value.definition_point)),
-                ("AngleVertex", vec3(value.angle_vertex)),
+                // ACadSharp reports the DXF group-10 centre as
+                // DefinitionPoint and group-15 arc point as AngleVertex.
+                // The native model names these two geometric roles in the
+                // opposite direction, so project the source-compatible names
+                // here without changing the round-trip representation.
+                ("DefinitionPoint", vec3(value.angle_vertex)),
+                ("AngleVertex", vec3(value.definition_point)),
                 ("LeaderLength", number(value.leader_length)),
                 ("Measurement", number(value.measurement())),
             ],
@@ -1497,6 +1473,9 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
             0x1A,
             "AcDbDiametricDimension",
             vec![
+                // ACadSharp checks the Angular bit as a flag; the diameter
+                // type value (3) therefore reports IsAngular=true.
+                ("IsAngular", bool_value(true)),
                 ("DefinitionPoint", vec3(value.definition_point)),
                 ("AngleVertex", vec3(value.angle_vertex)),
                 ("Center", vec3(value.center())),
@@ -1517,7 +1496,11 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
                 ("AngleVertex", vec3(value.angle_vertex)),
                 ("DefinitionPoint", vec3(value.definition_point)),
                 ("Measurement", number(value.measurement_radians())),
-                ("Center", vec3(value.angle_vertex)),
+                (
+                    "Offset",
+                    number(value.second_point.distance(&value.definition_point)),
+                ),
+                ("Center", super::dimension_geometry::angular2_center(value)),
             ],
         ),
         Dimension::Angular3Pt(value) => dimension_common(
@@ -1541,6 +1524,9 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
             0x14,
             "AcDbOrdinateDimension",
             vec![
+                // Ordinate (6) also contains the Angular flag bit in
+                // ACadSharp's DimensionType enum.
+                ("IsAngular", bool_value(true)),
                 ("FeatureLocation", vec3(value.feature_location)),
                 ("LeaderEndpoint", vec3(value.leader_endpoint)),
                 ("DefinitionPoint", vec3(value.definition_point)),
@@ -1548,26 +1534,32 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
                 ("Measurement", number(value.measurement())),
             ],
         ),
-        Dimension::Arc(value) => dimension_common(
-            doc,
-            &value.base,
-            "DimensionArc",
-            -999,
-            "AcDbArcDimension",
-            vec![
-                ("Center", vec3(value.center_point)),
-                ("DefinitionPoint", vec3(value.definition_point)),
-                ("FirstPoint", vec3(value.first_extension_point)),
-                ("SecondPoint", vec3(value.second_extension_point)),
-                ("HasLeader", bool_value(value.has_leader)),
-                ("IsPartial", bool_value(value.is_partial)),
-                ("LeaderPoint1", vec3(value.first_leader_point)),
-                ("LeaderPoint2", vec3(value.second_leader_point)),
-                ("StartAngle", number(value.arc_start_parameter)),
-                ("EndAngle", number(value.arc_end_parameter)),
-                ("Measurement", number(value.measurement())),
-            ],
-        ),
+        Dimension::Arc(value) => {
+            // ACadSharp constructs DimensionArc with the Angular3Point flag
+            // even though the native model uses ArcLength for this subtype.
+            dimension_common(
+                doc,
+                &value.base,
+                "DimensionArc",
+                -999,
+                "AcDbArcDimension",
+                vec![
+                    ("Flags", enum_value(DimensionType::Angular3Point as i64)),
+                    ("IsAngular", bool_value(true)),
+                    ("Center", vec3(value.center_point)),
+                    ("DefinitionPoint", vec3(value.definition_point)),
+                    ("FirstPoint", vec3(value.first_extension_point)),
+                    ("SecondPoint", vec3(value.second_extension_point)),
+                    ("HasLeader", bool_value(value.has_leader)),
+                    ("IsPartial", bool_value(value.is_partial)),
+                    ("LeaderPoint1", vec3(value.first_leader_point)),
+                    ("LeaderPoint2", vec3(value.second_leader_point)),
+                    ("StartAngle", number(value.arc_start_parameter)),
+                    ("EndAngle", number(value.arc_end_parameter)),
+                    ("Measurement", super::dimension_geometry::arc_measurement(value)),
+                ],
+            )
+        }
         Dimension::LargeRadial(value) => dimension_common(
             doc,
             &value.base,

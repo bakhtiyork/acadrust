@@ -213,6 +213,7 @@ pub struct MTextData {
     pub extents_height: f64,
     pub extents_width: f64,
     pub value: String,
+    pub source_value: Option<String>,
     pub style_handle: u64,
     pub linespacing_style: i16,
     pub linespacing_factor: f64,
@@ -1541,7 +1542,7 @@ pub fn read_mtext(
     let drawing_direction = reader.read_bit_short();
     let extents_height = reader.read_bit_double();
     let extents_width = reader.read_bit_double();
-    let value = reader.read_variable_text();
+    let (value, source_value) = reader.read_mtext_value();
 
     let style_handle = reader.read_handle();
 
@@ -1661,6 +1662,7 @@ pub fn read_mtext(
         extents_height,
         extents_width,
         value,
+        source_value,
         style_handle,
         linespacing_style,
         linespacing_factor,
@@ -4275,7 +4277,7 @@ pub(crate) fn read_embedded_mtext(
     let drawing_direction = reader.read_bit_short();
     let extents_width = reader.read_bit_double();
     let extents_height = reader.read_bit_double();
-    let value = reader.read_variable_text();
+    let (value, source_value) = reader.read_mtext_value();
     let style_handle = reader.read_handle();
     let linespacing_style = reader.read_bit_short();
     let linespacing_factor = reader.read_bit_double();
@@ -4338,6 +4340,7 @@ pub(crate) fn read_embedded_mtext(
         extents_height,
         extents_width,
         value,
+        source_value,
         style_handle,
         linespacing_style,
         linespacing_factor,

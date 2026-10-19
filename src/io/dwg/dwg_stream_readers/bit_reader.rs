@@ -828,6 +828,38 @@ impl DwgBitReader {
         }
     }
 
+    /// Read MTEXT lexical text alongside the normal decoded value. Only changed
+    /// spellings need source storage; the native decoding policy is unchanged.
+    pub(crate) fn read_mtext_value(&mut self) -> (String, Option<String>) {
+        let separate = self.dxf_version >= DxfVersion::AC1021 && self.text_stream_pos >= 0;
+        let saved = self.position_in_bits();
+        if separate {
+            self.set_position_in_bits(self.text_stream_pos);
+        }
+        let count = self.read_bit_short();
+        let raw = if count <= 0 {
+            String::new()
+        } else if self.dxf_version >= DxfVersion::AC1021 {
+            let bytes = self.read_bytes(count as usize * 2);
+            let utf16: Vec<_> = bytes.chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            String::from_utf16_lossy(&utf16).replace('\0', "")
+        } else {
+            let bytes = self.read_bytes(count as usize);
+            self.encoding.decode(&bytes).0.replace('\0', "")
+        };
+        if separate {
+            self.text_stream_pos = self.position_in_bits();
+            self.set_position_in_bits(saved);
+        }
+        if !crate::io::dxf::code_page::has_legacy_escape(&raw) {
+            return (raw, None);
+        }
+        let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&raw);
+        let source = (decoded != raw).then_some(raw);
+        (decoded, source)
+    }
+
     /// Read a VariableText (TV type).
     ///
     /// - Pre-R2007: BS length + encoded bytes

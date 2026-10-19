@@ -137,8 +137,8 @@ impl<R: Read + Seek> DxfTextReader<R> {
             }
         };
 
-        // Preserve modeler lexical text before legacy decoding as well as caret
-        // decoding. Other entities retain their existing raw-text semantics.
+        // Preserve modeler and MTEXT lexical text before legacy decoding as
+        // well as caret decoding. Other entities keep their existing semantics.
         let mut modeler_raw = None;
         let value_line = if crate::io::dxf::code_page::has_legacy_escape(&value_line) {
             let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&value_line);
@@ -146,7 +146,7 @@ impl<R: Read + Seek> DxfTextReader<R> {
                 && matches!(code, 1 | 3)
                 && matches!(
                     self.context.record_type.as_deref(),
-                    Some("3DSOLID" | "REGION" | "BODY")
+                    Some("3DSOLID" | "REGION" | "BODY" | "MTEXT")
                 )
             {
                 modeler_raw = Some(value_line);

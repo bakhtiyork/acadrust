@@ -83,10 +83,34 @@ impl Default for MTextColumnData {
     }
 }
 
-/// A multi-line text entity
+/// DXF source fields whose presence/order is not recoverable from normalized state.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct MTextDxfSource {
+    pub alignment_point: Vector3,
+    pub line_spacing_style: Option<i16>,
+    pub has_background_color: bool,
+    pub has_background_transparency: bool,
+    pub has_embedded_columns: bool,
+    /// Native text snapshot, only when source spelling differs. This lets
+    /// projections recognize subsequent edits without decoding across chunks.
+    pub decoded_value: Option<String>,
+}
+
+/// A multi-line text entity
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MText {
+    /// Source lexical text, retained only when decoding changed it. DXF caret
+    /// escapes have already been interpreted independently for each chunk.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_value: Option<String>,
+    /// Source DXF presence and ordered alignment assignments.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_source: Option<MTextDxfSource>,
+    /// Background fill was recovered from legacy round-trip XData.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub background_from_xdata: bool,
     /// Common entity data
     pub common: EntityCommon,
     /// Text content (may contain formatting codes)
@@ -142,10 +166,41 @@ pub struct MText {
     pub extents_height: f64,
 }
 
+/// Compare native drawing state; source spelling/presence is provenance only.
+impl PartialEq for MText {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.value == other.value
+            && self.insertion_point == other.insertion_point
+            && self.height == other.height
+            && self.rectangle_width == other.rectangle_width
+            && self.rectangle_height == other.rectangle_height
+            && self.rotation == other.rotation
+            && self.dwg_x_direction == other.dwg_x_direction
+            && self.style == other.style
+            && self.attachment_point == other.attachment_point
+            && self.drawing_direction == other.drawing_direction
+            && self.line_spacing_factor == other.line_spacing_factor
+            && self.line_spacing_style == other.line_spacing_style
+            && self.normal == other.normal
+            && self.background_fill_flags == other.background_fill_flags
+            && self.background_scale == other.background_scale
+            && self.background_color == other.background_color
+            && self.background_transparency == other.background_transparency
+            && self.is_annotative == other.is_annotative
+            && self.column_data == other.column_data
+            && self.extents_width == other.extents_width
+            && self.extents_height == other.extents_height
+    }
+}
+
 impl MText {
     /// Create a new MText entity
     pub fn new() -> Self {
         MText {
+            source_value: None,
+            dxf_source: None,
+            background_from_xdata: false,
             common: EntityCommon::new(),
             value: String::new(),
             insertion_point: Vector3::ZERO,

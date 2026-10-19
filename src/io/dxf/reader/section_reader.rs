@@ -13409,6 +13409,14 @@ impl<'a> SectionReader<'a> {
             rectangle_width: 0.0,
             ..MText::new()
         };
+        let mut source = crate::entities::mtext::MTextDxfSource {
+            alignment_point: Vector3::UNIT_X,
+            line_spacing_style: None,
+            has_background_color: false,
+            has_background_transparency: false,
+            has_embedded_columns: false,
+            decoded_value: None,
+        };
         let mut insertion = PointReader::new();
         let mut normal = PointReader::new();
         let mut x_direction = PointReader::new();
@@ -13438,6 +13446,21 @@ impl<'a> SectionReader<'a> {
                 }
                 1 | 3 => {
                     // Text content (can be split across multiple codes)
+                    let raw = pair.raw_value_string.as_ref().unwrap_or(&pair.value_string);
+                    // The reference applies caret decoding to each chunk,
+                    // before concatenation (including binary DXF strings).
+                    let lexical = if raw.contains('^') {
+                        std::borrow::Cow::Owned(raw.replace("^J", "\n")
+                            .replace("^M", "\r").replace("^I", "\t").replace("^ ", "^"))
+                    } else {
+                        std::borrow::Cow::Borrowed(raw.as_str())
+                    };
+                    if lexical != pair.value_string && mtext.source_value.is_none() {
+                        mtext.source_value = Some(mtext.value.clone());
+                    }
+                    if let Some(value) = &mut mtext.source_value {
+                        value.push_str(&lexical);
+                    }
                     mtext.value.push_str(&pair.value_string);
                 }
                 40 => {
@@ -13462,6 +13485,9 @@ impl<'a> SectionReader<'a> {
                 }
                 50 => {
                     if let Some(value) = pair.as_double() {
+                        // Preserve source order independently of native column/OCS interpretation.
+                        let angle = value.to_radians();
+                        source.alignment_point = Vector3::new(angle.cos(), angle.sin(), 0.0);
                         if reading_columns {
                             let columns = &mut mtext.column_data;
                             let height_count = columns.column_count.max(0) as usize;
@@ -13540,6 +13566,7 @@ impl<'a> SectionReader<'a> {
                 }
                 73 => {
                     if let Some(ls) = pair.as_i16() {
+                        source.line_spacing_style = Some(ls);
                         mtext.line_spacing_style = crate::entities::LineSpacingStyle::from(ls);
                     }
                 }
@@ -13547,6 +13574,14 @@ impl<'a> SectionReader<'a> {
                 // X-axis direction vector (takes priority over rotation 50).
                 11 | 21 | 31 => {
                     x_direction.add_coordinate(&pair);
+                    if let Some(v) = pair.as_double() {
+                        match pair.code {
+                            11 => source.alignment_point.x = v,
+                            21 => source.alignment_point.y = v,
+                            31 => source.alignment_point.z = v,
+                            _ => unreachable!(),
+                        }
+                    }
                 }
                 // Defined rectangle height (0 = auto).
                 46 => {
@@ -13571,6 +13606,7 @@ impl<'a> SectionReader<'a> {
                     // is not classified as an integer group code, so as_i16()
                     // returns None. A following 421 (true colour) overrides.
                     if let Ok(ci) = pair.value_string.trim().parse::<i16>() {
+                        source.has_background_color = true;
                         mtext.background_color = Color::from_index(ci);
                     }
                 }
@@ -13578,11 +13614,13 @@ impl<'a> SectionReader<'a> {
                     // Background fill true colour (24-bit RGB); same typing
                     // caveat as 63 — parse the raw value directly.
                     if let Some(v) = true_color_bits(&pair.value_string) {
+                        source.has_background_color = true;
                         mtext.background_color = Color::from_true_color_value(v);
                     }
                 }
                 441 => {
                     if let Some(t) = pair.as_i32() {
+                        source.has_background_transparency = true;
                         mtext.background_transparency = t;
                     }
                 }
@@ -13593,6 +13631,7 @@ impl<'a> SectionReader<'a> {
                 // entity's own, so it must not fall through this match. The
                 // embedded object carries the MTEXT column layout.
                 101 => {
+                    source.has_embedded_columns = true;
                     mtext.column_data = self.read_mtext_embedded_object()?;
                     reading_columns = false;
                 }
@@ -13622,6 +13661,10 @@ impl<'a> SectionReader<'a> {
             mtext.dwg_x_direction = Some(direction);
         }
 
+        if mtext.source_value.is_some() {
+            source.decoded_value = Some(mtext.value.clone());
+        }
+        mtext.dxf_source = Some(source);
         Ok(Some(mtext))
     }
 
@@ -16954,6 +16997,8 @@ impl<'a> SectionReader<'a> {
     /// Read a TOLERANCE entity
     fn read_tolerance(&mut self) -> Result<Option<Tolerance>> {
         let mut tolerance = Tolerance::new();
+        let mut has_direction = false;
+        let mut raw_text = None;
         let mut insertion_point = PointReader::new();
         let mut direction = PointReader::new();
         let mut normal = PointReader::new();
@@ -16971,12 +17016,20 @@ impl<'a> SectionReader<'a> {
                         tolerance.common.color = Color::from_index(color_index);
                     }
                 }
-                1 => tolerance.text = pair.value_string.clone(),
+                // ACadSharp keeps the source caret escapes used by TOLERANCE
+                // frames (notably `^J`) in Text.  The general DXF text reader
+                // decodes them for ordinary strings, so use the preserved
+                // lexical value when one is available here.
+                1 => {
+                    tolerance.text = pair.value_string.clone();
+                    raw_text = pair.raw_value_string.clone();
+                }
                 3 => tolerance.dimension_style_name = pair.value_string.clone(),
                 10 | 20 | 30 => {
                     insertion_point.add_coordinate(&pair);
                 }
                 11 | 21 | 31 => {
+                    has_direction = true;
                     direction.add_coordinate(&pair);
                 }
                 210 | 220 | 230 => {
@@ -16989,7 +17042,14 @@ impl<'a> SectionReader<'a> {
         }
 
         tolerance.insertion_point = insertion_point.get_point().unwrap_or(Vector3::zero());
-        tolerance.direction = direction.get_point().unwrap_or(Vector3::new(1.0, 0.0, 0.0));
+        // Preserve the native constructor default when the optional DXF
+        // direction is omitted; the compatibility projection uses the source
+        // marker below to expose ACadSharp's zero-vector default.
+        tolerance.direction = direction.get_point().unwrap_or(Vector3::UNIT_X);
+        tolerance.dxf_source = Some(crate::entities::ToleranceDxfSource {
+            has_direction,
+            raw_text,
+        });
         if let Some(normal) = normal.get_point() {
             tolerance.normal = normal;
         }
