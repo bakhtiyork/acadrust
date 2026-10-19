@@ -20,9 +20,211 @@ use crate::io::read::{push_read_diagnostic, ReadDiagnostic, ReadStage, SourceFor
 use crate::tables::TableEntry;
 use crate::types::Handle;
 use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek};
 use std::path::Path;
+use std::rc::Rc;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceSection {
+    None,
+    Header,
+    Tables,
+    Blocks,
+    Entities,
+    Other,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceRecordKind {
+    None,
+    Seqend,
+    Attrib,
+    EntitiesViewport,
+}
+
+/// Observes explicit identity values while the source stream is decoded.
+///
+/// Native table constructors assign handles to several R12 records that do
+/// not carry one in the file.  Looking at the completed document therefore
+/// cannot distinguish a source handle from a generated default.  Keep this
+/// observation at the stream boundary instead, before any native defaults are
+/// materialized.
+struct SourceHandleTracker {
+    inner: Box<dyn DxfStreamReader>,
+    max: Rc<Cell<u64>>,
+    entity_owners: Rc<RefCell<HashMap<u64, u64>>>,
+    skip_handseed: bool,
+    section: SourceSection,
+    section_pending: bool,
+    record_kind: SourceRecordKind,
+    record_handle: Option<u64>,
+    record_owner: Option<u64>,
+    record_identity_seen: bool,
+    reactor_depth: usize,
+}
+
+impl SourceHandleTracker {
+    fn new(
+        inner: Box<dyn DxfStreamReader>,
+        max: Rc<Cell<u64>>,
+        entity_owners: Rc<RefCell<HashMap<u64, u64>>>,
+    ) -> Self {
+        Self {
+            inner,
+            max,
+            entity_owners,
+            skip_handseed: false,
+            section: SourceSection::None,
+            section_pending: false,
+            record_kind: SourceRecordKind::None,
+            record_handle: None,
+            record_owner: None,
+            record_identity_seen: false,
+            reactor_depth: 0,
+        }
+    }
+
+    fn flush_record(&mut self) {
+        if self.record_kind != SourceRecordKind::None {
+            if let Some(handle) = self.record_handle {
+                self.entity_owners
+                    .borrow_mut()
+                    .insert(handle, self.record_owner.unwrap_or(0));
+            }
+        }
+    }
+}
+
+impl DxfStreamReader for SourceHandleTracker {
+    fn read_pair(&mut self) -> Result<Option<stream_reader::DxfCodePair>> {
+        let Some(pair) = self.inner.read_pair()? else {
+            self.flush_record();
+            self.record_kind = SourceRecordKind::None;
+            return Ok(None);
+        };
+
+        if pair.code == 0 {
+            self.flush_record();
+            let value = pair.value_string.trim();
+            self.record_kind = if value.eq_ignore_ascii_case("SEQEND") {
+                SourceRecordKind::Seqend
+            } else if value.eq_ignore_ascii_case("ATTRIB") {
+                SourceRecordKind::Attrib
+            } else if value.eq_ignore_ascii_case("VIEWPORT")
+                && self.section == SourceSection::Entities
+            {
+                SourceRecordKind::EntitiesViewport
+            } else {
+                SourceRecordKind::None
+            };
+            self.record_handle = None;
+            self.record_owner = None;
+            self.record_identity_seen = false;
+            self.reactor_depth = 0;
+            if value.eq_ignore_ascii_case("SECTION") {
+                self.section_pending = true;
+            } else if value.eq_ignore_ascii_case("ENDSEC") {
+                self.section = SourceSection::None;
+                self.section_pending = false;
+            } else {
+                self.section_pending = false;
+            }
+        } else if pair.code == 2 && self.section_pending {
+            let value = pair.value_string.trim();
+            self.section = if value.eq_ignore_ascii_case("HEADER") {
+                SourceSection::Header
+            } else if value.eq_ignore_ascii_case("TABLES") {
+                SourceSection::Tables
+            } else if value.eq_ignore_ascii_case("BLOCKS") {
+                SourceSection::Blocks
+            } else if value.eq_ignore_ascii_case("ENTITIES") {
+                SourceSection::Entities
+            } else {
+                SourceSection::Other
+            };
+            self.section_pending = false;
+        }
+        let skip = self.skip_handseed;
+        self.skip_handseed = if pair.code == 9 {
+            pair.value_string.trim() == "$HANDSEED"
+        } else {
+            false
+        };
+        if matches!(pair.code, 5 | 105) && !self.record_identity_seen {
+            self.record_identity_seen = true;
+            if !skip {
+                if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    self.max.set(self.max.get().max(handle));
+                    if pair.code == 5
+                        && self.record_kind != SourceRecordKind::None
+                        && self.reactor_depth == 0
+                    {
+                        self.record_handle = Some(handle);
+                    }
+                }
+            }
+        }
+        if pair.code == 102 {
+            let marker = pair.value_string.trim();
+            if marker.starts_with('{') {
+                self.reactor_depth = self.reactor_depth.saturating_add(1);
+            } else if marker == "}" {
+                self.reactor_depth = self.reactor_depth.saturating_sub(1);
+            }
+        } else if pair.code == 330
+            && self.record_kind != SourceRecordKind::None
+            && self.reactor_depth == 0
+            && self.record_owner.is_none()
+        {
+            self.record_owner = pair
+                .as_handle()
+                .or_else(|| u64::from_str_radix(pair.value_string.trim(), 16).ok());
+        }
+        Ok(Some(pair))
+    }
+
+    fn peek_code(&mut self) -> Result<Option<i32>> {
+        self.inner.peek_code()
+    }
+
+    fn push_back(&mut self, pair: stream_reader::DxfCodePair) {
+        self.inner.push_back(pair);
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        self.entity_owners.borrow_mut().clear();
+        self.max.set(0);
+        self.skip_handseed = false;
+        self.section = SourceSection::None;
+        self.section_pending = false;
+        self.record_kind = SourceRecordKind::None;
+        self.record_handle = None;
+        self.record_owner = None;
+        self.record_identity_seen = false;
+        self.reactor_depth = 0;
+        self.inner.reset()
+    }
+
+    fn set_encoding(&mut self, encoding: crate::io::dxf::code_page::LegacyEncoding) {
+        self.inner.set_encoding(encoding);
+    }
+
+    fn diagnostic_context(&self) -> stream_reader::DxfStreamContext {
+        self.inner.diagnostic_context()
+    }
+
+    fn record_xdata(&mut self, on: bool) {
+        self.inner.record_xdata(on);
+    }
+
+    fn take_recorded_xdata(
+        &mut self,
+    ) -> (Option<String>, Vec<stream_reader::DxfCodePair>) {
+        self.inner.take_recorded_xdata()
+    }
+}
 
 /// Configuration for the DXF reader.
 #[derive(Debug, Clone)]
@@ -53,6 +255,8 @@ impl Default for DxfReaderConfiguration {
 /// DXF file reader
 pub struct DxfReader {
     reader: Box<dyn DxfStreamReader>,
+    source_handle_max: Rc<Cell<u64>>,
+    source_entity_owners: Rc<RefCell<HashMap<u64, u64>>>,
     config: DxfReaderConfiguration,
     /// Estimated entity count based on stream size (used for pre-allocation).
     estimated_entities: usize,
@@ -80,9 +284,18 @@ impl DxfReader {
             buf_reader.seek(std::io::SeekFrom::Start(0))?;
             Box::new(XDataRecorder::new(Box::new(DxfTextReader::new(buf_reader)?)))
         };
+        let source_handle_max = Rc::new(Cell::new(0));
+        let source_entity_owners = Rc::new(RefCell::new(HashMap::new()));
+        let reader = Box::new(SourceHandleTracker::new(
+            reader,
+            source_handle_max.clone(),
+            source_entity_owners.clone(),
+        ));
 
         Ok(Self {
             reader,
+            source_handle_max,
+            source_entity_owners,
             config: DxfReaderConfiguration::default(),
             estimated_entities,
             source_path: None,
@@ -111,9 +324,18 @@ impl DxfReader {
             buf_reader.seek(std::io::SeekFrom::Start(0))?;
             Box::new(XDataRecorder::new(Box::new(DxfTextReader::new(buf_reader)?)))
         };
+        let source_handle_max = Rc::new(Cell::new(0));
+        let source_entity_owners = Rc::new(RefCell::new(HashMap::new()));
+        let reader = Box::new(SourceHandleTracker::new(
+            reader,
+            source_handle_max.clone(),
+            source_entity_owners.clone(),
+        ));
 
         Ok(Self {
             reader,
+            source_handle_max,
+            source_entity_owners,
             config: DxfReaderConfiguration::default(),
             estimated_entities,
             source_path,
@@ -184,6 +406,12 @@ impl DxfReader {
 
         // Create document with pre-allocated entity storage
         let mut document = CadDocument::new();
+        // Mark this as reader provenance even when the source omits APPID;
+        // constructed documents leave these fields unset.
+        document.source_app_id_order = Some(Vec::new());
+        document.legacy_dxf_tables = Some(Vec::new());
+        document.legacy_dxf_blocks = Some(Vec::new());
+        document.source_explicit_handle_max = None;
         document.classes.begin_source();
         document.entities.reserve(self.estimated_entities);
         document.entity_index.reserve(self.estimated_entities);
@@ -380,6 +608,22 @@ impl DxfReader {
         // Post-read resolution: advance the allocator past every file-sourced
         // identity before re-handling surviving defaults, then assign owners
         // and repair cross-references.
+        document.source_explicit_handle_max = (self.source_handle_max.get() != 0)
+            .then_some(self.source_handle_max.get());
+        document.source_entity_owners = Some(
+            self.source_entity_owners
+                .borrow()
+                .iter()
+                .map(|(&handle, &owner)| (Handle::new(handle), Handle::new(owner)))
+                .collect(),
+        );
+        if document.version != crate::types::DxfVersion::AC1009 {
+            // These structures exist only to replay the R12 source template;
+            // modern readers already expose complete native table metadata.
+            document.legacy_dxf_tables = None;
+            document.legacy_dxf_blocks = None;
+            document.source_entity_owners = None;
+        }
         document.synchronize_handle_allocator();
         rehandle_colliding_default_entries(&mut document, &default_entry_handles);
         document.resolve_references();

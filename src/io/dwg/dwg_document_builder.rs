@@ -740,6 +740,7 @@ impl DwgDocumentBuilder {
             VxControl(Vec<u64>),
         }
         let mut parsed_entries: Vec<ParsedEntry> = Vec::new();
+        document.source_app_id_order = Some(Vec::new());
         let catalog_started = web_time::Instant::now();
         enum CatalogFailure {
             MissingOffset,
@@ -1740,6 +1741,11 @@ impl DwgDocumentBuilder {
                     document.vports.add_allow_duplicate(vp);
                 }
                 ParsedEntry::AppId(h, data) => {
+                    let name = data.name.to_uppercase();
+                    let order = document.source_app_id_order.as_mut().unwrap();
+                    if !order.iter().any(|existing| existing == &name) {
+                        order.push(name);
+                    }
                     let mut app = crate::tables::AppId::new(&data.name);
                     app.handle = Handle::from(*h);
                     let _ = document.app_ids.remove(&data.name);

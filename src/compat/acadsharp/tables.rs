@@ -203,28 +203,7 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
     }
     table(doc, &doc.text_styles, "TextStylesTable", out);
     for v in doc.text_styles.iter() {
-        entry(
-            doc,
-            v.handle,
-            "TextStyle",
-            doc.text_styles.handle(),
-            vec![
-                ("BigFontFilename", json!(v.big_font_file)),
-                ("Filename", json!(v.font_file)),
-                ("Height", json!(number(v.height))),
-                ("IsShapeFile", json!(v.is_shape_file)),
-                ("LastHeight", json!(number(v.last_height))),
-                (
-                    "MirrorFlag",
-                    json!((v.flags.backward as i16 * 2) | (v.flags.upside_down as i16 * 4)),
-                ),
-                ("Name", json!(v.name)),
-                ("ObliqueAngle", json!(number(v.oblique_angle))),
-                ("TrueType", json!(v.true_type_font_flags)),
-                ("Width", json!(number(v.width_factor))),
-            ],
-            out,
-        );
+        text_style(doc, v, out);
     }
     table(doc, &doc.block_records, "BlockRecordsTable", out);
     for v in doc.block_records.iter() {
@@ -644,4 +623,30 @@ fn extension_entry(doc: &CadDocument, owner: Handle, key: &str) -> Option<Handle
         crate::objects::ObjectType::Dictionary(d) => d.get(key),
         _ => None,
     }
+}
+
+/// Project a retained source STYLE, including unnamed entries overwritten in the native table.
+pub(super) fn text_style(doc: &CadDocument, v: &crate::tables::TextStyle, out: &mut Vec<Value>) {
+        entry(
+            doc,
+            v.handle,
+            "TextStyle",
+            doc.text_styles.handle(),
+            vec![
+                ("BigFontFilename", json!(v.big_font_file)),
+                ("Filename", json!(v.font_file)),
+                ("Height", json!(number(v.height))),
+                ("IsShapeFile", json!(v.is_shape_file)),
+                ("LastHeight", json!(number(v.last_height))),
+                (
+                    "MirrorFlag",
+                    json!((v.flags.backward as i16 * 2) | (v.flags.upside_down as i16 * 4)),
+                ),
+                ("Name", json!(v.name)),
+                ("ObliqueAngle", json!(number(v.oblique_angle))),
+                ("TrueType", json!(v.true_type_font_flags)),
+                ("Width", json!(number(v.width_factor))),
+            ],
+            out,
+        );
 }

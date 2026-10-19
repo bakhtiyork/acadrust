@@ -18,6 +18,9 @@ mod mtext_plain_text;
 mod header;
 mod new_document;
 mod objects;
+mod legacy_identity;
+mod registration;
+mod registration_order;
 mod palette;
 mod tables;
 mod type_names;
@@ -174,10 +177,31 @@ fn notifications(doc: Option<&CadDocument>) -> Value {
 }
 /// Dump an existing document. `file` is the basename, or empty for a new document.
 pub fn dump_document(doc: &CadDocument, file: &str, reader: &str) -> Value {
+    dump_document_view(doc, file, reader, false)
+}
+
+/// Dump a decoded document using the default ACadSharp reader's registration
+/// policy. Source provenance selects reader behavior; the native document is
+/// unchanged. Use [`dump_document`] for an explicit document inventory, including
+/// unattached objects and edited allocator state.
+pub fn dump_reader_document(doc: &CadDocument, file: &str, reader: &str) -> Value {
+    dump_document_view(doc, file, reader, true)
+}
+
+fn dump_document_view(doc: &CadDocument, file: &str, reader: &str, read_view: bool) -> Value {
     let mut objects = Vec::new();
     tables::collect(doc, &mut objects);
     entities::collect(doc, reader, &mut objects);
     objects::collect(doc, reader, &mut objects);
+    let mut projected_header = header::header(doc);
+    if read_view && legacy_identity::applies(doc, reader) {
+        registration_order::apply(doc, reader, &mut objects);
+        legacy_identity::apply(doc, &mut projected_header, &mut objects);
+    } else if read_view {
+        registration::apply(doc, reader, &mut objects);
+        registration_order::apply(doc, reader, &mut objects);
+        projected_header["HandleSeed"] = json!(registration_order::handle_seed(doc, &objects));
+    }
     // A registered handle may be exposed through multiple model collections.
     // Prefer the first (concrete entity/table) representation over sidecar records.
     let mut sorted = BTreeMap::new();
@@ -193,7 +217,7 @@ pub fn dump_document(doc: &CadDocument, file: &str, reader: &str) -> Value {
     }
     json!({"format":1,"file":file,"reader":reader,"status":"ok","error":null,
         "notifications":notifications(Some(doc)),"version":version(doc.version),
-        "header":header::header(doc),"classes":header::classes(doc),"summaryInfo":header::summary(doc),
+        "header":projected_header,"classes":header::classes(doc),"summaryInfo":header::summary(doc),
         "objects":sorted.into_values().collect::<Vec<_>>()})
 }
 /// Error dumps intentionally omit document sections.
@@ -225,7 +249,7 @@ pub fn dump_file(path: &Path) -> Value {
         }
     });
     match result {
-        Ok(Ok(doc)) => dump_document(&doc, &file, &reader),
+        Ok(Ok(doc)) => dump_reader_document(&doc, &file, &reader),
         Ok(Err(e)) => {
             let debug = format!("{e:?}");
             let kind = debug.split(['(', ' ', '{']).next().unwrap_or("DxfError");

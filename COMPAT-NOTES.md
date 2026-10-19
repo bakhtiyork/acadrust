@@ -31,6 +31,11 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | ACadSharp material view | Project absent colors as ByBlock, little-endian TrueColor packing, nullable filenames/descriptions, DXF omitted-code defaults and advanced-code aliases, and pre-R2007 channel defaults. Install material defaults in the explicit compatibility new-document constructor. | Match the reference's color mapper, constructor and version-specific reader behavior only in compat. Native material construction, RGB values, map fields and XRecord-backed textures remain intact. |
 | Entity common storage (R3-P1) | Keep handle, owner and raw DWG record inline; store appearance/references/XData in shared `Arc<EntityProperties>` with copy-on-write field access. Default common data shares one allocation; serde remains flat. Appearance fields in `EntityCommon` struct literals/destructuring and owned field moves must use `properties` (or constructors and field assignments/clones); borrowed field reads and field edits remain available through `Deref`/`DerefMut`. | R3-A2 added a 400-byte inline common record to every child. Compact common storage preserves every native value, independent edits and child identities without per-child empty collections or strings. Native layout/API adjustment; upstream performance candidate, not an ACadSharp quirk. |
 | DWG child appearance reuse (R3-P1) | Reuse equal source properties in a bounded, chunk-local previous-child cache in the shared serial/parallel decoding path; compare every mapped appearance field before resolving names or allocating collections. Keep raw bytes and handle/owner per child. | Avoid allocating identical vertex/face appearance data and copying it through pending/final child vectors. No document scans, cross-worker locks or discarded provenance; upstream performance candidate. |
+| R12 DXF template provenance | Retain source table and block order, explicit marker handles, pre-normalization child/viewport owners, and unnamed shape-style records otherwise overwritten by the native name index; observe the explicit handle maximum while decoding. | Additive provenance supports compatibility allocation without changing native defaults or deleting valid entities. Duplicate unnamed style loss is a candidate for an upstream table-model improvement. |
+| ACadSharp R12 identities | Replay source-template allocation, then table/block registration and handle collisions; construct the reader's dictionary graph and rewrite typed references. | Allocation follows source order, including empty-table behavior, dynamic layer/line-type insertion, and ownerless ENTITIES registration, without fixture names or seed cutoffs. The native document remains unchanged. |
+| ACadSharp sequence registration | Project the default Seqend registered when a modern DXF collection receives its first child, missing UpdateCollections dictionaries, and the resulting HandleSeed. | Constructor defaults and document allocation belong only to the compatibility view; native parsed terminators are preserved. |
+| Source APPID provenance | Retain the names decoded from DXF/DWG APPID tables independently of native writer defaults. | Additive reader provenance lets the ACadSharp registration view omit synthetic defaults while preserving explicit source applications, including identical names/handles. No native records are removed; not an upstream decoding bug. |
+| ACadSharp registration view | Index table/block collections, dictionary entries, extension attachments and evaluation expressions once; apply default unknown-object policy and DXF VisualStyle callback behavior. Resolve dictionary-assigned names/owners and collection counts from the reachable set; XRecord handle values resolve against accepted templates, including known unregistered records, while literals stay unchanged. | Mirrors ACadSharp registration without deleting richer native data. Extension-dictionary ownership uses the same fallback as the native lookup, indexed once instead of scanning the document per object. `dump_file` and `dump_reader_document` apply read registration; `dump_document` retains its explicit inventory and edited allocator semantics. Constructed documents retain explicit registration semantics. |
 | Hatch DXF provenance | Retain elevation XY, omitted-field presence, the pattern trailer code and original gradient ACI values alongside native RGB colors. Exclude provenance from native Hatch equality. | Additive source retention permits source-dependent defaults and reader quirks without changing native seed points, styles, pixel sizes, scales or colors. No whole-document scans or payload clones. |
 | Hatch gradient recovery provenance | Move the original gradient into optional provenance when legacy round-trip metadata restores a gradient; exclude it from native equality. | Preserve native recovery while allowing compat to expose the original values, since ACadSharp does not perform this recovery. No additional document scan or gradient-payload clone. |
 | ACadSharp hatch view | Map boundary edges and ordered unique entity references, pattern lines and gradient stops; project DXF elevation seeds, ignored styles/RGB, consumed pattern trailers, omitted scales and names, and absent DWG non-rational weights. | Reproduce the reference's nested schema, constructor defaults and reader quirks only in compat; preserve native data and DWG version semantics. |
@@ -98,9 +103,10 @@ source class list (empty for a new document). DWG class projection keeps the fir
 ACadSharp's collection, while the native collection keeps every positional record and original class number.
 The default-reader view projects `ProxyGeometries` as empty (ACadSharp ignores them by default), preserving the
 native entity's graphic bytes.
-Registered handles are gathered from tables, block records, entities and their children, and non-graphical objects,
-then sorted numerically. Retained BLOCK/ENDBLK identities folded into block records are emitted with discarded
-entity properties unmapped. Objects without registered handles are not assigned synthetic identities.
+Direct document inventories gather explicit handles from tables, block records, entities and their children, and
+non-graphical objects, then sort numerically. Read dumps separately apply source registration and allocate the
+reader's collection defaults. Retained BLOCK/ENDBLK identities folded into block records are emitted with discarded
+entity properties unmapped.
 The normal build does not include this module or its optional JSON dependency.
 
 R12 DXF polyline projection intentionally follows ACadSharp's legacy reader: native
@@ -110,12 +116,12 @@ identity, reactors, XData and extension dictionaries remain the child's. DWG/mod
 retain subtype-specific views. Seqends are emitted only from retained records, never
 invented from guessed handles. These oracle quirks are not native reader fixes.
 
-Remaining oracle registration differences: modern DXF can register the default
+The registration view reproduces modern DXF registering the default
 Seqend when the first child is added, before the parsed terminator replaces the
 collection reference (`SeqendCollection.Add`/`Seqend`, `CadPolyLineTemplate.build`,
 `CadDocument.RegisterCollection`). The registry then exposes a constructor-default
 terminator allocated from HANDSEED, rather than the source handle/common data.
-The current view keeps the source record; reproducing that registry requires the
-document-wide registration order, not a per-file handle substitution. Legacy DXF
+The projection uses document-wide registration order and preserves the native
+source record. Legacy DXF
 INSERT terminators without an owner are registered as block entities by
 `DxfEntitiesSectionReader`, another difference from native compound ownership.
