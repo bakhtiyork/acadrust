@@ -406,26 +406,53 @@ pub(super) fn header(doc: &CadDocument) -> Value {
 }
 
 pub(super) fn classes(doc: &CadDocument) -> Value {
-    Value::Array(
-        doc.classes
-            .iter()
-            .map(|c| {
-                props(
-                    "DxfClass",
-                    [
-                        ("ApplicationName", json!(c.application_name)),
-                        ("ClassNumber", json!(c.class_number)),
-                        ("CppClassName", json!(c.cpp_class_name)),
-                        ("DwgVersion", json!(c.dwg_version)),
-                        ("DxfName", json!(c.dxf_name)),
-                        ("InstanceCount", json!(c.instance_count)),
-                        ("ProxyFlags", json!(c.proxy_flags.0)),
-                        ("WasZombie", json!(c.was_zombie)),
-                    ],
-                )
-            })
-            .collect(),
-    )
+    fn class_value(c: &crate::classes::DxfClass, source: bool) -> Value {
+        props(
+            "DxfClass",
+            [
+                ("ApplicationName", json!(c.application_name)),
+                // ACadSharp's DXF DxfClass starts at 500 and the DXF reader
+                // leaves that value unchanged. Native DWG/DXF registries keep
+                // their actual positional numbers.
+                (
+                    "ClassNumber",
+                    json!(if source { 500 } else { c.class_number }),
+                ),
+                ("CppClassName", json!(c.cpp_class_name)),
+                ("DwgVersion", json!(c.dwg_version)),
+                ("DxfName", json!(c.dxf_name)),
+                ("InstanceCount", json!(c.instance_count)),
+                ("ProxyFlags", json!(c.proxy_flags.0)),
+                ("WasZombie", json!(c.was_zombie)),
+            ],
+        )
+    }
+
+    // ACadSharp uses a case-insensitive, name-keyed collection for both
+    // formats. Keep the first entry without altering native positional data.
+    let mut seen = std::collections::HashSet::new();
+    if let Some(source) = doc.classes.source_classes() {
+        Value::Array(
+            source
+                .iter()
+                .filter(|class| seen.insert(class.dxf_name.to_ascii_uppercase()))
+                .map(|c| class_value(c, true))
+                .collect(),
+        )
+    } else {
+        // ACadSharp stores DWG classes in a name-keyed collection.  The DWG
+        // stream itself is positional, so the native collection deliberately
+        // retains duplicate names for object decoding and writing.  Deduplicate
+        // only this compatibility projection, keeping the first source entry
+        // and its original class number.
+        Value::Array(
+            doc.classes
+                .iter()
+                .filter(|class| seen.insert(class.dxf_name.to_ascii_uppercase()))
+                .map(|c| class_value(c, false))
+                .collect(),
+        )
+    }
 }
 pub(super) fn summary(doc: &CadDocument) -> Value {
     let s = &doc.summary_info;

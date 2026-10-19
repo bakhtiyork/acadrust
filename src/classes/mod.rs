@@ -135,6 +135,14 @@ impl DxfClass {
 pub struct DxfClassCollection {
     entries: Vec<DxfClass>,
     name_index: HashMap<String, usize>,
+    /// Class records read from a DXF CLASSES section.
+    ///
+    /// The main collection also carries the native writer registry.  Keeping
+    /// the source records separately lets compatibility views reproduce the
+    /// source document (ACadSharp assigns 500 to DXF classes) without
+    /// changing the registry used by native writers.
+    #[cfg_attr(feature = "serde", serde(default))]
+    source_entries: Option<Vec<DxfClass>>,
 }
 
 impl DxfClassCollection {
@@ -143,7 +151,29 @@ impl DxfClassCollection {
         Self {
             entries: Vec::new(),
             name_index: HashMap::new(),
+            source_entries: None,
         }
+    }
+
+    /// Start a source class list, distinguishing an absent CLASSES section
+    /// from a programmatically constructed native writer registry.
+    pub(crate) fn begin_source(&mut self) {
+        self.source_entries = Some(Vec::new());
+    }
+
+    /// Record a class from a DXF source section for compatibility views.
+    ///
+    /// Preserve the source order and metadata, including repeated names.
+    /// Consumer-specific collection semantics belong in the corresponding view.
+    pub(crate) fn record_source(&mut self, class: DxfClass) {
+        self.source_entries.get_or_insert_with(Vec::new).push(class);
+    }
+
+    /// Classes as they appeared in the source, if a source list is known.
+    /// `Some(&[])` represents a source with no classes, while `None` denotes
+    /// a native registry that was not initialized from source records.
+    pub fn source_classes(&self) -> Option<&[DxfClass]> {
+        self.source_entries.as_deref()
     }
 
     /// Add a class. If a class with the same DXF name already exists,
@@ -222,6 +252,7 @@ impl DxfClassCollection {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.name_index.clear();
+        self.source_entries = None;
     }
 
     /// Retain the class table understood by pre-R2013 DWG writers.

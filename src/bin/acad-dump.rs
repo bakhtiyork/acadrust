@@ -1,5 +1,4 @@
-use acadrust::compat::acadsharp::{dump_document, dump_file};
-use acadrust::CadDocument;
+use acadrust::compat::acadsharp::{dump_document, dump_file, new_document};
 use std::path::Path;
 
 fn run() -> Result<(), String> {
@@ -9,7 +8,7 @@ fn run() -> Result<(), String> {
     }
     let input = Path::new(&args[2]);
     let value = if args[2] == "--new-document" {
-        dump_document(&CadDocument::new(), "", "new")
+        dump_document(&new_document(), "", "new")
     } else {
         let extension = input
             .extension()

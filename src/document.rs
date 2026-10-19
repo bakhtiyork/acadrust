@@ -1497,7 +1497,17 @@ impl CadDocument {
 
     /// Create a new empty CAD document
     pub fn new() -> Self {
-        let mut doc = CadDocument {
+        let mut doc = Self::new_without_defaults();
+        // Native writer defaults reserve the traditional table handles.
+        doc.next_handle = 0x10;
+        doc.initialize_defaults();
+        doc
+    }
+
+    /// Unregistered document state for builders with their own default graph.
+    /// The allocator starts at the header's initial seed, without reserved IDs.
+    pub(crate) fn new_without_defaults() -> Self {
+        CadDocument {
             version: DxfVersion::AC1032, // DXF 2018
             maintenance_version: 0,
             header: HeaderVariables::default(),
@@ -1543,14 +1553,8 @@ impl CadDocument {
             section_view_style: None,
             view_rep_refs: std::collections::HashMap::new(),
             section_view_reps: Vec::new(),
-            // Start handle allocation above reserved table handles (0x1-0xA)
-            // Table handles are well-known fixed values used by AutoCAD
-            next_handle: 0x10,
-        };
-
-        // Initialize with standard entries
-        doc.initialize_defaults();
-        doc
+            next_handle: 1,
+        }
     }
 
     /// Create a document with a specific version

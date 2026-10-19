@@ -184,6 +184,7 @@ impl DxfReader {
 
         // Create document with pre-allocated entity storage
         let mut document = CadDocument::new();
+        document.classes.begin_source();
         document.entities.reserve(self.estimated_entities);
         document.entity_index.reserve(self.estimated_entities);
 
