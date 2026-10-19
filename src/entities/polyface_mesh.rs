@@ -209,7 +209,7 @@ impl PolyfaceFace {
     pub fn triangle(v1: i16, v2: i16, v3: i16) -> Self {
         PolyfaceFace {
             common: EntityCommon::default(),
-            flags: PolyfaceVertexFlags::NONE,
+            flags: PolyfaceVertexFlags::POLYFACE_MESH,
             index1: v1,
             index2: v2,
             index3: v3,
@@ -222,7 +222,7 @@ impl PolyfaceFace {
     pub fn quad(v1: i16, v2: i16, v3: i16, v4: i16) -> Self {
         PolyfaceFace {
             common: EntityCommon::default(),
-            flags: PolyfaceVertexFlags::NONE,
+            flags: PolyfaceVertexFlags::POLYFACE_MESH,
             index1: v1,
             index2: v2,
             index3: v3,
@@ -242,7 +242,7 @@ impl PolyfaceFace {
     ) -> Self {
         PolyfaceFace {
             common: EntityCommon::default(),
-            flags: PolyfaceVertexFlags::NONE,
+            flags: PolyfaceVertexFlags::POLYFACE_MESH,
             index1: if edge1_invisible { -v1 } else { v1 },
             index2: if edge2_invisible { -v2 } else { v2 },
             index3: if edge3_invisible { -v3 } else { v3 },
@@ -396,6 +396,8 @@ impl Default for PolyfaceFace {
 pub struct PolyfaceMesh {
     /// Common entity data.
     pub common: EntityCommon,
+    /// Retained sequence terminator, including its identity and common metadata.
+    pub seqend: Option<Box<super::Seqend>>,
     /// Elevation (Z value for 2D operations).
     /// DXF code: 30
     pub elevation: f64,
@@ -439,6 +441,7 @@ impl PolyfaceMesh {
     pub fn new() -> Self {
         PolyfaceMesh {
             common: EntityCommon::default(),
+            seqend: None,
             elevation: 0.0,
             flags: PolyfaceMeshFlags::POLYFACE_MESH,
             normal: Vector3::UNIT_Z,

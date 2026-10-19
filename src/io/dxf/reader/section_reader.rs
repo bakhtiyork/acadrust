@@ -12630,6 +12630,19 @@ impl<'a> SectionReader<'a> {
         Ok(Some(ellipse))
     }
 
+    /// Read the common data of a sequence marker without adding a drawing entity.
+    fn read_seqend_child(&mut self) -> Result<crate::entities::Seqend> {
+        let mut seqend = crate::entities::Seqend::new();
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                self.reader.push_back(pair);
+                break;
+            }
+            self.try_read_common_entity_code(&pair, &mut seqend.common)?;
+        }
+        Ok(seqend)
+    }
+
     /// Read a POLYLINE or POLYFACE MESH entity, returning the appropriate EntityType.
     fn read_polyline_entity(&mut self) -> Result<Option<EntityType>> {
         use crate::entities::polyface_mesh::{
@@ -12658,11 +12671,12 @@ impl<'a> SectionReader<'a> {
             has_end_width: bool,
             bulge: f64,
             tangent: f64,
-            handle: u64,
-            layer: String,
+            common: EntityCommon,
+            id: i32,
         }
 
         let mut common = EntityCommon::new();
+        let mut seqend = None;
         let mut flags: i16 = 0;
         let mut elevation = 0.0f64;
         let mut thickness = 0.0f64;
@@ -12695,22 +12709,15 @@ impl<'a> SectionReader<'a> {
                     let mut vi3: i16 = 0;
                     let mut vi4: i16 = 0;
                     let mut vcolor: Option<Color> = None;
-                    let mut vhandle: u64 = 0;
-                    let mut vlayer = String::from("0");
+                    let mut vertex_common = EntityCommon::new();
+                    vertex_common.owner_handle = common.handle;
+                    let mut id = 0;
                     while let Some(vpair) = self.reader.read_pair()? {
                         if vpair.code == 0 {
                             self.reader.push_back(vpair);
                             break;
                         }
                         match vpair.code {
-                            5 => {
-                                if let Some(h) = vpair.as_handle() {
-                                    vhandle = h;
-                                }
-                            }
-                            8 => {
-                                vlayer = vpair.value_string.clone();
-                            }
                             10 => {
                                 if let Some(v) = vpair.as_double() {
                                     loc.x = v;
@@ -12783,28 +12790,30 @@ impl<'a> SectionReader<'a> {
                                     vi4 = v;
                                 }
                             }
-                            _ => {}
+                            91 => id = vpair.as_i32().unwrap_or(0),
+                            _ => { self.try_read_common_entity_code(&vpair, &mut vertex_common)?; }
                         }
                     }
+                    if let Some(color) = vcolor { vertex_common.color = color; }
                     // Polygon-mesh vertices also use bit 64. The parent POLYLINE
                     // must identify a polyface before its vertices become geometry
                     // (bit 64) or face records (bit 128 without bit 64).
                     if (flags & 64) != 0 && (vflags & 64) != 0 {
                         // Polyface geometry vertex
                         pface_vertices.push(PolyfaceVertex {
-                            common: EntityCommon::default(),
+                            common: vertex_common,
                             location: loc,
                             flags: PolyfaceVertexFlags::from_bits_truncate(vflags),
-                            bulge: 0.0,
-                            start_width: 0.0,
-                            end_width: 0.0,
-                            curve_tangent: 0.0,
-                            id: 0,
+                            bulge,
+                            start_width: sw,
+                            end_width: ew,
+                            curve_tangent: tangent,
+                            id,
                         });
                     } else if (flags & 64) != 0 && (vflags & 128) != 0 {
                         // Face record (only bit 128 set, no bit 64)
                         pface_faces.push(PolyfaceFace {
-                            common: EntityCommon::default(),
+                            common: vertex_common,
                             flags: PolyfaceVertexFlags::from_bits_truncate(vflags),
                             index1: vi1,
                             index2: vi2,
@@ -12824,17 +12833,14 @@ impl<'a> SectionReader<'a> {
                             has_end_width: has_ew,
                             bulge,
                             tangent,
-                            handle: vhandle,
-                            layer: vlayer.clone(),
+                            common: vertex_common,
+                            id,
                         });
                     }
                 } else if pair.value_string == "SEQEND" {
-                    while let Some(seqend_pair) = self.reader.read_pair()? {
-                        if seqend_pair.code == 0 {
-                            self.reader.push_back(seqend_pair);
-                            break;
-                        }
-                    }
+                    let mut marker = self.read_seqend_child()?;
+                    marker.common.owner_handle = common.handle;
+                    seqend = Some(Box::new(marker));
                     break;
                 } else {
                     self.reader.push_back(pair);
@@ -12924,6 +12930,13 @@ impl<'a> SectionReader<'a> {
         if (flags & 64) != 0 {
             let mut mesh = PolyfaceMesh::new();
             mesh.common = common;
+            mesh.seqend = seqend;
+            mesh.seqend_handle = mesh.seqend.as_ref().map(|s| s.common.handle);
+            mesh.normal = normal_v;
+            mesh.start_width = def_start_width;
+            mesh.end_width = def_end_width;
+            mesh.thickness = thickness;
+            mesh.smooth_surface = crate::entities::polyface_mesh::PolyfaceSmoothType::from(smooth);
             mesh.flags = PolyfaceMeshFlags::from_bits_truncate(flags);
             mesh.elevation = elevation;
             mesh.vertices = pface_vertices;
@@ -12932,6 +12945,7 @@ impl<'a> SectionReader<'a> {
         } else if (flags & 16) != 0 {
             let mut mesh = PolygonMesh::new();
             mesh.common = common;
+            mesh.seqend = seqend;
             mesh.flags = PolygonMeshFlags::from_bits_truncate(flags);
             mesh.m_vertex_count = count_m;
             mesh.n_vertex_count = count_n;
@@ -12941,14 +12955,9 @@ impl<'a> SectionReader<'a> {
             mesh.elevation = elevation;
             mesh.normal = normal_v;
             mesh.vertices = geom_vertices
-                .iter()
+                .into_iter()
                 .map(|rv| PolygonMeshVertex {
-                    common: EntityCommon {
-                        handle: Handle::new(rv.handle),
-                        layer: rv.layer.clone(),
-                        owner_handle: mesh.common.handle,
-                        ..EntityCommon::default()
-                    },
+                    common: rv.common,
                     location: rv.loc,
                     flags: rv.vflags,
                 })
@@ -12957,26 +12966,28 @@ impl<'a> SectionReader<'a> {
         } else if (flags & 8) != 0 {
             let mut pl = Polyline3D::new();
             pl.common = common;
+            pl.seqend = seqend;
             pl.flags = Polyline3DFlags::from_bits(flags as i32);
             pl.smooth_type = SmoothSurface3D::from_value(smooth);
             pl.default_start_width = def_start_width;
             pl.default_end_width = def_end_width;
             pl.elevation = elevation;
+            pl.thickness = thickness;
             pl.normal = normal_v;
             pl.vertices = geom_vertices
-                .iter()
-                .map(|rv| {
-                    let mut v = Vertex3DPolyline::new(rv.loc);
-                    v.flags = rv.vflags as i32;
-                    v.handle = Handle::new(rv.handle);
-                    v.layer = rv.layer.clone();
-                    v
+                .into_iter()
+                .map(|rv| Vertex3DPolyline {
+                    common: rv.common,
+                    position: rv.loc,
+                    flags: rv.vflags as i32,
                 })
                 .collect();
             Ok(Some(EntityType::Polyline3D(pl)))
         } else {
             let mut pl = Polyline2D::new();
+            pl.source_widths = Some((def_start_width, def_end_width));
             pl.common = common;
+            pl.seqend = seqend;
             pl.flags = PolylineFlags::from_bits(flags as u16);
             pl.smooth_surface = SmoothSurfaceType::from(smooth);
             pl.thickness = thickness;
@@ -12986,32 +12997,26 @@ impl<'a> SectionReader<'a> {
             // one that carries them (even as 0) keeps its own value. Bake the
             // effective width into each vertex so tapered polylines survive —
             // this mirrors how a heavy polyline down-saves to LWPOLYLINE.
-            pl.vertices = geom_vertices
+            let per_vertex_widths = geom_vertices
                 .iter()
-                .map(|rv| {
-                    let mut v = Vertex2D::new(rv.loc);
-                    v.flags = VertexFlags::from_bits(rv.vflags as u8);
-                    v.start_width = if rv.has_start_width {
-                        rv.start_width
-                    } else {
-                        def_start_width
-                    };
-                    v.end_width = if rv.has_end_width {
-                        rv.end_width
-                    } else {
-                        def_end_width
-                    };
-                    v.bulge = rv.bulge;
-                    v.curve_tangent = rv.tangent;
-                    v
+                .any(|rv| rv.has_start_width || rv.has_end_width);
+            pl.vertices = geom_vertices
+                .into_iter()
+                .map(|rv| Vertex2D {
+                    common: rv.common,
+                    source_widths: Some((rv.start_width, rv.end_width)),
+                    location: rv.loc,
+                    id: rv.id,
+                    flags: VertexFlags::from_bits(rv.vflags as u8),
+                    start_width: if rv.has_start_width { rv.start_width } else { def_start_width },
+                    end_width: if rv.has_end_width { rv.end_width } else { def_end_width },
+                    bulge: rv.bulge,
+                    curve_tangent: rv.tangent,
                 })
                 .collect();
             // When any vertex specifies its own width, the widths now live
             // per-vertex; keeping a non-zero polyline default would let a
             // renderer bleed it onto the intentionally zero-width segments.
-            let per_vertex_widths = geom_vertices
-                .iter()
-                .any(|rv| rv.has_start_width || rv.has_end_width);
             if per_vertex_widths {
                 pl.start_width = 0.0;
                 pl.end_width = 0.0;
@@ -16469,16 +16474,10 @@ impl<'a> SectionReader<'a> {
                                 }
                             }
                             "SEQEND" => {
-                                // The sequence marker has its own persistent identity.
-                                while let Some(pair) = self.reader.read_pair()? {
-                                    if pair.code == 0 {
-                                        self.reader.push_back(pair);
-                                        break;
-                                    }
-                                    if pair.code == 5 {
-                                        insert.seqend_handle = pair.as_handle().map(Handle::new);
-                                    }
-                                }
+                                let mut seqend = self.read_seqend_child()?;
+                                seqend.common.owner_handle = insert.common.handle;
+                                insert.seqend_handle = Some(seqend.common.handle);
+                                insert.seqend = Some(Box::new(seqend));
                                 break;
                             }
                             _ => {

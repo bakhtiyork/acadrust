@@ -683,6 +683,37 @@ impl EntityType {
         }
     }
 
+    /// Visit inline child identities without allocating or scanning the document.
+    pub(crate) fn for_each_child_handle(&self, mut visit: impl FnMut(Handle)) {
+        let seqend = match self {
+            Self::Insert(e) => {
+                for a in &e.attributes { visit(a.common.handle); }
+                if let Some(h) = e.seqend_handle { visit(h); }
+                e.seqend.as_ref()
+            }
+            Self::Polyline2D(e) => {
+                for v in &e.vertices { visit(v.common.handle); }
+                e.seqend.as_ref()
+            }
+            Self::Polyline3D(e) => {
+                for v in &e.vertices { visit(v.common.handle); }
+                e.seqend.as_ref()
+            }
+            Self::PolyfaceMesh(e) => {
+                for v in &e.vertices { visit(v.common.handle); }
+                for f in &e.faces { visit(f.common.handle); }
+                if let Some(h) = e.seqend_handle { visit(h); }
+                e.seqend.as_ref()
+            }
+            Self::PolygonMesh(e) => {
+                for v in &e.vertices { visit(v.common.handle); }
+                e.seqend.as_ref()
+            }
+            _ => None,
+        };
+        if let Some(s) = seqend { visit(s.common.handle); }
+    }
+
     /// Get a reference to the entity's common data
     pub fn common(&self) -> &EntityCommon {
         match self {

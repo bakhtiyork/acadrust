@@ -46,9 +46,17 @@ fn sanitize_symbol_name(name: &str) -> String {
 /// form. Plain 2D polylines only carry the CLOSED (1) and PLINEGEN (128)
 /// flags, which LWPOLYLINE maps 1:1.
 pub(crate) fn polyline2d_downsaves_to_lwpolyline(polyline: &Polyline2D) -> bool {
+    let default_common = EntityCommon::new();
     (polyline.flags.bits() & !0x81) == 0
         && polyline.smooth_surface == SmoothSurfaceType::None
-        && polyline.vertices.iter().all(|v| v.flags.bits() == 0)
+        && polyline.vertices.iter().all(|v| {
+            v.flags.bits() == 0
+                && v.common.handle.is_null()
+                && v.common == default_common
+        })
+        && polyline.seqend.as_deref().is_none_or(|seqend| {
+            seqend.common.handle.is_null() && seqend.common == default_common
+        })
 }
 
 /// Legacy application objects that have no complete DXF representation.
@@ -181,13 +189,60 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         for h in document.entity_index.keys() {
             set.insert(*h);
         }
-        // INSERT attributes are inline child entities and are not present in
+        // Compound children are inline records and are not present in
         // entity_index, but extension dictionaries may own data through them.
         for entity in &document.entities {
-            if let EntityType::Insert(insert) = entity.as_ref() {
-                for attribute in &insert.attributes {
-                    set.insert(attribute.common.handle);
+            match entity.as_ref() {
+                EntityType::Insert(insert) => {
+                    for attribute in &insert.attributes {
+                        set.insert(attribute.common.handle);
+                    }
+                    if let Some(seqend) = &insert.seqend {
+                        set.insert(seqend.common.handle);
+                    }
+                    if let Some(handle) = insert.seqend_handle {
+                        set.insert(handle);
+                    }
                 }
+                EntityType::Polyline2D(polyline) => {
+                    for vertex in &polyline.vertices {
+                        set.insert(vertex.common.handle);
+                    }
+                    if let Some(seqend) = &polyline.seqend {
+                        set.insert(seqend.common.handle);
+                    }
+                }
+                EntityType::Polyline3D(polyline) => {
+                    for vertex in &polyline.vertices {
+                        set.insert(vertex.common.handle);
+                    }
+                    if let Some(seqend) = &polyline.seqend {
+                        set.insert(seqend.common.handle);
+                    }
+                }
+                EntityType::PolyfaceMesh(mesh) => {
+                    for vertex in &mesh.vertices {
+                        set.insert(vertex.common.handle);
+                    }
+                    for face in &mesh.faces {
+                        set.insert(face.common.handle);
+                    }
+                    if let Some(seqend) = &mesh.seqend {
+                        set.insert(seqend.common.handle);
+                    }
+                    if let Some(handle) = mesh.seqend_handle {
+                        set.insert(handle);
+                    }
+                }
+                EntityType::PolygonMesh(mesh) => {
+                    for vertex in &mesh.vertices {
+                        set.insert(vertex.common.handle);
+                    }
+                    if let Some(seqend) = &mesh.seqend {
+                        set.insert(seqend.common.handle);
+                    }
+                }
+                _ => {}
             }
         }
         self.loft_input_entities.clear();
@@ -3931,16 +3986,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Write vertices with proper subclass markers
         for vertex in polyline.vertices.iter() {
-            let vertex_handle = self.allocate_handle();
+            let mut common = vertex.common.clone();
+            let vertex_handle = if common.handle.is_null() {
+                // A newly constructed vertex has no independent identity; keep
+                // the historical inherited layer/color behaviour.
+                Self::inherit_compound_child_defaults(&mut common, &polyline.common);
+                self.allocate_handle()
+            } else {
+                common.handle
+            };
+            common.handle = vertex_handle;
+            common.owner_handle = polyline_handle;
             self.writer.write_entity_type("VERTEX")?;
-            self.writer.write_handle(5, vertex_handle)?;
-            self.writer.write_handle(330, polyline_handle)?;
-            self.writer.write_subclass("AcDbEntity")?;
-            self.writer.write_string(8, &polyline.common.layer)?;
-            // Propagate parent color to vertex so CAD doesn't flag mismatch
-            if polyline.common.color != Color::ByLayer {
-                self.writer.write_color(62, polyline.common.color)?;
-            }
+            self.write_common_entity_data(&common, polyline_handle)?;
             self.writer.write_subclass("AcDbVertex")?;
             self.writer.write_subclass("AcDb2dVertex")?;
             self.writer.write_point3d(10, vertex.location)?;
@@ -3954,19 +4012,24 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_double(42, vertex.bulge)?;
             }
             self.writer.write_i16(70, vertex.flags.bits() as i16)?;
+            if vertex.id != 0 { self.writer.write_i32(91, vertex.id)?; }
             self.writer.write_double(50, vertex.curve_tangent.to_degrees())?;
+            self.write_xdata(&common.extended_data)?;
         }
 
         // Write SEQEND
-        let seqend_handle = self.allocate_handle();
-        self.writer.write_entity_type("SEQEND")?;
-        self.writer.write_handle(5, seqend_handle)?;
-        self.writer.write_handle(330, polyline_handle)?;
-        self.writer.write_subclass("AcDbEntity")?;
-        if self.writing_paper_space {
-            self.writer.write_i16(67, 1)?;
-        }
-        self.writer.write_string(8, &polyline.common.layer)?;
+        let seqend_handle = polyline
+            .seqend
+            .as_ref()
+            .map(|seqend| seqend.common.handle)
+            .filter(|handle| !handle.is_null())
+            .unwrap_or_else(|| self.allocate_handle());
+        self.write_owned_seqend(
+            polyline.seqend.as_deref(),
+            &polyline.common,
+            seqend_handle,
+            polyline_handle,
+        )?;
 
         Ok(())
     }
@@ -4842,6 +4905,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     /// Write INSERT entity
     fn write_insert(&mut self, insert: &Insert, owner: Handle) -> Result<()> {
+        let has_sequence = insert.has_attributes()
+            || insert.seqend.is_some()
+            || insert.seqend_handle.is_some();
         let is_view_rep = insert.view_rep_handle.is_some();
         self.writer.write_entity_type(if is_view_rep {
             "ACDBVIEWREPBLOCKREFERENCE"
@@ -4851,7 +4917,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_common_entity_data(&insert.common, owner)?;
         self.writer.write_subclass(insert.subclass_marker())?;
         // Has-attributes flag (group code 66)
-        if insert.has_attributes() {
+        if has_sequence {
             self.writer.write_i16(66, 1)?;
         }
         self.writer.write_string(2, &insert.block_name)?;
@@ -4889,8 +4955,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // XDATA precedes the child ATTRIB/SEQEND records.
         self.write_xdata(&insert.common.extended_data)?;
 
-        // Write child ATTRIB entities + SEQEND when attributes are present
-        if insert.has_attributes() {
+        // Write child ATTRIB entities + SEQEND when the source had an
+        // attribute sequence. A retained empty sequence is still meaningful.
+        if has_sequence {
             let insert_handle = insert.handle();
             for att in &insert.attributes {
                 if att.common.handle.is_null() {
@@ -4902,15 +4969,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 }
             }
             // SEQEND terminates the attribute sequence
-            let seqend_handle = self.allocate_handle();
-            self.writer.write_entity_type("SEQEND")?;
-            self.writer.write_handle(5, seqend_handle)?;
-            self.writer.write_handle(330, insert_handle)?;
-            self.writer.write_subclass("AcDbEntity")?;
-            if self.writing_paper_space {
-                self.writer.write_i16(67, 1)?;
-            }
-            self.writer.write_string(8, &insert.common.layer)?;
+            let seqend_handle = insert
+                .seqend
+                .as_ref()
+                .map(|seqend| seqend.common.handle)
+                .filter(|handle| !handle.is_null())
+                .or_else(|| insert.seqend_handle.filter(|handle| !handle.is_null()))
+                .unwrap_or_else(|| self.allocate_handle());
+            self.write_owned_seqend(
+                insert.seqend.as_deref(),
+                &insert.common,
+                seqend_handle,
+                insert_handle,
+            )?;
         }
         Ok(())
     }
@@ -4974,6 +5045,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(10, 0.0)?;
         self.writer.write_double(20, 0.0)?;
         self.writer.write_double(30, polyline.elevation)?;
+        if polyline.thickness != 0.0 {
+            self.writer.write_double(39, polyline.thickness)?;
+        }
 
         // Polyline flags (bit 8 = 3D polyline)
         self.writer.write_i16(70, polyline.flags.to_bits() as i16)?;
@@ -4988,36 +5062,37 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Write vertices with proper subclass markers
         let polyline_handle = polyline.handle();
         for vertex in polyline.vertices.iter() {
-            let vertex_handle = if vertex.handle.is_null() {
+            let mut common = vertex.common.clone();
+            let vertex_handle = if common.handle.is_null() {
+                Self::inherit_compound_child_defaults(&mut common, &polyline.common);
                 self.allocate_handle()
             } else {
-                vertex.handle
+                common.handle
             };
+            common.handle = vertex_handle;
+            common.owner_handle = polyline_handle;
             self.writer.write_entity_type("VERTEX")?;
-            self.writer.write_handle(5, vertex_handle)?;
-            self.writer.write_handle(330, polyline_handle)?;
-            self.writer.write_subclass("AcDbEntity")?;
-            self.writer.write_string(8, &vertex.layer)?;
-            // Propagate parent color to vertex so CAD doesn't flag mismatch
-            if polyline.common.color != Color::ByLayer {
-                self.writer.write_color(62, polyline.common.color)?;
-            }
+            self.write_common_entity_data(&common, polyline_handle)?;
             self.writer.write_subclass("AcDbVertex")?;
             self.writer.write_subclass("AcDb3dPolylineVertex")?;
             self.writer.write_point3d(10, vertex.position)?;
             self.writer.write_i16(70, vertex.flags as i16)?;
+            self.write_xdata(&common.extended_data)?;
         }
 
         // SEQEND
-        self.writer.write_entity_type("SEQEND")?;
-        let seqend_handle = self.allocate_handle();
-        self.writer.write_handle(5, seqend_handle)?;
-        self.writer.write_handle(330, polyline_handle)?;
-        self.writer.write_subclass("AcDbEntity")?;
-        if self.writing_paper_space {
-            self.writer.write_i16(67, 1)?;
-        }
-        self.writer.write_string(8, &polyline.common.layer)?;
+        let seqend_handle = polyline
+            .seqend
+            .as_ref()
+            .map(|seqend| seqend.common.handle)
+            .filter(|handle| !handle.is_null())
+            .unwrap_or_else(|| self.allocate_handle());
+        self.write_owned_seqend(
+            polyline.seqend.as_deref(),
+            &polyline.common,
+            seqend_handle,
+            polyline_handle,
+        )?;
 
         Ok(())
     }
@@ -11200,16 +11275,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Write vertices with proper subclass markers
         for vertex in mesh.vertices.iter() {
-            let vertex_handle = if vertex.common.handle.is_null() {
+            let mut common = vertex.common.clone();
+            let vertex_handle = if common.handle.is_null() {
+                Self::inherit_compound_child_defaults(&mut common, &mesh.common);
                 self.allocate_handle()
             } else {
-                vertex.common.handle
+                common.handle
             };
+            common.handle = vertex_handle;
+            common.owner_handle = mesh.common.handle;
             self.writer.write_entity_type("VERTEX")?;
-            self.writer.write_handle(5, vertex_handle)?;
-            self.writer.write_handle(330, mesh.common.handle)?;
-            self.writer.write_subclass("AcDbEntity")?;
-            self.writer.write_string(8, &vertex.common.layer)?;
+            self.write_common_entity_data(&common, mesh.common.handle)?;
             self.writer.write_subclass("AcDbVertex")?;
             self.writer.write_subclass("AcDbPolyFaceMeshVertex")?;
 
@@ -11221,20 +11297,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 | PolyfaceVertexFlags::POLYGON_MESH
                 | PolyfaceVertexFlags::POLYFACE_MESH;
             self.writer.write_i16(70, flags.bits())?;
+            self.write_xdata(&common.extended_data)?;
         }
 
         // Write faces with proper subclass markers
         for face in mesh.faces.iter() {
-            let face_handle = if face.common.handle.is_null() {
+            let mut common = face.common.clone();
+            let face_handle = if common.handle.is_null() {
+                Self::inherit_compound_child_defaults(&mut common, &mesh.common);
                 self.allocate_handle()
             } else {
-                face.common.handle
+                common.handle
             };
+            common.handle = face_handle;
+            common.owner_handle = mesh.common.handle;
             self.writer.write_entity_type("VERTEX")?;
-            self.writer.write_handle(5, face_handle)?;
-            self.writer.write_handle(330, mesh.common.handle)?;
-            self.writer.write_subclass("AcDbEntity")?;
-            self.writer.write_string(8, &face.common.layer)?;
+            self.write_common_entity_data(&common, mesh.common.handle)?;
             if let Some(c) = face.color {
                 if let Some(tc) = c.to_true_color_value() {
                     self.writer.write_i32(420, tc)?;
@@ -11259,18 +11337,25 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             if face.index4 != 0 {
                 self.writer.write_i16(74, face.index4)?;
             }
+            self.write_xdata(&common.extended_data)?;
         }
 
-        // Write SEQEND with AcDbEntity subclass
-        self.writer.write_entity_type("SEQEND")?;
-        let seqend_handle = mesh.seqend_handle.unwrap_or_else(|| self.allocate_handle());
-        self.writer.write_handle(5, seqend_handle)?;
-        self.writer.write_handle(330, mesh.common.handle)?;
-        self.writer.write_subclass("AcDbEntity")?;
-        if self.writing_paper_space {
-            self.writer.write_i16(67, 1)?;
-        }
-        self.writer.write_string(8, &mesh.common.layer)?;
+        // Write SEQEND with AcDbEntity subclass. A retained SEQEND wins;
+        // seqend_handle remains the compatibility fallback for callers that
+        // populated only the old scalar field.
+        let seqend_handle = mesh
+            .seqend
+            .as_ref()
+            .map(|seqend| seqend.common.handle)
+            .filter(|handle| !handle.is_null())
+            .or_else(|| mesh.seqend_handle.filter(|handle| !handle.is_null()))
+            .unwrap_or_else(|| self.allocate_handle());
+        self.write_owned_seqend(
+            mesh.seqend.as_deref(),
+            &mesh.common,
+            seqend_handle,
+            mesh.common.handle,
+        )?;
 
         Ok(())
     }
@@ -11445,6 +11530,46 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         Ok(())
     }
 
+    /// Apply the inherited layer/color defaults used by newly-created inline
+    /// children while retaining any explicit child override.
+    fn inherit_compound_child_defaults(child: &mut EntityCommon, parent: &EntityCommon) {
+        if child.layer == "0" {
+            child.layer = parent.layer.clone();
+        }
+        if child.color == Color::ByLayer {
+            child.color = parent.color;
+        }
+    }
+
+    /// Write a compound entity's owned SEQEND, retaining the source common
+    /// fields when the reader attached one. Newly-created compounds inherit
+    /// the parent common fields as they did before child identity was stored.
+    fn write_owned_seqend(
+        &mut self,
+        seqend: Option<&Seqend>,
+        fallback: &EntityCommon,
+        handle: Handle,
+        owner: Handle,
+    ) -> Result<()> {
+        let mut common = if let Some(seqend) = seqend {
+            seqend.common.clone()
+        } else {
+            // A synthesized SEQEND has historically carried only the parent
+            // layer/color and the standard common defaults. Do not copy the
+            // parent's XDATA, reactors, or other entity-specific overrides.
+            let mut common = EntityCommon::new();
+            common.layer = fallback.layer.clone();
+            common.color = fallback.color;
+            common
+        };
+        common.handle = handle;
+        common.owner_handle = owner;
+        self.writer.write_entity_type("SEQEND")?;
+        self.write_common_entity_data(&common, owner)?;
+        self.write_xdata(&common.extended_data)?;
+        Ok(())
+    }
+
     /// Write OLE2FRAME entity
     fn write_ole2frame(&mut self, ole: &Ole2Frame, owner: Handle) -> Result<()> {
         self.writer.write_entity_type("OLE2FRAME")?;
@@ -11515,38 +11640,39 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Write vertices with proper subclass markers
         for vertex in &mesh.vertices {
-            let vertex_handle = if vertex.common.handle.is_null() {
+            let mut common = vertex.common.clone();
+            let vertex_handle = if common.handle.is_null() {
+                Self::inherit_compound_child_defaults(&mut common, &mesh.common);
                 self.allocate_handle()
             } else {
-                vertex.common.handle
+                common.handle
             };
+            common.handle = vertex_handle;
+            common.owner_handle = mesh_handle;
             self.writer.write_entity_type("VERTEX")?;
-            self.writer.write_handle(5, vertex_handle)?;
-            self.writer.write_handle(330, mesh_handle)?;
-            self.writer.write_subclass("AcDbEntity")?;
-            self.writer.write_string(8, &vertex.common.layer)?;
-            // Propagate parent color to vertex so CAD doesn't flag mismatch
-            if mesh.common.color != Color::ByLayer {
-                self.writer.write_color(62, mesh.common.color)?;
-            }
+            self.write_common_entity_data(&common, mesh_handle)?;
             self.writer.write_subclass("AcDbVertex")?;
             self.writer.write_subclass("AcDbPolygonMeshVertex")?;
             self.writer.write_point3d(10, vertex.location)?;
             if vertex.flags != 0 {
                 self.writer.write_i16(70, vertex.flags)?;
             }
+            self.write_xdata(&common.extended_data)?;
         }
 
         // Write SEQEND
-        let seqend_handle = self.allocate_handle();
-        self.writer.write_entity_type("SEQEND")?;
-        self.writer.write_handle(5, seqend_handle)?;
-        self.writer.write_handle(330, mesh_handle)?;
-        self.writer.write_subclass("AcDbEntity")?;
-        if self.writing_paper_space {
-            self.writer.write_i16(67, 1)?;
-        }
-        self.writer.write_string(8, &mesh.common.layer)?;
+        let seqend_handle = mesh
+            .seqend
+            .as_ref()
+            .map(|seqend| seqend.common.handle)
+            .filter(|handle| !handle.is_null())
+            .unwrap_or_else(|| self.allocate_handle());
+        self.write_owned_seqend(
+            mesh.seqend.as_deref(),
+            &mesh.common,
+            seqend_handle,
+            mesh_handle,
+        )?;
 
         Ok(())
     }

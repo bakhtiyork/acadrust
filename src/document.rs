@@ -2249,6 +2249,7 @@ impl CadDocument {
         }
         for entity in &self.entities {
             include_handle!(entity.common().handle);
+            entity.for_each_child_handle(|h| include_handle!(h));
         }
         for handle in self.objects.keys() {
             include_handle!(*handle);
@@ -3308,6 +3309,7 @@ impl CadDocument {
     /// The entity is stored in both the flat entity map (used by the DXF
     /// writer) and the *Model_Space block record (used by the DWG writer).
     pub fn add_entity(&mut self, mut entity: EntityType) -> Result<Handle> {
+        self.reserve_child_handles(&entity);
         entity.common_mut().raw_record = None;   // (re)placed in the document: owner/handle may differ from the source bytes
         // Allocate a handle if the entity doesn't have one
         let handle = if entity.common().handle.is_null() {
@@ -3389,7 +3391,15 @@ impl CadDocument {
         self.entity_index.reserve(additional);
     }
 
+    fn reserve_child_handles(&mut self, entity: &EntityType) {
+        entity.for_each_child_handle(|h| {
+            self.next_handle = self.next_handle.max(h.value().saturating_add(1));
+        });
+        self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
+    }
+
     pub(crate) fn add_loaded_entity(&mut self, mut entity: EntityType) -> Handle {
+        self.reserve_child_handles(&entity);
         let handle = if entity.common().handle.is_null() {
             let handle = self.allocate_handle();
             entity.as_entity_mut().set_handle(handle);
@@ -3415,6 +3425,9 @@ impl CadDocument {
 
         let mut next_handle = self.next_handle.max(self.header.handle_seed);
         for entity in entities.iter_mut() {
+            entity.for_each_child_handle(|h| {
+                next_handle = next_handle.max(h.value().saturating_add(1));
+            });
             let handle = entity.common().handle;
             if handle.is_null() {
                 let handle = Handle::new(next_handle);
@@ -4952,6 +4965,9 @@ impl CadDocument {
             if h > 0 {
                 used_handles.insert(h);
             }
+            e.for_each_child_handle(|h| {
+                if !h.is_null() { used_handles.insert(h.value()); }
+            });
         }
         // Snapshot the handles used by NON-object records. Object keys are
         // unique in `self.objects`, so an object can only truly collide with a

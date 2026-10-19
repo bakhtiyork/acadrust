@@ -168,6 +168,9 @@ impl<'a> DwgObjectWriter<'a> {
             if h > max_h {
                 max_h = h;
             }
+            entity.for_each_child_handle(|handle| {
+                max_h = max_h.max(handle.value().saturating_add(1));
+            });
         }
         for (handle, object) in &document.objects {
             if let ObjectType::ClassObject(ClassObject {

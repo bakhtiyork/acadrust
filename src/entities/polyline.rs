@@ -131,6 +131,10 @@ impl From<i16> for SmoothSurfaceType {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Vertex2D {
+    /// Persistent child identity and appearance. Stored inline with the vertex.
+    pub common: EntityCommon,
+    /// Raw DXF widths before native inheritance/normalization, when read from DXF.
+    pub source_widths: Option<(f64, f64)>,
     /// Location of the vertex (X, Y in OCS, Z is elevation)
     pub location: Vector3,
     /// Vertex flags
@@ -150,6 +154,8 @@ pub struct Vertex2D {
 impl Vertex2D {
     pub fn new(location: Vector3) -> Self {
         Self {
+            common: EntityCommon::new(),
+            source_widths: None,
             location,
             flags: VertexFlags::new(),
             start_width: 0.0,
@@ -207,6 +213,10 @@ impl Vertex3D {
 pub struct Polyline2D {
     /// Common entity data
     pub common: EntityCommon,
+    /// Raw DXF widths before native inheritance/normalization, when read from DXF.
+    pub source_widths: Option<(f64, f64)>,
+    /// Retained sequence terminator, including its identity and common metadata.
+    pub seqend: Option<Box<super::Seqend>>,
     /// Polyline flags
     pub flags: PolylineFlags,
     /// Smooth surface type
@@ -229,6 +239,8 @@ impl Polyline2D {
     pub fn new() -> Self {
         Self {
             common: EntityCommon::new(),
+            source_widths: None,
+            seqend: None,
             flags: PolylineFlags::new(),
             smooth_surface: SmoothSurfaceType::None,
             start_width: 0.0,
