@@ -17886,6 +17886,8 @@ impl<'a> SectionReader<'a> {
     /// Read a LEADER entity
     fn read_leader(&mut self) -> Result<Option<Leader>> {
         let mut leader = Leader::new();
+        let mut source = crate::entities::leader::LeaderDxfSource::default();
+        source.mark_source();
         // A missing 73 group means the documented default: no annotation.
         // Keeping the "with text" constructor default leaves a text leader
         // without text, which the reference application reports as a bad
@@ -17903,6 +17905,7 @@ impl<'a> SectionReader<'a> {
                 self.reader.push_back(pair);
                 break;
             }
+            source.insert(pair.code);
             match pair.code {
                 8 => leader.common.layer = pair.value_string.clone(),
                 62 => {
@@ -18028,6 +18031,7 @@ impl<'a> SectionReader<'a> {
         if let Some(first) = leader.vertices.first() {
             leader.origin = *first;
         }
+        leader.dxf_source = source;
 
         Ok(Some(leader))
     }
@@ -18042,6 +18046,7 @@ impl<'a> SectionReader<'a> {
     fn read_multileader(&mut self) -> Result<Option<MultiLeader>> {
         use crate::entities::multileader as mlt;
         let mut ml = MultiLeader::new();
+        let mut source = mlt::MultiLeaderDxfSource::default();
         let mut block_scale = PointReader::new();
         let mut section = String::new();
         let mut current_block_attribute: Option<mlt::BlockAttribute> = None;
@@ -18053,6 +18058,7 @@ impl<'a> SectionReader<'a> {
                 self.reader.push_back(pair);
                 break;
             }
+            source.insert(pair.code);
             match pair.code {
                 100 => section = pair.value_string.clone(),
                 8 => ml.common.layer = pair.value_string.clone(),
@@ -18344,6 +18350,7 @@ impl<'a> SectionReader<'a> {
             proxy_graphics.truncate(proxy_graphics_size);
             ml.common.graphic_data = Some(proxy_graphics);
         }
+        ml.dxf_source = Some(Box::new(source));
         Ok(Some(ml))
     }
 
@@ -21338,12 +21345,14 @@ impl<'a> SectionReader<'a> {
     /// Read an MLEADERSTYLE object
     fn read_multileader_style(&mut self) -> Result<Option<MultiLeaderStyle>> {
         let mut style = MultiLeaderStyle::new("Standard");
+        style.dxf_present_codes = Some([0; 6]);
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
                 self.reader.push_back(pair);
                 break;
             }
+            style.record_dxf_code(pair.code);
             match pair.code {
                 5 => {
                     if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
@@ -21355,11 +21364,42 @@ impl<'a> SectionReader<'a> {
                         style.owner_handle = Handle::new(h);
                     }
                 }
-                3 => style.name = pair.value_string.clone(),
-                300 => style.description = pair.value_string.clone(),
+                // Code 3 stores the description. Retain the legacy native
+                // name fallback as well; the actual name is a dictionary key.
+                3 => {
+                    style.name = pair.value_string.clone();
+                    style.description = pair.value_string.clone();
+                }
+                300 => style.default_text = pair.value_string.clone(),
                 170 => {
                     if let Some(v) = pair.as_i16() {
                         style.content_type = crate::objects::LeaderContentType::from(v);
+                    }
+                }
+                171 => {
+                    if let Some(v) = pair.as_i16() {
+                        style.multileader_draw_order =
+                            crate::objects::MultiLeaderDrawOrderType::from(v);
+                    }
+                }
+                172 => {
+                    if let Some(v) = pair.as_i16() {
+                        style.leader_draw_order = crate::objects::LeaderDrawOrderType::from(v);
+                    }
+                }
+                90 => {
+                    if let Some(v) = pair.as_i32() {
+                        style.max_leader_points = v;
+                    }
+                }
+                40 => {
+                    if let Some(v) = pair.as_double() {
+                        style.first_segment_angle = v;
+                    }
+                }
+                41 => {
+                    if let Some(v) = pair.as_double() {
+                        style.second_segment_angle = v;
                     }
                 }
                 173 => {
@@ -21368,8 +21408,8 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 91 => {
-                    if let Some(v) = pair.as_i32() {
-                        style.line_color = Color::from_index(v as i16);
+                    if let Some(v) = pair.as_i32_bits() {
+                        style.line_color = color_from_i32(v);
                     }
                 }
                 92 => {
@@ -21408,8 +21448,13 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 93 => {
-                    if let Some(v) = pair.as_i32() {
-                        style.text_color = Color::from_index(v as i16);
+                    if let Some(v) = pair.as_i32_bits() {
+                        style.text_color = color_from_i32(v);
+                    }
+                }
+                94 => {
+                    if let Some(v) = pair.as_i32_bits() {
+                        style.block_content_color = color_from_i32(v);
                     }
                 }
                 292 => {
@@ -21437,12 +21482,32 @@ impl<'a> SectionReader<'a> {
                         style.text_alignment = crate::objects::TextAlignmentType::from(v);
                     }
                 }
+                271 => {
+                    if let Some(v) = pair.as_i16() {
+                        style.text_attachment_direction =
+                            crate::objects::TextAttachmentDirectionType::from(v);
+                    }
+                }
+                272 => {
+                    if let Some(v) = pair.as_i16() {
+                        style.text_bottom_attachment = crate::objects::TextAttachmentType::from(v);
+                    }
+                }
+                273 => {
+                    if let Some(v) = pair.as_i16() {
+                        style.text_top_attachment = crate::objects::TextAttachmentType::from(v);
+                    }
+                }
                 142 => {
                     if let Some(v) = pair.as_double() {
                         style.scale_factor = v;
                     }
                 }
-                304 => style.default_text = pair.value_string.clone(),
+                // 304 was accepted by older Rust readers for legacy files;
+                // retain it as a fallback while code 300 remains canonical.
+                304 if !style.dxf_code_present(300) => {
+                    style.default_text = pair.value_string.clone();
+                }
                 340 => {
                     if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
                         style.line_type_handle = Some(Handle::new(h));
@@ -21463,9 +21528,70 @@ impl<'a> SectionReader<'a> {
                         style.block_content_handle = Some(Handle::new(h));
                     }
                 }
+                46 => {
+                    if let Some(v) = pair.as_double() {
+                        style.align_space = v;
+                    }
+                }
+                47 => {
+                    if let Some(v) = pair.as_double() {
+                        style.block_content_scale_x = v;
+                    }
+                }
+                49 => {
+                    if let Some(v) = pair.as_double() {
+                        style.block_content_scale_y = v;
+                    }
+                }
+                140 => {
+                    if let Some(v) = pair.as_double() {
+                        style.block_content_scale_z = v;
+                    }
+                }
+                141 => {
+                    if let Some(v) = pair.as_double() {
+                        style.block_content_rotation = v;
+                    }
+                }
+                143 => {
+                    if let Some(v) = pair.as_double() {
+                        style.break_gap_size = v;
+                    }
+                }
+                177 => {
+                    if let Some(v) = pair.as_i16() {
+                        style.block_content_connection =
+                            crate::objects::BlockContentConnectionType::from(v);
+                    }
+                }
+                293 => {
+                    if let Some(v) = pair.as_bool() {
+                        style.enable_block_scale = v;
+                    }
+                }
+                294 => {
+                    if let Some(v) = pair.as_bool() {
+                        style.enable_block_rotation = v;
+                    }
+                }
+                295 => {
+                    if let Some(v) = pair.as_bool() {
+                        style.property_changed = v;
+                    }
+                }
                 296 => {
                     if let Some(v) = pair.as_bool() {
                         style.is_annotative = v;
+                    }
+                }
+                297 => {
+                    if let Some(v) = pair.as_bool() {
+                        style.text_always_left = v;
+                    }
+                }
+                298 => {
+                    if let Some(v) = pair.as_bool() {
+                        style.unknown_flag_298 = v;
                     }
                 }
                 _ => {}

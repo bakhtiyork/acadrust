@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use super::{color, handle, number, optional_handle, props, record, transparency, vec2, vec3};
 
 mod modeler;
+mod multileader;
 
 const UNMAPPED: &str = "!unmapped";
 
@@ -516,6 +517,25 @@ fn dimension_common(
         base.common.owner_handle,
         props(type_name, values),
     )
+}
+
+/// Follow the reference getter, including its exception for zero vectors.
+/// CSMath uses the reversed final segment, an unclamped acos, and 1e-12 epsilon.
+fn leader_has_hookline(value: &crate::entities::Leader) -> Value {
+    if value.vertices.len() <= 1 {
+        return bool_value(false);
+    }
+    let last = value.vertices[value.vertices.len() - 1];
+    let previous = value.vertices[value.vertices.len() - 2];
+    let segment = previous - last;
+    let horizontal = value.horizontal_direction;
+    let segment_length = segment.length();
+    let horizontal_length = horizontal.length();
+    if segment_length <= 1e-12 || horizontal_length <= 1e-12 {
+        return Value::String("!throws:InvalidOperationException".into());
+    }
+    let angle = (segment.dot(&horizontal) / (segment_length * horizontal_length)).acos();
+    bool_value(angle.abs() <= 1e-12)
 }
 
 /// Visit the backing collection, including structural BLOCK/ENDBLK records
@@ -1036,45 +1056,74 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
         }
         EntityType::Hatch(value) => collect_hatch(doc, value, out),
         EntityType::Dimension(value) => collect_dimension(doc, value, out),
-        EntityType::Leader(value) => field_common(
-            doc,
-            &value.common,
-            "Leader",
-            "LEADER",
-            0x2D,
-            "AcDbLeader",
-            false,
-            vec![
-                ("AnnotationOffset", vec3(value.annotation_offset)),
-                ("ArrowHeadEnabled", bool_value(value.arrow_enabled)),
-                (
-                    "AssociatedAnnotation",
-                    optional_handle(if value.annotation_handle.is_null() {
-                        None
-                    } else {
-                        Some(value.annotation_handle)
-                    }),
-                ),
-                ("BlockOffset", vec3(value.block_offset)),
-                (
-                    "CreationType",
-                    enum_value(value.creation_type.to_value() as i64),
-                ),
-                ("HasHookline", bool_value(value.hookline_enabled)),
-                (
-                    "HookLineDirection",
-                    enum_value(value.hookline_direction.to_value() as i64),
-                ),
-                ("HorizontalDirection", vec3(value.horizontal_direction)),
-                ("Normal", vec3(value.normal)),
-                ("PathType", enum_value(value.path_type.to_value() as i64)),
-                ("Style", unmapped()),
-                ("TextHeight", number(value.text_height)),
-                ("TextWidth", number(value.text_width)),
-                ("Vertices", points3(value.vertices.iter().copied())),
-            ],
-            out,
-        ),
+        EntityType::Leader(value) => {
+            let dxf_source = &value.dxf_source;
+            let arrow_enabled = if dxf_source.is_dxf() && !dxf_source.contains(71) {
+                false
+            } else {
+                value.arrow_enabled
+            };
+            let modern_dwg = doc
+                .dwg_source_version
+                .is_some_and(|version| version >= crate::types::DxfVersion::AC1024);
+            let text_height = if modern_dwg || (dxf_source.is_dxf() && !dxf_source.contains(40)) {
+                0.0
+            } else {
+                value.text_height
+            };
+            let text_width = if modern_dwg || (dxf_source.is_dxf() && !dxf_source.contains(41)) {
+                0.0
+            } else {
+                value.text_width
+            };
+            let creation_type = if dxf_source.is_dxf() && !dxf_source.contains(73) {
+                0
+            } else {
+                value.creation_type.to_value() as i64
+            };
+            let style = optional_handle(
+                doc.dim_styles
+                    .get(&value.dimension_style)
+                    .or_else(|| doc.dim_styles.get("Standard"))
+                    .map(|style| style.handle),
+            );
+            field_common(
+                doc,
+                &value.common,
+                "Leader",
+                "LEADER",
+                0x2D,
+                "AcDbLeader",
+                false,
+                vec![
+                    ("AnnotationOffset", vec3(value.annotation_offset)),
+                    ("ArrowHeadEnabled", bool_value(arrow_enabled)),
+                    (
+                        "AssociatedAnnotation",
+                        optional_handle(if value.annotation_handle.is_null() {
+                            None
+                        } else {
+                            Some(value.annotation_handle)
+                        }),
+                    ),
+                    ("BlockOffset", vec3(value.block_offset)),
+                    ("CreationType", enum_value(creation_type)),
+                    ("HasHookline", leader_has_hookline(value)),
+                    (
+                        "HookLineDirection",
+                        enum_value(value.hookline_direction.to_value() as i64),
+                    ),
+                    ("HorizontalDirection", vec3(value.horizontal_direction)),
+                    ("Normal", vec3(value.normal)),
+                    ("PathType", enum_value(value.path_type.to_value() as i64)),
+                    ("Style", style),
+                    ("TextHeight", number(text_height)),
+                    ("TextWidth", number(text_width)),
+                    ("Vertices", points3(value.vertices.iter().copied())),
+                ],
+                out,
+            )
+        }
         EntityType::Viewport(value) => collect_viewport(doc, value, out),
         EntityType::Tolerance(value) => field_common(
             doc,
@@ -2524,36 +2573,7 @@ fn collect_multileader(
     value: &crate::entities::MultiLeader,
     out: &mut Vec<Value>,
 ) {
-    field_common(
-        doc,
-        &value.common,
-        "MultiLeader",
-        "MULTILEADER",
-        -999,
-        "AcDbMLeader",
-        false,
-        vec![
-            ("Arrowhead", optional_handle(value.arrowhead_handle)),
-            ("ArrowheadSize", number(value.arrowhead_size)),
-            ("BlockContent", optional_handle(value.block_content_handle)),
-            ("BlockContentColor", color(value.block_content_color)),
-            ("BlockContentRotation", number(value.block_rotation)),
-            ("BlockContentScale", vec3(value.block_scale)),
-            ("ContentType", enum_value(value.content_type as i64)),
-            (
-                "EnableAnnotationScale",
-                bool_value(value.enable_annotation_scale),
-            ),
-            ("EnableDogleg", bool_value(value.enable_dogleg)),
-            ("EnableLanding", bool_value(value.enable_landing)),
-            ("LandingDistance", number(value.dogleg_length)),
-            ("LineColor", color(value.line_color)),
-            ("ScaleFactor", number(value.scale_factor)),
-            ("TextColor", color(value.text_color)),
-            ("TextFrame", bool_value(value.text_frame)),
-        ],
-        out,
-    )
+    multileader::collect(doc, value, out)
 }
 
 fn collect_mline(doc: &CadDocument, value: &crate::entities::MLine, out: &mut Vec<Value>) {

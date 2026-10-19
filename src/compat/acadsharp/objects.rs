@@ -9,8 +9,8 @@
 use crate::objects::{
     BlockEvalValue, Dictionary, DictionaryWithDefault, DynamicBlockData, DynamicBlockObject,
     Group, ImageDefinition, ImageDefinitionReactor, Layout, MLineStyle, Material,
-    MultiLeaderStyle, ObjectContextData, ObjectType, PlotSettings, Scale, SortEntitiesTable,
-    TableStyle, VisualStyle, XRecord,
+    MultiLeaderPathType, MultiLeaderStyle, ObjectContextData, ObjectType, PlotSettings, Scale,
+    SortEntitiesTable, TableStyle, TextAttachmentType, VisualStyle, XRecord,
 };
 use crate::tables::TableEntry;
 use crate::types::{Color, DxfVersion, Handle, Matrix4, Vector2, Vector3};
@@ -127,7 +127,7 @@ fn dump_object(
         ),
         ObjectType::Group(value) => dump_group(map_handle, value),
         ObjectType::MLineStyle(value) => dump_mline_style(_doc, reader, map_handle, value),
-        ObjectType::MultiLeaderStyle(value) => dump_mleader_style(map_handle, value),
+        ObjectType::MultiLeaderStyle(value) => dump_mleader_style(_doc, map_handle, value),
         ObjectType::TableStyle(value) => dump_table_style(_doc, reader, map_handle, value),
         ObjectType::Scale(value) => dump_scale(map_handle, value),
         ObjectType::VisualStyle(value) => dump_visual_style(map_handle, value, reader),
@@ -675,26 +675,102 @@ fn dump_mline_style(
     )
 }
 
-fn dump_mleader_style(handle_value: Handle, value: &MultiLeaderStyle) -> Value {
+fn dump_mleader_style(
+    doc: &crate::CadDocument,
+    handle_value: Handle,
+    value: &MultiLeaderStyle,
+) -> Value {
+    let source_dwg = doc.dwg_source_version.is_some();
+    let source_dxf = value.dxf_present_codes.is_some();
+    let omitted = |code| source_dxf && !value.dxf_code_present(code);
+    let style_name = doc
+        .objects
+        .get(&value.owner_handle)
+        .and_then(|object| match object {
+            ObjectType::Dictionary(dictionary) => {
+                dictionary.entries.iter().find_map(|(name, handle)| {
+                    (*handle == value.handle || *handle == handle_value).then(|| name.clone())
+                })
+            }
+            _ => None,
+        })
+        .or_else(|| (!value.name.is_empty()).then(|| value.name.clone()))
+        .unwrap_or_else(|| MultiLeaderStyle::STANDARD.to_string());
+    let line_type = value.line_type_handle.or_else(|| {
+        doc.line_types
+            .get("ByLayer")
+            .or_else(|| doc.line_types.get("BYLAYER"))
+            .map(|line| line.handle)
+    });
+    let text_style = value
+        .text_style_handle
+        .or_else(|| doc.text_styles.get("Standard").map(|style| style.handle));
+    let line_color = if source_dxf {
+        Color::ByBlock
+    } else {
+        value.line_color
+    };
+    let text_color = if source_dxf {
+        Color::ByBlock
+    } else {
+        value.text_color
+    };
+    let block_content_color = if source_dxf {
+        Color::ByBlock
+    } else {
+        value.block_content_color
+    };
+    let top = if source_dwg {
+        value.text_bottom_attachment
+    } else {
+        value.text_top_attachment
+    };
+    let bottom = if source_dwg {
+        value.text_top_attachment
+    } else {
+        value.text_bottom_attachment
+    };
+    let angle = if source_dxf {
+        value.block_content_rotation.to_radians()
+    } else {
+        value.block_content_rotation
+    };
     let mut p = common(
         "MLEADERSTYLE",
         UNLISTED,
         "AcDbMLeaderStyle",
-        Some(&value.name),
+        Some(&style_name),
         None,
         None,
     );
     p.extend([
-        ("AlignSpace", number(value.align_space)),
-        ("Arrowhead", optional_handle(value.arrowhead_handle)),
+        (
+            "AlignSpace",
+            number(if omitted(46) { 0.0 } else { value.align_space }),
+        ),
+        (
+            "Arrowhead",
+            if source_dxf {
+                Value::Null
+            } else {
+                optional_handle(value.arrowhead_handle)
+            },
+        ),
         ("ArrowheadSize", number(value.arrowhead_size)),
-        ("BlockContent", optional_handle(value.block_content_handle)),
-        ("BlockContentColor", color(value.block_content_color)),
+        (
+            "BlockContent",
+            if source_dxf {
+                Value::Null
+            } else {
+                optional_handle(value.block_content_handle)
+            },
+        ),
+        ("BlockContentColor", mleader_color(block_content_color)),
         (
             "BlockContentConnection",
             int(value.block_content_connection as i64),
         ),
-        ("BlockContentRotation", number(value.block_content_rotation)),
+        ("BlockContentRotation", number(angle)),
         (
             "BlockContentScale",
             vec3(Vector3::new(
@@ -708,7 +784,14 @@ fn dump_mleader_style(handle_value: Handle, value: &MultiLeaderStyle) -> Value {
         ("BlockContentScaleZ", number(value.block_content_scale_z)),
         ("BreakGapSize", number(value.break_gap_size)),
         ("ContentType", int(value.content_type as i64)),
-        ("DefaultTextContents", text(&value.default_text)),
+        (
+            "DefaultTextContents",
+            text(if omitted(300) {
+                ""
+            } else {
+                &value.default_text
+            }),
+        ),
         ("Description", text(&value.description)),
         (
             "EnableBlockContentRotation",
@@ -728,9 +811,9 @@ fn dump_mleader_style(handle_value: Handle, value: &MultiLeaderStyle) -> Value {
         ("LandingDistance", number(value.landing_distance)),
         ("LandingGap", number(value.landing_gap)),
         ("LeaderDrawOrder", int(value.leader_draw_order as i64)),
-        ("LeaderLineType", optional_handle(value.line_type_handle)),
+        ("LeaderLineType", optional_handle(line_type)),
         ("LeaderLineWeight", int(value.line_weight.value() as i64)),
-        ("LineColor", color(value.line_color)),
+        ("LineColor", mleader_color(line_color)),
         (
             "MaxLeaderSegmentsPoints",
             int(value.max_leader_points as i64),
@@ -740,7 +823,14 @@ fn dump_mleader_style(handle_value: Handle, value: &MultiLeaderStyle) -> Value {
             int(value.multileader_draw_order as i64),
         ),
         ("OverwritePropertyValue", bool_value(value.property_changed)),
-        ("PathType", int(value.path_type as i64)),
+        (
+            "PathType",
+            int(if omitted(173) {
+                MultiLeaderPathType::Invisible as i64
+            } else {
+                value.path_type as i64
+            }),
+        ),
         ("ScaleFactor", number(value.scale_factor)),
         (
             "SecondSegmentAngleConstraint",
@@ -755,18 +845,40 @@ fn dump_mleader_style(handle_value: Handle, value: &MultiLeaderStyle) -> Value {
         ),
         (
             "TextBottomAttachment",
-            int(value.text_bottom_attachment as i64),
+            int(if omitted(272) {
+                TextAttachmentType::TopOfTopLine as i64
+            } else {
+                bottom as i64
+            }),
         ),
-        ("TextColor", color(value.text_color)),
+        ("TextColor", mleader_color(text_color)),
         ("TextFrame", bool_value(value.text_frame)),
         ("TextHeight", number(value.text_height)),
-        ("TextLeftAttachment", int(value.text_left_attachment as i64)),
+        (
+            "TextLeftAttachment",
+            int(if omitted(174) {
+                TextAttachmentType::TopOfTopLine as i64
+            } else {
+                value.text_left_attachment as i64
+            }),
+        ),
         (
             "TextRightAttachment",
-            int(value.text_right_attachment as i64),
+            int(if omitted(178) {
+                TextAttachmentType::TopOfTopLine as i64
+            } else {
+                value.text_right_attachment as i64
+            }),
         ),
-        ("TextStyle", optional_handle(value.text_style_handle)),
-        ("TextTopAttachment", int(value.text_top_attachment as i64)),
+        ("TextStyle", optional_handle(text_style)),
+        (
+            "TextTopAttachment",
+            int(if omitted(273) {
+                TextAttachmentType::TopOfTopLine as i64
+            } else {
+                top as i64
+            }),
+        ),
         ("UnknownFlag298", bool_value(value.unknown_flag_298)),
     ]);
     record(
@@ -2408,6 +2520,15 @@ fn dump_object_context_data(handle_value: Handle, value: &ObjectContextData) -> 
     }
 }
 
+fn mleader_color(value: crate::types::Color) -> Value {
+    let mut result = color(value);
+    if let crate::types::Color::Rgb { r, g, b } = value {
+        result["TrueColor"] =
+            serde_json::json!(i32::from(r) | (i32::from(g) << 8) | (i32::from(b) << 16));
+    }
+    result
+}
+
 fn dump_mleader_context(
     handle_value: Handle,
     value: &ObjectContextData,
@@ -2421,7 +2542,7 @@ fn dump_mleader_context(
     );
     p.extend([
         ("ArrowheadSize", number(context.arrowhead_size)),
-        ("BackgroundFillColor", color(context.background_fill_color)),
+        ("BackgroundFillColor", mleader_color(context.background_fill_color)),
         (
             "BackgroundFillEnabled",
             bool_value(context.background_fill_enabled),
@@ -2445,7 +2566,7 @@ fn dump_mleader_context(
             "BlockContent",
             optional_handle(context.block_content_handle),
         ),
-        ("BlockContentColor", color(context.block_content_color)),
+        ("BlockContentColor", mleader_color(context.block_content_color)),
         (
             "BlockContentConnection",
             int(context.block_connection_type as i64),
@@ -2484,7 +2605,7 @@ fn dump_mleader_context(
             "TextBottomAttachment",
             int(context.text_bottom_attachment as i64),
         ),
-        ("TextColor", color(context.text_color)),
+        ("TextColor", mleader_color(context.text_color)),
         ("TextHeight", number(context.text_height)),
         (
             "TextHeightAutomatic",
@@ -2609,7 +2730,7 @@ fn mleader_line(value: &crate::entities::multileader::LeaderLine) -> Value {
                 ),
             ),
             ("Index", int(value.index as i64)),
-            ("LineColor", color(value.line_color)),
+            ("LineColor", mleader_color(value.line_color)),
             ("LineWeight", int(value.line_weight.value() as i64)),
             ("OverrideFlags", int(value.override_flags.bits() as i64)),
             ("PathType", int(value.path_type as i64)),

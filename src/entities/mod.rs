@@ -87,7 +87,7 @@ pub use face3d::{Face3D, InvisibleEdgeFlags};
 pub use hatch::*;
 pub use helix::{Helix, HelixConstraint};
 pub use insert::Insert;
-pub use leader::{HooklineDirection, Leader, LeaderCreationType, LeaderPathType};
+pub use leader::{HooklineDirection, Leader, LeaderCreationType, LeaderDxfSource, LeaderPathType};
 pub use light::{Light, LightPhotometricData};
 pub use line::Line;
 pub use lwpolyline::{LwPolyline, LwVertex};

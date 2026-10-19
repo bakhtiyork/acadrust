@@ -87,6 +87,66 @@ impl HooklineDirection {
     }
 }
 
+/// Group-code presence captured while reading a LEADER from DXF.
+///
+/// ACadSharp applies field defaults when a code is absent.  The native model
+/// keeps its constructor defaults, so the compatibility projection uses this
+/// small source marker to reproduce those parsed-record defaults without
+/// changing native construction or round-trip state.
+#[derive(Debug, Clone, Copy, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct LeaderDxfSource {
+    flags: u8,
+}
+
+// Source presence is compatibility metadata and must not affect native
+// entity equality.
+impl PartialEq for LeaderDxfSource {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl LeaderDxfSource {
+    const SOURCE: u8 = 1 << 0;
+    const ARROW: u8 = 1 << 1;
+    const TEXT_HEIGHT: u8 = 1 << 2;
+    const TEXT_WIDTH: u8 = 1 << 3;
+    const CREATION_TYPE: u8 = 1 << 4;
+
+    /// Whether this marker came from a DXF reader.
+    pub fn is_dxf(&self) -> bool {
+        self.flags & Self::SOURCE != 0
+    }
+
+    /// Whether the source contained the given group code.
+    pub fn contains(&self, code: usize) -> bool {
+        let flag = match code {
+            71 => Self::ARROW,
+            40 => Self::TEXT_HEIGHT,
+            41 => Self::TEXT_WIDTH,
+            73 => Self::CREATION_TYPE,
+            _ => return false,
+        };
+        self.flags & flag != 0
+    }
+
+    pub(crate) fn mark_source(&mut self) {
+        self.flags |= Self::SOURCE;
+    }
+
+    pub(crate) fn insert(&mut self, code: i32) {
+        let flag = match code {
+            71 => Self::ARROW,
+            40 => Self::TEXT_HEIGHT,
+            41 => Self::TEXT_WIDTH,
+            73 => Self::CREATION_TYPE,
+            _ => return,
+        };
+        self.flags |= flag;
+    }
+}
+
 /// Leader entity - creates an annotation leader line with arrow
 ///
 /// Leaders are used to point to features and connect them with annotation
@@ -110,6 +170,9 @@ impl HooklineDirection {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Leader {
+    /// DXF field presence used only by the ACadSharp compatibility view.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_source: LeaderDxfSource,
     /// Common entity properties
     pub common: EntityCommon,
     /// Dimension style name
@@ -165,6 +228,7 @@ impl Leader {
     /// Create a new empty leader
     pub fn new() -> Self {
         Self {
+            dxf_source: LeaderDxfSource::default(),
             common: EntityCommon::default(),
             dimension_style: "Standard".to_string(),
             arrow_enabled: true,
