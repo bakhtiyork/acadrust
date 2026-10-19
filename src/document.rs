@@ -98,6 +98,36 @@ fn default_show_history_mode() -> i16 {
     1
 }
 
+#[cfg(feature = "serde")]
+fn default_dim_text_arrow_fit() -> i16 {
+    3
+}
+
+#[cfg(feature = "serde")]
+fn default_dim_unit() -> i16 {
+    2
+}
+
+#[cfg(feature = "serde")]
+fn default_dim_text_style_name() -> String {
+    "Standard".to_string()
+}
+
+#[cfg(feature = "serde")]
+fn default_dim_linetype_name() -> String {
+    "ByBlock".to_string()
+}
+
+#[cfg(feature = "serde")]
+fn default_stacked_text_alignment() -> i16 {
+    1
+}
+
+#[cfg(feature = "serde")]
+fn default_stacked_text_size_percentage() -> i16 {
+    70
+}
+
 #[derive(Default)]
 struct EntityChangeRecorderInner {
     before: HashMap<Handle, Option<Arc<EntityType>>>,
@@ -159,6 +189,17 @@ fn solid_history_node_id(base: &SolidHistoryNodeBase) -> i32 {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(default))]
 pub struct HeaderVariables {
+    /// Variables present in a source DXF HEADER section. `None` means this
+    /// header was constructed in memory or read from another format.
+    pub dxf_source_variables: Option<HashSet<String>>,
+    /// ACADMAINTVER, independent of the DWG file framing maintenance byte.
+    pub maintenance_version: i32,
+    /// Original HANDSEED before document registration advances the allocator.
+    pub source_handle_seed: Option<u64>,
+    /// Original optional DWG Template section (description and MEASUREMENT).
+    /// Retained separately because consumers may interpret legacy description
+    /// lengths differently; `measurement` remains the native decoded value.
+    pub dwg_template_data: Option<Arc<[u8]>>,
     /// Independent current view/drafting state from an R12 header.
     #[cfg_attr(feature = "serde", serde(default))]
     pub legacy: Option<LegacyHeaderState>,
@@ -204,6 +245,9 @@ pub struct HeaderVariables {
     pub display_silhouette: bool,
     /// SPLFRAME - Display spline control polygon
     pub spline_frame: bool,
+    /// PELLIPSE - Create ellipses as polylines
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub create_ellipse_as_polyline: bool,
     /// DELOBJ - Delete source objects for regions/solids
     pub delete_objects: bool,
     /// SOLIDHIST - Record construction history for subsequently created solids
@@ -276,6 +320,9 @@ pub struct HeaderVariables {
     pub multiline_justification: i16,
     /// TEXTQLTY - Text quality for TrueType
     pub text_quality: i16,
+    /// UNITMODE - Unit display mode
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub unit_mode: i16,
     /// SORTENTS - Entity sort flags
     pub sort_entities: i16,
     /// INDEXCTL - Index control flags
@@ -543,8 +590,35 @@ pub struct HeaderVariables {
     pub dim_alt_tolerance_zero_suppression: i16,
     /// DIMALTTZ - Alternate tolerance zero suppression (tight)
     pub dim_alt_tolerance_zero_tight: i16,
-    /// DIMFIT/DIMATFIT - Fit options
+    /// DIMFIT - Obsolete dimension fit options
     pub dim_fit: i16,
+    /// DIMATFIT - Dimension text/arrow fit options
+    #[cfg_attr(feature = "serde", serde(default = "default_dim_text_arrow_fit"))]
+    pub dim_text_arrow_fit: i16,
+    /// DIMARCSYM - Arc length symbol position
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dim_arc_length_symbol_position: i16,
+    /// DIMUNIT - Obsolete dimension unit mode
+    #[cfg_attr(feature = "serde", serde(default = "default_dim_unit"))]
+    pub dim_unit: i16,
+    /// DIMFXLON - Fixed extension line length enabled
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dim_extension_line_length_fixed: bool,
+    /// DIMTXTDIRECTION - Dimension text direction
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dim_text_direction: i16,
+    /// DIMALTMZF - Alternate measurement zero factor
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dim_alt_mzf: f64,
+    /// DIMALTMZS - Alternate measurement zero suffix
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dim_alt_mzs: Option<String>,
+    /// DIMMZF - Primary measurement zero factor
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dim_mzf: f64,
+    /// DIMMZS - Primary measurement zero suffix
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dim_mzs: Option<String>,
     /// DIMUPT - User positioned text
     pub dim_user_positioned_text: bool,
     /// DIMPOST - Primary units suffix
@@ -586,6 +660,9 @@ pub struct HeaderVariables {
     // ==================== UCS Settings ====================
     /// UCSBASE - UCS base name
     pub ucs_base: String,
+    /// PUCSBASE - Paper space UCS base name
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_ucs_base_name: String,
     /// Model space UCS name
     pub model_space_ucs_name: String,
     /// Paper space UCS name  
@@ -596,12 +673,60 @@ pub struct HeaderVariables {
     pub model_space_ucs_x_axis: Vector3,
     /// Model space UCS Y axis
     pub model_space_ucs_y_axis: Vector3,
+    /// UCSNAME (MSPACE) - Model space UCS handle
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_space_ucs_handle: Handle,
+    /// UCSBASE (MSPACE) - Model space base UCS handle
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_space_ucs_base_handle: Handle,
+    /// UCSORGTOP - Model space orthographic top origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_space_orthographic_top_origin: Vector3,
+    /// UCSORGBOTTOM - Model space orthographic bottom origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_space_orthographic_bottom_origin: Vector3,
+    /// UCSORGLEFT - Model space orthographic left origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_space_orthographic_left_origin: Vector3,
+    /// UCSORGRIGHT - Model space orthographic right origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_space_orthographic_right_origin: Vector3,
+    /// UCSORGFRONT - Model space orthographic front origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_space_orthographic_front_origin: Vector3,
+    /// UCSORGBACK - Model space orthographic back origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_space_orthographic_back_origin: Vector3,
     /// Paper space UCS origin
     pub paper_space_ucs_origin: Vector3,
     /// Paper space UCS X axis
     pub paper_space_ucs_x_axis: Vector3,
     /// Paper space UCS Y axis
     pub paper_space_ucs_y_axis: Vector3,
+    /// UCSNAME (PSPACE) - Paper space UCS handle
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_ucs_handle: Handle,
+    /// UCSBASE (PSPACE) - Paper space base UCS handle
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_ucs_base_handle: Handle,
+    /// PUCSORGTOP - Paper space orthographic top origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_orthographic_top_origin: Vector3,
+    /// PUCSORGBOTTOM - Paper space orthographic bottom origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_orthographic_bottom_origin: Vector3,
+    /// PUCSORGLEFT - Paper space orthographic left origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_orthographic_left_origin: Vector3,
+    /// PUCSORGRIGHT - Paper space orthographic right origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_orthographic_right_origin: Vector3,
+    /// PUCSORGFRONT - Paper space orthographic front origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_orthographic_front_origin: Vector3,
+    /// PUCSORGBACK - Paper space orthographic back origin
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub paper_space_orthographic_back_origin: Vector3,
     /// UCSORTHOREF - UCS orthographic reference
     pub ucs_ortho_ref: Handle,
     /// UCSORTHOVIEW - UCS orthographic view type
@@ -628,18 +753,32 @@ pub struct HeaderVariables {
     pub current_material_handle: Handle,
     /// Dimension text style handle
     pub dim_text_style_handle: Handle,
+    /// DIMTXSTY - Dimension text style name
+    #[cfg_attr(feature = "serde", serde(default = "default_dim_text_style_name"))]
+    pub dim_text_style_name: String,
     /// Dimension linetype handle
     pub dim_linetype_handle: Handle,
+    /// DIMLTYPE - Dimension line linetype name
+    #[cfg_attr(feature = "serde", serde(default = "default_dim_linetype_name"))]
+    pub dim_linetype_name: String,
     /// Dimension linetype 1 handle
     pub dim_linetype1_handle: Handle,
+    /// DIMLTEX1 - First extension line linetype name
+    #[cfg_attr(feature = "serde", serde(default = "default_dim_linetype_name"))]
+    pub dim_linetype1_name: String,
     /// Dimension linetype 2 handle
     pub dim_linetype2_handle: Handle,
+    /// DIMLTEX2 - Second extension line linetype name
+    #[cfg_attr(feature = "serde", serde(default = "default_dim_linetype_name"))]
+    pub dim_linetype2_name: String,
     /// Dimension arrow block handle
     pub dim_arrow_block_handle: Handle,
     /// Dimension arrow block 1 handle
     pub dim_arrow_block1_handle: Handle,
     /// Dimension arrow block 2 handle
     pub dim_arrow_block2_handle: Handle,
+    /// Dimension leader arrow block handle
+    pub dim_leader_arrow_block_handle: Handle,
     /// DIMLWD - Dimension line weight
     pub dim_line_weight: i16,
     /// DIMLWE - Extension line weight
@@ -702,6 +841,14 @@ pub struct HeaderVariables {
     pub continuous_linetype_handle: Handle,
 
     // ==================== Date/Time ====================
+    /// Raw DWG date/time pairs retained from the header stream.
+    ///
+    /// The entries are `(day_or_days, milliseconds)` for creation date,
+    /// update date, total editing time, and user elapsed time respectively.
+    /// `None` means this document was not read from a DWG header (or the
+    /// source did not provide these values).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dwg_timestamps: Option<[(i32, i32); 4]>,
     /// Document creation time (Julian date)
     pub create_date_julian: f64,
     /// Document update time (Julian date)
@@ -750,6 +897,15 @@ pub struct HeaderVariables {
     pub current_table_style_name: String,
     /// CMLEADERSTYLE - Current multileader style name
     pub current_mleader_style_name: String,
+    /// TSTACKALIGN - Stacked text alignment
+    #[cfg_attr(feature = "serde", serde(default = "default_stacked_text_alignment"))]
+    pub stacked_text_alignment: i16,
+    /// TSTACKSIZE - Stacked text size percentage
+    #[cfg_attr(feature = "serde", serde(default = "default_stacked_text_size_percentage"))]
+    pub stacked_text_size_percentage: i16,
+    /// CSHADOW - Shadow mode
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub shadow_mode: u8,
 }
 
 impl HeaderVariables {
@@ -774,6 +930,10 @@ impl Default for HeaderVariables {
     fn default() -> Self {
         Self {
             legacy: None,
+            dxf_source_variables: None,
+            maintenance_version: 0,
+            source_handle_seed: None,
+            dwg_template_data: None,
             // Version-specific flags
             required_versions: 0,
 
@@ -796,6 +956,7 @@ impl Default for HeaderVariables {
             retain_xref_visibility: true,
             display_silhouette: true,
             spline_frame: false,
+            create_ellipse_as_polyline: false,
             delete_objects: true,
             record_solid_history: false,
             show_solid_history: 1,
@@ -834,6 +995,7 @@ impl Default for HeaderVariables {
             isolines: 4,
             multiline_justification: 0,
             text_quality: 50,
+            unit_mode: 0,
             sort_entities: 127,
             index_control: 0,
             hide_text: 1,
@@ -978,6 +1140,15 @@ impl Default for HeaderVariables {
             dim_alt_tolerance_zero_suppression: 0,
             dim_alt_tolerance_zero_tight: 0,
             dim_fit: 3,
+            dim_text_arrow_fit: 3,
+            dim_arc_length_symbol_position: 0,
+            dim_unit: 2,
+            dim_extension_line_length_fixed: false,
+            dim_text_direction: 0,
+            dim_alt_mzf: 0.0,
+            dim_alt_mzs: None,
+            dim_mzf: 0.0,
+            dim_mzs: None,
             dim_user_positioned_text: false,
             dim_post: String::new(),
             dim_alt_post: String::new(),
@@ -1002,14 +1173,31 @@ impl Default for HeaderVariables {
 
             // UCS settings
             ucs_base: String::new(),
+            paper_space_ucs_base_name: String::new(),
             model_space_ucs_name: String::new(),
             paper_space_ucs_name: String::new(),
             model_space_ucs_origin: Vector3::ZERO,
             model_space_ucs_x_axis: Vector3::new(1.0, 0.0, 0.0),
             model_space_ucs_y_axis: Vector3::new(0.0, 1.0, 0.0),
+            model_space_ucs_handle: Handle::NULL,
+            model_space_ucs_base_handle: Handle::NULL,
+            model_space_orthographic_top_origin: Vector3::ZERO,
+            model_space_orthographic_bottom_origin: Vector3::ZERO,
+            model_space_orthographic_left_origin: Vector3::ZERO,
+            model_space_orthographic_right_origin: Vector3::ZERO,
+            model_space_orthographic_front_origin: Vector3::ZERO,
+            model_space_orthographic_back_origin: Vector3::ZERO,
             paper_space_ucs_origin: Vector3::ZERO,
             paper_space_ucs_x_axis: Vector3::new(1.0, 0.0, 0.0),
             paper_space_ucs_y_axis: Vector3::new(0.0, 1.0, 0.0),
+            paper_space_ucs_handle: Handle::NULL,
+            paper_space_ucs_base_handle: Handle::NULL,
+            paper_space_orthographic_top_origin: Vector3::ZERO,
+            paper_space_orthographic_bottom_origin: Vector3::ZERO,
+            paper_space_orthographic_left_origin: Vector3::ZERO,
+            paper_space_orthographic_right_origin: Vector3::ZERO,
+            paper_space_orthographic_front_origin: Vector3::ZERO,
+            paper_space_orthographic_back_origin: Vector3::ZERO,
             ucs_ortho_ref: Handle::NULL,
             ucs_ortho_view: 0,
             paper_ucs_ortho_ref: Handle::NULL,
@@ -1024,12 +1212,17 @@ impl Default for HeaderVariables {
             current_multiline_style_handle: Handle::NULL,
             current_material_handle: Handle::NULL,
             dim_text_style_handle: Handle::NULL,
+            dim_text_style_name: String::from("Standard"),
             dim_linetype_handle: Handle::NULL,
+            dim_linetype_name: String::from("ByBlock"),
             dim_linetype1_handle: Handle::NULL,
+            dim_linetype1_name: String::from("ByBlock"),
             dim_linetype2_handle: Handle::NULL,
+            dim_linetype2_name: String::from("ByBlock"),
             dim_arrow_block_handle: Handle::NULL,
             dim_arrow_block1_handle: Handle::NULL,
             dim_arrow_block2_handle: Handle::NULL,
+            dim_leader_arrow_block_handle: Handle::NULL,
             dim_line_weight: -2,     // ByBlock
             dim_ext_line_weight: -2, // ByBlock
 
@@ -1065,6 +1258,7 @@ impl Default for HeaderVariables {
             continuous_linetype_handle: Handle::NULL,
 
             // Date/time
+            dwg_timestamps: None,
             create_date_julian: 0.0,
             update_date_julian: 0.0,
             universal_create_date_julian: 0.0,
@@ -1092,6 +1286,9 @@ impl Default for HeaderVariables {
             current_dimstyle_name: String::from("Standard"),
             current_table_style_name: String::from("Standard"),
             current_mleader_style_name: String::from("Standard"),
+            stacked_text_alignment: 1,
+            stacked_text_size_percentage: 70,
+            shadow_mode: 0,
         }
     }
 }
@@ -1147,7 +1344,8 @@ pub struct FieldDef {
 /// Document summary information (the DWG `SummaryInfo` section — the same
 /// properties AutoCAD's DWGPROPS dialog edits). Backs the Document-category
 /// dynamic-text fields (Author, Title, Subject, Keywords, Comments,
-/// HyperlinkBase, RevisionNumber) plus arbitrary custom properties.
+/// HyperlinkBase, RevisionNumber), the SummaryInfo timestamps, plus arbitrary
+/// custom properties.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct SummaryInfo {
@@ -1159,6 +1357,17 @@ pub struct SummaryInfo {
     pub last_saved_by: String,
     pub revision_number: String,
     pub hyperlink_base: String,
+    /// Document creation time as the raw DWG Julian date (day plus fraction).
+    ///
+    /// `None` means that no SummaryInfo date was present. The native model
+    /// keeps the format's value; compatibility projections may apply the
+    /// ACadSharp DateTime conversion separately.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub created_date_julian: Option<f64>,
+    /// Document modification time as the raw DWG Julian date (day plus
+    /// fraction).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub modified_date_julian: Option<f64>,
     /// Custom document properties as `(name, value)` pairs.
     pub custom_properties: Vec<(String, String)>,
 }
@@ -1272,6 +1481,16 @@ pub struct CadDocument {
     /// Document summary information (Author, Title, Subject, …) from the DWG
     /// SummaryInfo section. Backs the Document-category dynamic-text fields.
     pub summary_info: SummaryInfo,
+
+    /// Raw `(julian_day, milliseconds)` pairs for the SummaryInfo creation and
+    /// modification dates when this document was read from a DWG section.
+    ///
+    /// This source metadata distinguishes an encoded all-zero date from an
+    /// absent date in [`SummaryInfo`]. It is retained separately so the public
+    /// SummaryInfo value can continue to use `None` for an absent date while a
+    /// DWG read/write cycle preserves the original bytes.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dwg_summary_timestamps: Option<[(i32, i32); 2]>,
 
     /// Filesystem path the document was read from, when known (set by the DWG /
     /// DXF file readers). Backs the `Filename` / `FilePath` dynamic-text fields.
@@ -1532,6 +1751,7 @@ impl CadDocument {
             block_representations: HashMap::new(),
             fields: HashMap::new(),
             summary_info: SummaryInfo::default(),
+            dwg_summary_timestamps: None,
             source_path: None,
             dgn_ls_definitions: HashMap::new(),
             dgn_ls_components: HashMap::new(),

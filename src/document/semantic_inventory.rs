@@ -188,6 +188,7 @@ impl<'a> SemanticInventoryV1<'a> {
             block_representations: _,
             fields: _,
             summary_info,
+            dwg_summary_timestamps: _,
             source_path: _,
             dgn_ls_definitions: _,
             dgn_ls_components: _,

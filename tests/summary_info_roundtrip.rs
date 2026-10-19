@@ -15,6 +15,8 @@ fn document_with_properties(version: DxfVersion) -> CadDocument {
     info.last_saved_by = "Bauleitung".into();
     info.revision_number = "3".into();
     info.hyperlink_base = "https://example.com/plaene/".into();
+    info.created_date_julian = Some(2_460_000.125);
+    info.modified_date_julian = Some(2_460_001.875);
     info.custom_properties = vec![
         ("Plansatz".into(), "Ausf\u{fc}hrung".into()),
         ("H\u{f6}henbezug".into(), "m NHN".into()),
@@ -38,6 +40,10 @@ fn summary_info_round_trips_through_dwg() {
             .read()
             .expect("DWG read");
         assert_eq!(read.summary_info, document.summary_info, "{version:?}");
+        assert_eq!(
+            read.dwg_summary_timestamps,
+            Some([(2_460_000, 10_800_000), (2_460_001, 75_600_000)])
+        );
     }
 }
 
@@ -49,4 +55,5 @@ fn empty_summary_info_stays_empty() {
         .read()
         .expect("DWG read");
     assert_eq!(read.summary_info, document.summary_info);
+    assert_eq!(read.dwg_summary_timestamps, Some([(0, 0), (0, 0)]));
 }

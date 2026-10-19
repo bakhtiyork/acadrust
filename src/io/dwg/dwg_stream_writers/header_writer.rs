@@ -318,6 +318,54 @@ fn julian_to_day_ms(julian: f64) -> (i32, i32) {
     (day, ms)
 }
 
+#[inline]
+fn day_ms_to_fractional_value(day: i32, milliseconds: i32) -> f64 {
+    day as f64 + milliseconds as f64 / 86_400_000.0
+}
+
+/// Keep an unusual source pair when the public date value still represents it.
+///
+/// DWG permits values that the `f64` date projection cannot round-trip through
+/// [`julian_to_day_ms`], such as negative millisecond components and values at
+/// the ends of the `i32` range. The source pair is therefore authoritative
+/// while the projected value is unchanged. An edited universal value wins;
+/// when it is absent, the local value is the fallback.
+fn julian_to_day_ms_with_source(
+    universal: f64,
+    local: f64,
+    source: Option<(i32, i32)>,
+) -> (i32, i32) {
+    let source_value =
+        source.map(|(day, milliseconds)| day_ms_to_fractional_value(day, milliseconds));
+
+    if let Some(source_value) = source_value {
+        if universal != 0.0 && universal == source_value {
+            if local == source_value {
+                return source.expect("source value was present");
+            }
+            return julian_to_day_ms(local);
+        }
+
+        let value = if universal != 0.0 { universal } else { local };
+        if value == source_value {
+            return source.expect("source value was present");
+        }
+        return julian_to_day_ms(value);
+    }
+
+    julian_to_day_ms(if universal != 0.0 { universal } else { local })
+}
+
+/// Preserve a raw duration pair until its projected native value is edited.
+fn timespan_to_day_ms_with_source(value: f64, source: Option<(i32, i32)>) -> (i32, i32) {
+    if let Some((day, milliseconds)) = source {
+        if value == day_ms_to_fractional_value(day, milliseconds) {
+            return (day, milliseconds);
+        }
+    }
+    timespan_to_day_ms(value)
+}
+
 fn timespan_to_day_ms(days_fraction: f64) -> (i32, i32) {
     let days = days_fraction as i32;
     let fraction = days_fraction - days as f64;
@@ -410,7 +458,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     }
 
     w.write_bit(h.display_silhouette);
-    w.write_bit(false); // PELLIPSE (CreateEllipseAsPolyline) — default false
+    w.write_bit(h.create_ellipse_as_polyline); // PELLIPSE
     w.write_bit_short(h.proxy_graphics);
 
     if r13_14_only(v) {
@@ -461,7 +509,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     w.write_bit_short(h.spline_type);
     w.write_bit_short(h.shade_edge);
     w.write_bit_short(h.shade_diffuse);
-    w.write_bit_short(0); // UNITMODE — default 0
+    w.write_bit_short(h.unit_mode); // UNITMODE
     w.write_bit_short(h.max_active_viewports);
     w.write_bit_short(h.isolines);
     w.write_bit_short(h.multiline_justification);
@@ -494,9 +542,17 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
 
     // ── Date/time (Common) ──
     // DWG stores universal time.
-    let (cd, cms) = julian_to_day_ms(h.universal_create_or_local());
+    let (cd, cms) = julian_to_day_ms_with_source(
+        h.universal_create_date_julian,
+        h.create_date_julian,
+        h.dwg_timestamps.map(|timestamps| timestamps[0]),
+    );
     w.write_datetime(cd, cms);
-    let (ud, ums) = julian_to_day_ms(h.universal_update_or_local());
+    let (ud, ums) = julian_to_day_ms_with_source(
+        h.universal_update_date_julian,
+        h.update_date_julian,
+        h.dwg_timestamps.map(|timestamps| timestamps[1]),
+    );
     w.write_datetime(ud, ums);
 
     if r2004_plus(v) {
@@ -505,9 +561,15 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
         w.write_bit_long(0); // unknown
     }
 
-    let (ted, tems) = timespan_to_day_ms(h.total_editing_time);
+    let (ted, tems) = timespan_to_day_ms_with_source(
+        h.total_editing_time,
+        h.dwg_timestamps.map(|timestamps| timestamps[2]),
+    );
     w.write_timespan(ted, tems);
-    let (ued, uems) = timespan_to_day_ms(h.user_elapsed_time);
+    let (ued, uems) = timespan_to_day_ms_with_source(
+        h.user_elapsed_time,
+        h.dwg_timestamps.map(|timestamps| timestamps[3]),
+    );
     w.write_timespan(ued, uems);
 
     // ── Current entity color ──
@@ -547,22 +609,22 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     w.write_3bit_double(h.paper_space_ucs_y_axis);
 
     // UCSNAME (PSPACE)
-    w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL);
+    w.write_handle_ref(DwgReferenceType::HardPointer, h.paper_space_ucs_handle);
 
     if r2000_plus(v) {
         // PUCSORTHOREF
         w.write_handle_ref(DwgReferenceType::HardPointer, h.paper_ucs_ortho_ref);
         w.write_bit_short(h.paper_ucs_ortho_view);
         // PUCSBASE
-        w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL);
+        w.write_handle_ref(DwgReferenceType::HardPointer, h.paper_space_ucs_base_handle);
 
-        // Paper space orthographic origins (6 × 3BD) — default zeros
-        w.write_3bit_double(Vector3::ZERO); // PUCSORGTOP
-        w.write_3bit_double(Vector3::ZERO); // PUCSORGBOTTOM
-        w.write_3bit_double(Vector3::ZERO); // PUCSORGLEFT
-        w.write_3bit_double(Vector3::ZERO); // PUCSORGRIGHT
-        w.write_3bit_double(Vector3::ZERO); // PUCSORGFRONT
-        w.write_3bit_double(Vector3::ZERO); // PUCSORGBACK
+        // Paper space orthographic origins (6 × 3BD)
+        w.write_3bit_double(h.paper_space_orthographic_top_origin);
+        w.write_3bit_double(h.paper_space_orthographic_bottom_origin);
+        w.write_3bit_double(h.paper_space_orthographic_left_origin);
+        w.write_3bit_double(h.paper_space_orthographic_right_origin);
+        w.write_3bit_double(h.paper_space_orthographic_front_origin);
+        w.write_3bit_double(h.paper_space_orthographic_back_origin);
     }
 
     // ── Model space extents/limits/UCS ──
@@ -577,22 +639,22 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     w.write_3bit_double(h.model_space_ucs_y_axis);
 
     // UCSNAME (MSPACE)
-    w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL);
+    w.write_handle_ref(DwgReferenceType::HardPointer, h.model_space_ucs_handle);
 
     if r2000_plus(v) {
         // UCSORTHOREF
         w.write_handle_ref(DwgReferenceType::HardPointer, h.ucs_ortho_ref);
         w.write_bit_short(h.ucs_ortho_view);
         // UCSBASE
-        w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL);
+        w.write_handle_ref(DwgReferenceType::HardPointer, h.model_space_ucs_base_handle);
 
-        // Model space orthographic origins (6 × 3BD) — default zeros
-        w.write_3bit_double(Vector3::ZERO); // UCSORGTOP
-        w.write_3bit_double(Vector3::ZERO); // UCSORGBOTTOM
-        w.write_3bit_double(Vector3::ZERO); // UCSORGLEFT
-        w.write_3bit_double(Vector3::ZERO); // UCSORGRIGHT
-        w.write_3bit_double(Vector3::ZERO); // UCSORGFRONT
-        w.write_3bit_double(Vector3::ZERO); // UCSORGBACK
+        // Model space orthographic origins (6 × 3BD)
+        w.write_3bit_double(h.model_space_orthographic_top_origin);
+        w.write_3bit_double(h.model_space_orthographic_bottom_origin);
+        w.write_3bit_double(h.model_space_orthographic_left_origin);
+        w.write_3bit_double(h.model_space_orthographic_right_origin);
+        w.write_3bit_double(h.model_space_orthographic_front_origin);
+        w.write_3bit_double(h.model_space_orthographic_back_origin);
 
         // DIMPOST, DIMAPOST
         w.write_variable_text(&h.dim_post);
@@ -624,7 +686,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
         w.write_byte(h.dim_alt_tolerance_zero_suppression as u8);
         w.write_byte(h.dim_alt_tolerance_zero_tight as u8);
         w.write_byte(h.dim_text_above as u8);
-        w.write_bit_short(0); // DIMUNIT
+        w.write_bit_short(h.dim_unit);
         w.write_bit_short(h.dim_angular_decimal_places);
         w.write_bit_short(h.dim_decimal_places);
         w.write_bit_short(h.dim_tolerance_decimal_places);
@@ -669,7 +731,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     }
 
     if r2007_plus(v) {
-        w.write_bit_short(0); // DIMARCSYM
+        w.write_bit_short(h.dim_arc_length_symbol_position);
     }
 
     // ── Dimension sizes (Common) ──
@@ -727,30 +789,34 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
         w.write_bit_short(h.dim_alt_tolerance_zero_suppression);
         w.write_bit_short(h.dim_alt_tolerance_zero_tight);
         w.write_bit(h.dim_user_positioned_text);
-        w.write_bit_short(h.dim_fit);
+        w.write_bit_short(h.dim_text_arrow_fit);
     }
 
     // R2007+: DIMFXLON
     if r2007_plus(v) {
-        w.write_bit(false); // DimensionIsExtensionLineLengthFixed
+        w.write_bit(h.dim_extension_line_length_fixed);
     }
 
     // R2010+: extra dimension fields
     if r2010_plus(v) {
-        w.write_bit(false); // DIMTXTDIRECTION
-        w.write_bit_double(0.0); // DIMALTMZF
-        w.write_variable_text(""); // DIMALTMZS
-        w.write_bit_double(0.0); // DIMMZF
-        w.write_variable_text(""); // DIMMZS
+        w.write_bit(h.dim_text_direction != 0);
+        w.write_bit_double(h.dim_alt_mzf);
+        w.write_variable_text(h.dim_alt_mzs.as_deref().unwrap_or(""));
+        w.write_bit_double(h.dim_mzf);
+        w.write_variable_text(h.dim_mzs.as_deref().unwrap_or(""));
     }
 
     // R2000+ dimension handles
     if r2000_plus(v) {
         w.write_handle_ref(DwgReferenceType::HardPointer, h.dim_text_style_handle);
-        w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // DIMLDRBLK
-        w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // DIMBLK
-        w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // DIMBLK1
-        w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // DIMBLK2
+        w.write_handle_ref(
+            DwgReferenceType::HardPointer,
+            h.dim_leader_arrow_block_handle,
+        ); // DIMLDRBLK
+        w.write_handle_ref(DwgReferenceType::HardPointer, h.dim_arrow_block_handle); // DIMBLK
+        w.write_handle_ref(DwgReferenceType::HardPointer, h.dim_arrow_block1_handle); // DIMBLK1
+        w.write_handle_ref(DwgReferenceType::HardPointer, h.dim_arrow_block2_handle);
+        // DIMBLK2
     }
 
     // R2007+ dimension linetype handles
@@ -789,8 +855,8 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
 
     // R2000+ dictionaries and flags
     if r2000_plus(v) {
-        w.write_bit_short(1); // TSTACKALIGN default
-        w.write_bit_short(70); // TSTACKSIZE default
+        w.write_bit_short(h.stacked_text_alignment);
+        w.write_bit_short(h.stacked_text_size_percentage);
 
         w.write_variable_text(&h.hyperlink_base);
         w.write_variable_text(&h.stylesheet);
@@ -920,7 +986,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
         w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // INTERFEREVPVS
         w.write_handle_ref(DwgReferenceType::HardPointer, Handle::NULL); // DRAGVS
 
-        w.write_byte(0); // CSHADOW
+        w.write_byte(h.shadow_mode); // CSHADOW
         w.write_bit_double(h.shadow_plane_location);
     }
 
@@ -1040,5 +1106,43 @@ mod tests {
         let (days, ms) = timespan_to_day_ms(1.5);
         assert_eq!(days, 1);
         assert_eq!(ms, 43_200_000);
+    }
+
+    #[test]
+    fn test_raw_timestamp_pairs_are_preserved_until_edited() {
+        let zero = (0, 0);
+        let negative = (-7, -123);
+        let oversized = (i32::MAX, i32::MAX);
+
+        for source in [zero, negative, oversized] {
+            let value = day_ms_to_fractional_value(source.0, source.1);
+            assert_eq!(
+                julian_to_day_ms_with_source(value, value, Some(source)),
+                source
+            );
+            assert_eq!(timespan_to_day_ms_with_source(value, Some(source)), source);
+        }
+
+        let source = (2_451_544, 43_200_000);
+        let source_value = day_ms_to_fractional_value(source.0, source.1);
+        let edited_universal = source_value + 1.25;
+        assert_eq!(
+            julian_to_day_ms_with_source(edited_universal, source_value, Some(source)),
+            julian_to_day_ms(edited_universal)
+        );
+        assert_eq!(
+            julian_to_day_ms_with_source(0.0, edited_universal, Some(source)),
+            julian_to_day_ms(edited_universal)
+        );
+        assert_eq!(
+            julian_to_day_ms_with_source(source_value, edited_universal, Some(source)),
+            julian_to_day_ms(edited_universal)
+        );
+
+        let edited_duration = source_value + 0.5;
+        assert_eq!(
+            timespan_to_day_ms_with_source(edited_duration, Some(source)),
+            timespan_to_day_ms(edited_duration)
+        );
     }
 }
