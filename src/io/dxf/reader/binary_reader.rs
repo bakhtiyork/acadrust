@@ -109,6 +109,11 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
 
     /// Read a null-terminated string from the binary stream, reusing str_buf.
     fn read_null_terminated_string(&mut self) -> Result<String> {
+        let raw = self.read_null_terminated_string_raw()?;
+        Ok(crate::io::dxf::code_page::decode_legacy_escapes(&raw))
+    }
+
+    fn read_null_terminated_string_raw(&mut self) -> Result<String> {
         self.str_buf.clear();
         self.reader.read_until(0, &mut self.str_buf)?;
         // read_until includes the delimiter in the buffer
@@ -125,7 +130,7 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
             }
         };
         self.str_buf.clear(); // keep the allocation for reuse
-        Ok(crate::io::dxf::code_page::decode_legacy_escapes(&s))
+        Ok(s)
     }
 
     /// Read a code/value pair from the binary stream for a given group code.
@@ -137,6 +142,19 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
         let value_type = GroupCodeValueType::from_raw_code(code);
 
         let pair = match value_type {
+            GroupCodeValueType::String
+                if matches!(code, 1 | 3) && self.context.record_type.as_deref() == Some("MTEXT") =>
+            {
+                let raw = self.read_null_terminated_string_raw()?;
+                if !crate::io::dxf::code_page::has_legacy_escape(&raw) {
+                    return Ok(Some(DxfCodePair::new(code, raw)));
+                }
+                let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&raw);
+                let changed = decoded != raw;
+                let mut pair = DxfCodePair::new(code, decoded);
+                pair.raw_value_string = changed.then_some(raw);
+                pair
+            }
             GroupCodeValueType::String => {
                 let s = self.read_null_terminated_string()?;
                 DxfCodePair::new(code, s)

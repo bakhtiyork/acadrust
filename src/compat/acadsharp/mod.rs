@@ -12,6 +12,9 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 mod entities;
+mod dimension_geometry;
+mod mtext;
+mod mtext_plain_text;
 mod header;
 mod new_document;
 mod objects;

@@ -471,6 +471,14 @@ impl DwgMergedReader {
         }
     }
 
+    /// Read MTEXT from its version-specific stream, retaining changed source spelling.
+    pub(crate) fn read_mtext_value(&mut self) -> (String, Option<String>) {
+        match &mut self.text {
+            Some(reader) => reader.read_mtext_value(),
+            None => self.main.read_mtext_value(),
+        }
+    }
+
     /// Bits remaining after the currently decoded fields in the separate
     /// R2007+ text stream.
     pub fn text_remaining_bits(&self) -> i64 {

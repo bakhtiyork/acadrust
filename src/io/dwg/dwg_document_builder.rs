@@ -407,6 +407,7 @@ fn mtext_from_data(data: entities::MTextData, common: EntityCommon, maps: &Handl
     let mut e = MText::new();
     e.common = common;
     e.value = data.value;
+    e.source_value = data.source_value;
     e.insertion_point = data.insertion_point;
     e.height = data.height;
     e.rectangle_width = data.rectangle_width;

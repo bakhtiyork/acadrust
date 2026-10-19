@@ -504,5 +504,5 @@ fn mtext_height_and_alignment_use_the_retained_fields() {
     assert_eq!(p["VerticalHeight"], 7.0);
     assert_eq!(p["AlignmentPoint"], json!([0.0, 2.0, 0.0]));
     assert_eq!(p["InsertPoint"], json!([4.0, 5.0, 6.0]));
-    assert_eq!(p["RectangleHeight"], "!unmapped");
+    assert_eq!(p["RectangleHeight"], 0.0);
 }

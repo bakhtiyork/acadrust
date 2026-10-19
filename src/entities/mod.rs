@@ -142,7 +142,7 @@ pub use table::{
     TableRow, ValueUnitType,
 };
 pub use text::{Text, TextHorizontalAlignment, TextVerticalAlignment};
-pub use tolerance::{gdt_symbols, Tolerance};
+pub use tolerance::{gdt_symbols, Tolerance, ToleranceDxfSource};
 pub use underlay::{
     DgnUnderlay, DgnUnderlayDefinition, DwfUnderlay, DwfUnderlayDefinition, PdfUnderlay,
     PdfUnderlayDefinition, Underlay, UnderlayDefinition, UnderlayDisplayFlags, UnderlayType,
