@@ -1290,6 +1290,7 @@ impl DwgDocumentBuilder {
                 ParsedEntry::Layer(h, data) => {
                     let mut layer = crate::tables::Layer::new(&data.name);
                     layer.handle = Handle::from(*h);
+                    layer.source_flags = data.source_flags;
                     layer.flags.frozen = data.frozen;
                     layer.flags.off = data.off;
                     layer.flags.frozen_in_new_viewport = data.frozen_in_new_vp;
@@ -1420,12 +1421,14 @@ impl DwgDocumentBuilder {
                 ParsedEntry::Style(h, data) => {
                     let mut style = crate::tables::TextStyle::new(&data.name);
                     style.handle = Handle::from(*h);
+                    style.source_flags = data.source_flags;
                     style.height = data.height;
                     style.width_factor = data.width_factor;
                     style.oblique_angle = data.oblique_angle;
                     style.last_height = data.last_height;
                     style.font_file = data.font_file.clone();
                     style.big_font_file = data.big_font_file.clone();
+                    style.big_font_file_present = true;
                     style.is_shape_file = data.is_shape_file;
                     style.is_vertical = data.is_vertical;
                     style.flags.backward = (data.generation & 2) != 0;
@@ -1445,8 +1448,11 @@ impl DwgDocumentBuilder {
                 ParsedEntry::Ltype(h, data) => {
                     let mut lt = crate::tables::LineType::new(&data.name);
                     lt.handle = Handle::from(*h);
+                    lt.source_flags = data.source_flags;
                     lt.description = data.description.clone();
+                    lt.description_present = true;
                     lt.pattern_length = data.pattern_length;
+                    lt.alignment = data.alignment as char;
                     lt.xref_dependent = data.xref_dependent;
                     lt.xref_block_record_handle = Handle::from(data.xref_handle);
                     lt.elements = data
@@ -1748,6 +1754,7 @@ impl DwgDocumentBuilder {
                     }
                     let mut app = crate::tables::AppId::new(&data.name);
                     app.handle = Handle::from(*h);
+                    app.source_flags = data.source_flags;
                     let _ = document.app_ids.remove(&data.name);
                     let _ = document.app_ids.add(app);
                 }

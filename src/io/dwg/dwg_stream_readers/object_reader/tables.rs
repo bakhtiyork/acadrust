@@ -70,6 +70,8 @@ pub struct BlockControlData {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LayerData {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_flags: i16,
     pub name: String,
     pub frozen: bool,
     pub off: bool,
@@ -92,6 +94,8 @@ pub struct LayerData {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TextStyleData {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_flags: i16,
     pub name: String,
     pub is_shape_file: bool,
     pub is_vertical: bool,
@@ -110,6 +114,8 @@ pub struct TextStyleData {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LinetypeData {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_flags: i16,
     pub name: String,
     pub description: String,
     pub pattern_length: f64,
@@ -264,6 +270,8 @@ pub struct VPortData {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AppIdData {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_flags: i16,
     pub name: String,
     pub unknown_byte: u8,
     pub xref_handle: u64,
@@ -513,7 +521,11 @@ pub fn read_layer(
     let name = reader.read_variable_text();
 
     // Xref-dependant bits (version-dependent encoding)
-    let xref_dependent = read_xref_dependant_bits(reader, version);
+    let xref = read_xref_table_flags(reader, version);
+    let source_flags = (i16::from(xref.reference) << 6)
+        | (i16::from(xref.resolved) << 5)
+        | (i16::from(xref.dependent) << 4);
+    let xref_dependent = xref.dependent;
 
     let frozen;
     let off;
@@ -522,7 +534,7 @@ pub fn read_layer(
     // R13/R14 records carry no plot flag (it arrived with R2000), so a layer
     // plots unless the record says otherwise — as a new layer and DXF do.
     let mut plottable = true;
-    let mut line_weight: i16 = 0;
+    let mut line_weight: i16 = -3;
 
     if version.r2000_plus() {
         let values = reader.read_bit_short();
@@ -570,6 +582,7 @@ pub fn read_layer(
     };
 
     LayerData {
+        source_flags,
         name,
         frozen,
         off,
@@ -592,7 +605,11 @@ pub fn read_layer(
 /// Read text STYLE table entry data.
 pub fn read_text_style(reader: &mut DwgMergedReader, version: DwgVersion) -> TextStyleData {
     let name = reader.read_variable_text();
-    let xref_dependent = read_xref_dependant_bits(reader, version);
+    let xref = read_xref_table_flags(reader, version);
+    let source_flags = (i16::from(xref.reference) << 6)
+        | (i16::from(xref.resolved) << 5)
+        | (i16::from(xref.dependent) << 4);
+    let xref_dependent = xref.dependent;
 
     let is_shape_file = reader.read_bit();
     let is_vertical = reader.read_bit();
@@ -607,6 +624,7 @@ pub fn read_text_style(reader: &mut DwgMergedReader, version: DwgVersion) -> Tex
     let xref_handle = reader.read_handle();
 
     TextStyleData {
+        source_flags,
         name,
         is_shape_file,
         is_vertical,
@@ -671,7 +689,11 @@ fn extract_text_strings(
 /// Read LTYPE table entry data.
 pub fn read_linetype(reader: &mut DwgMergedReader, version: DwgVersion) -> LinetypeData {
     let name = reader.read_variable_text();
-    let xref_dependent = read_xref_dependant_bits(reader, version);
+    let xref = read_xref_table_flags(reader, version);
+    let source_flags = (i16::from(xref.reference) << 6)
+        | (i16::from(xref.resolved) << 5)
+        | (i16::from(xref.dependent) << 4);
+    let xref_dependent = xref.dependent;
 
     let description = reader.read_variable_text();
     let pattern_length = reader.read_bit_double();
@@ -733,6 +755,7 @@ pub fn read_linetype(reader: &mut DwgMergedReader, version: DwgVersion) -> Linet
     }
 
     LinetypeData {
+        source_flags,
         name,
         description,
         pattern_length,
@@ -1088,12 +1111,16 @@ pub fn read_vport(reader: &mut DwgMergedReader, version: DwgVersion) -> VPortDat
 /// Read APPID table entry data.
 pub fn read_appid(reader: &mut DwgMergedReader, version: DwgVersion) -> AppIdData {
     let name = reader.read_variable_text();
-    read_xref_dependant_bits(reader, version);
+    let xref = read_xref_table_flags(reader, version);
+    let source_flags = (i16::from(xref.reference) << 6)
+        | (i16::from(xref.resolved) << 5)
+        | (i16::from(xref.dependent) << 4);
 
     let unknown_byte = reader.read_byte();
     let xref_handle = reader.read_handle();
 
     AppIdData {
+        source_flags,
         name,
         unknown_byte,
         xref_handle,
@@ -1662,6 +1689,39 @@ mod tests {
         assert!(!layer.off);
         assert!(layer.plottable);
         assert_eq!(layer.linetype_handle, 0x30);
+    }
+
+    #[test]
+    fn table_symbol_flags_and_legacy_layer_weight_are_retained() {
+        let dwg = DwgVersion::AC12;
+        let dxf = DxfVersion::AC1014;
+        let mut reader = make_reader(dwg, dxf, |w| {
+            w.write_variable_text("LegacyLayer");
+            w.write_bit(true); // referenced
+            w.write_bit_short(256); // resolved
+            w.write_bit(true); // dependent
+            w.write_bit(false); // frozen
+            w.write_bit(false); // off
+            w.write_bit(false); // frozen in new viewports
+            w.write_bit(false); // locked
+            w.write_cm_color(&Color::from_index(7));
+            w.write_handle(DwgReferenceType::HardPointer, 0);
+            w.write_handle(DwgReferenceType::HardPointer, 0x30);
+        });
+        let layer = read_layer(&mut reader, dwg, dxf);
+        assert_eq!(layer.source_flags, 112);
+        assert_eq!(layer.line_weight, -3); // Absent pre-R2000, not explicit 0 mm.
+        assert!(layer.xref_dependent);
+
+        let mut reader = make_reader(dwg, dxf, |w| {
+            w.write_variable_text("CustomApp");
+            w.write_bit(true);
+            w.write_bit_short(0);
+            w.write_bit(true);
+            w.write_byte(0);
+            w.write_handle(DwgReferenceType::HardPointer, 0);
+        });
+        assert_eq!(read_appid(&mut reader, dwg).source_flags, 80);
     }
 
     #[test]

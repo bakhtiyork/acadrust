@@ -5,7 +5,7 @@ use crate::entities::ViewportRenderMode;
 use crate::types::{Color, Handle, Vector3};
 
 /// A view table entry
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct View {
     /// Unique handle
@@ -87,9 +87,31 @@ pub struct View {
     pub named_ucs_handle: Handle,
     #[cfg_attr(feature = "serde", serde(default))]
     pub base_ucs_handle: Handle,
+    /// DXF fields observed while reading this entry.  This is compatibility
+    /// provenance only: the native model keeps its constructor defaults, while
+    /// the ACadSharp view can distinguish an omitted code from an explicit
+    /// zero value.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub source_field_mask: u16,
 }
 
 impl View {
+    /// Source group 71 (VIEWMODE) was present in a DXF record.
+    pub(crate) const SOURCE_VIEW_MODE: u16 = 1 << 0;
+    /// UCS X-axis X coordinate (group 111) was present.
+    pub(crate) const SOURCE_UCS_X_AXIS_X: u16 = 1 << 1;
+    /// UCS X-axis Y coordinate (group 121) was present.
+    pub(crate) const SOURCE_UCS_X_AXIS_Y: u16 = 1 << 2;
+    /// UCS X-axis Z coordinate (group 131) was present.
+    pub(crate) const SOURCE_UCS_X_AXIS_Z: u16 = 1 << 3;
+    /// UCS Y-axis X coordinate (group 112) was present.
+    pub(crate) const SOURCE_UCS_Y_AXIS_X: u16 = 1 << 4;
+    /// UCS Y-axis Y coordinate (group 122) was present.
+    pub(crate) const SOURCE_UCS_Y_AXIS_Y: u16 = 1 << 5;
+    /// UCS Y-axis Z coordinate (group 132) was present.
+    pub(crate) const SOURCE_UCS_Y_AXIS_Z: u16 = 1 << 6;
+
     /// Create a new view
     pub fn new(name: impl Into<String>) -> Self {
         View {
@@ -132,7 +154,55 @@ impl View {
             sun_handle: Handle::NULL,
             named_ucs_handle: Handle::NULL,
             base_ucs_handle: Handle::NULL,
+            source_field_mask: 0,
         }
+    }
+}
+
+// Source-presence metadata describes how a record was read and is not part of
+// the native drawing value. Keep equality stable for callers comparing a
+// native entry with a cloned/read entry.
+impl PartialEq for View {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.name == other.name
+            && self.center == other.center
+            && self.height == other.height
+            && self.width == other.width
+            && self.direction == other.direction
+            && self.target == other.target
+            && self.lens_length == other.lens_length
+            && self.front_clip == other.front_clip
+            && self.back_clip == other.back_clip
+            && self.twist_angle == other.twist_angle
+            && self.perspective == other.perspective
+            && self.front_clipping == other.front_clipping
+            && self.back_clipping == other.back_clipping
+            && self.front_clip_at_eye == other.front_clip_at_eye
+            && self.render_mode == other.render_mode
+            && self.use_default_lights == other.use_default_lights
+            && self.default_lighting_type == other.default_lighting_type
+            && self.brightness == other.brightness
+            && self.contrast == other.contrast
+            && self.ambient_color == other.ambient_color
+            && self.paper_space == other.paper_space
+            && self.ucs_associated == other.ucs_associated
+            && self.ucs_origin == other.ucs_origin
+            && self.ucs_x_axis == other.ucs_x_axis
+            && self.ucs_y_axis == other.ucs_y_axis
+            && self.ucs_elevation == other.ucs_elevation
+            && self.ucs_ortho_type == other.ucs_ortho_type
+            && self.camera_plottable == other.camera_plottable
+            && self.xref_reference == other.xref_reference
+            && self.xref_resolved == other.xref_resolved
+            && self.xref_dependent == other.xref_dependent
+            && self.xref_handle == other.xref_handle
+            && self.background_handle == other.background_handle
+            && self.live_section_handle == other.live_section_handle
+            && self.visual_style_handle == other.visual_style_handle
+            && self.sun_handle == other.sun_handle
+            && self.named_ucs_handle == other.named_ucs_handle
+            && self.base_ucs_handle == other.base_ucs_handle
     }
 }
 

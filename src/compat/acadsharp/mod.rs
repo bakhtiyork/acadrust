@@ -23,6 +23,8 @@ mod registration;
 mod registration_order;
 mod palette;
 mod tables;
+mod table_dimstyle;
+mod table_viewports;
 mod type_names;
 
 pub use new_document::new_document;

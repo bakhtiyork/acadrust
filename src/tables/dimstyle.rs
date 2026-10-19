@@ -4,9 +4,24 @@ use super::TableEntry;
 use crate::types::{Color, Handle};
 
 /// A dimension style table entry (analogous to the reference DimensionStyle)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimStyle {
+    /// Group codes present in the source DXF record.
+    ///
+    /// The native reader starts with format defaults, while ACadSharp starts
+    /// with its object defaults and only changes values that occur in the
+    /// record.  Keeping this small source mask lets the compatibility view
+    /// reproduce that distinction without changing the native table value.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dxf_present_codes: Option<[u64; 6]>,
+    /// Last DXF unit-format group encountered (270 or 277).
+    ///
+    /// ACadSharp assigns both groups to `LinearUnitFormat` as they are read,
+    /// so their source order matters when a record contains both.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dxf_last_linear_unit_code: Option<u16>,
+
     /// Unique handle
     pub handle: Handle,
     /// Style name
@@ -231,10 +246,115 @@ pub struct DimStyle {
     pub annotative: bool,
 }
 
+// Source-presence metadata describes how a record was read and is not part of
+// the drawing value.  Keep equality stable for callers comparing a native
+// style with a cloned/read style.
+impl PartialEq for DimStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.name == other.name
+            && self.xref_reference == other.xref_reference
+            && self.xref_resolved == other.xref_resolved
+            && self.xref_dependent == other.xref_dependent
+            && self.xref_handle == other.xref_handle
+            && self.dimclrd == other.dimclrd
+            && self.dimclrd_true_color == other.dimclrd_true_color
+            && self.dimdle == other.dimdle
+            && self.dimdli == other.dimdli
+            && self.dimgap == other.dimgap
+            && self.dimlwd == other.dimlwd
+            && self.dimsd1 == other.dimsd1
+            && self.dimsd2 == other.dimsd2
+            && self.dimclre == other.dimclre
+            && self.dimclre_true_color == other.dimclre_true_color
+            && self.dimexe == other.dimexe
+            && self.dimexo == other.dimexo
+            && self.dimlwe == other.dimlwe
+            && self.dimse1 == other.dimse1
+            && self.dimse2 == other.dimse2
+            && self.dimfxl == other.dimfxl
+            && self.dimfxlon == other.dimfxlon
+            && self.dimasz == other.dimasz
+            && self.dimblk == other.dimblk
+            && self.dimblk1 == other.dimblk1
+            && self.dimblk2 == other.dimblk2
+            && self.dimldrblk == other.dimldrblk
+            && self.dimblk_name == other.dimblk_name
+            && self.dimblk1_name == other.dimblk1_name
+            && self.dimblk2_name == other.dimblk2_name
+            && self.dimsah == other.dimsah
+            && self.dimcen == other.dimcen
+            && self.dimtsz == other.dimtsz
+            && self.dimclrt == other.dimclrt
+            && self.dimclrt_true_color == other.dimclrt_true_color
+            && self.dimtxt == other.dimtxt
+            && self.dimjust == other.dimjust
+            && self.dimtad == other.dimtad
+            && self.dimtvp == other.dimtvp
+            && self.dimtih == other.dimtih
+            && self.dimtoh == other.dimtoh
+            && self.dimtix == other.dimtix
+            && self.dimsoxd == other.dimsoxd
+            && self.dimtfill == other.dimtfill
+            && self.dimtfillclr == other.dimtfillclr
+            && self.dimtfillclr_true_color == other.dimtfillclr_true_color
+            && self.dimtmove == other.dimtmove
+            && self.dimtxtdirection == other.dimtxtdirection
+            && self.dimaltmzf == other.dimaltmzf
+            && self.dimaltmzs == other.dimaltmzs
+            && self.dimmzf == other.dimmzf
+            && self.dimmzs == other.dimmzs
+            && self.dimtxsty_handle == other.dimtxsty_handle
+            && self.dimtxsty == other.dimtxsty
+            && self.dimscale == other.dimscale
+            && self.dimlfac == other.dimlfac
+            && self.dimlunit == other.dimlunit
+            && self.dimdec == other.dimdec
+            && self.dimrnd == other.dimrnd
+            && self.dimdsep == other.dimdsep
+            && self.dimzin == other.dimzin
+            && self.dimaunit == other.dimaunit
+            && self.dimadec == other.dimadec
+            && self.dimazin == other.dimazin
+            && self.dimalt == other.dimalt
+            && self.dimaltf == other.dimaltf
+            && self.dimaltd == other.dimaltd
+            && self.dimaltu == other.dimaltu
+            && self.dimalttd == other.dimalttd
+            && self.dimaltrnd == other.dimaltrnd
+            && self.dimapost == other.dimapost
+            && self.dimaltz == other.dimaltz
+            && self.dimalttz == other.dimalttz
+            && self.dimtol == other.dimtol
+            && self.dimlim == other.dimlim
+            && self.dimtp == other.dimtp
+            && self.dimtm == other.dimtm
+            && self.dimtdec == other.dimtdec
+            && self.dimtfac == other.dimtfac
+            && self.dimtolj == other.dimtolj
+            && self.dimtzin == other.dimtzin
+            && self.dimatfit == other.dimatfit
+            && self.dimtofl == other.dimtofl
+            && self.dimupt == other.dimupt
+            && self.dimfit == other.dimfit
+            && self.dimpost == other.dimpost
+            && self.dimfrac == other.dimfrac
+            && self.dimarcsym == other.dimarcsym
+            && self.dimjogang == other.dimjogang
+            && self.dimltex_handle == other.dimltex_handle
+            && self.dimltex1_handle == other.dimltex1_handle
+            && self.dimltex2_handle == other.dimltex2_handle
+            && self.dimunit == other.dimunit
+            && self.annotative == other.annotative
+    }
+}
+
 impl DimStyle {
     /// Create a new dimension style
     pub fn new(name: impl Into<String>) -> Self {
         DimStyle {
+            dxf_present_codes: None,
+            dxf_last_linear_unit_code: None,
             handle: Handle::NULL,
             name: name.into(),
             xref_reference: false,
@@ -375,6 +495,39 @@ impl DimStyle {
             dimtolj: 1,
             ..Self::new(name)
         }
+    }
+
+    /// Record a DXF group code while reading the source record.
+    pub(crate) fn record_dxf_code(&mut self, code: i32) {
+        if let Ok(code) = usize::try_from(code) {
+            if let Some(bits) = self
+                .dxf_present_codes
+                .as_mut()
+                .and_then(|codes| codes.get_mut(code / 64))
+            {
+                *bits |= 1 << (code % 64);
+            }
+        }
+    }
+
+    /// Record the last DXF unit-format group encountered in the source.
+    pub(crate) fn record_dxf_linear_unit_code(&mut self, code: i32) {
+        if matches!(code, 270 | 277) {
+            self.dxf_last_linear_unit_code = Some(code as u16);
+        }
+    }
+
+    /// Return whether the source DXF record contained `code`.
+    pub fn dxf_code_present(&self, code: i32) -> bool {
+        usize::try_from(code)
+            .ok()
+            .and_then(|code| {
+                self.dxf_present_codes
+                    .as_ref()
+                    .and_then(|codes| codes.get(code / 64))
+                    .map(|bits| bits & (1 << (code % 64)) != 0)
+            })
+            .unwrap_or(false)
     }
 }
 

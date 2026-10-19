@@ -55,13 +55,20 @@ impl LineTypeElement {
 }
 
 /// A line type table entry
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LineType {
+    /// Source presence for nullable/omitted table values; excluded from native equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub description_present: bool,
+
     /// Unique handle
     pub handle: Handle,
     /// Line type name
     pub name: String,
+    /// Original symbol-table flags (DXF group 70), including unmodeled bits.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_flags: i16,
     /// Description
     pub description: String,
     /// Pattern elements
@@ -82,6 +89,8 @@ impl LineType {
         LineType {
             handle: Handle::NULL,
             name: name.into(),
+            source_flags: 0,
+            description_present: false,
             description: String::new(),
             elements: Vec::new(),
             pattern_length: 0.0,
@@ -96,6 +105,8 @@ impl LineType {
         LineType {
             handle: Handle::NULL,
             name: "Continuous".to_string(),
+            source_flags: 0,
+            description_present: false,
             description: "Solid line".to_string(),
             elements: Vec::new(),
             pattern_length: 0.0,
@@ -110,6 +121,8 @@ impl LineType {
         LineType {
             handle: Handle::NULL,
             name: "ByLayer".to_string(),
+            source_flags: 0,
+            description_present: false,
             description: String::new(),
             elements: Vec::new(),
             pattern_length: 0.0,
@@ -124,6 +137,8 @@ impl LineType {
         LineType {
             handle: Handle::NULL,
             name: "ByBlock".to_string(),
+            source_flags: 0,
+            description_present: false,
             description: String::new(),
             elements: Vec::new(),
             pattern_length: 0.0,
@@ -243,6 +258,7 @@ impl Default for LineTypeComplexData {
             rotation: 0.0,
             absolute_rotation: false,
             source_flags: 0,
+
             offset: [0.0, 0.0],
         }
     }
@@ -497,5 +513,19 @@ mod tests {
         assert!(!LineTypeElement::dash(1.0).is_complex());
         assert!(!LineTypeElement::space(0.5).is_complex());
         assert!(!LineTypeElement::dot().is_complex());
+    }
+}
+
+impl PartialEq for LineType {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.name == other.name
+            && self.source_flags == other.source_flags
+            && self.description == other.description
+            && self.elements == other.elements
+            && self.pattern_length == other.pattern_length
+            && self.alignment == other.alignment
+            && self.xref_dependent == other.xref_dependent
+            && self.xref_block_record_handle == other.xref_block_record_handle
     }
 }

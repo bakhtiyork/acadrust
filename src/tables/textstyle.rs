@@ -30,13 +30,23 @@ impl Default for TextGenerationFlags {
 }
 
 /// A text style table entry
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct TextStyle {
+    /// Source presence for nullable/omitted table values; excluded from native equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub big_font_file_present: bool,
+    /// Source presence for nullable/omitted table values; excluded from native equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_present: Option<u8>,
+
     /// Unique handle
     pub handle: Handle,
     /// Style name
     pub name: String,
+    /// Original symbol-table flags (DXF group 70), including unmodeled bits.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_flags: i16,
     /// Text generation flags
     pub flags: TextGenerationFlags,
     /// Fixed text height (0 = variable)
@@ -55,6 +65,9 @@ pub struct TextStyle {
     pub true_type_font: String,
     #[cfg_attr(feature = "serde", serde(default = "default_true_type_font_flags"))]
     pub true_type_font_flags: i32,
+    /// Font flags stored directly on STYLE (distinct from ACAD XData font metadata).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub font_flags: i32,
     /// Whether this style is xref-dependent
     pub xref_dependent: bool,
     /// Block record of the xref this style came from (NULL when local).
@@ -79,6 +92,9 @@ impl TextStyle {
         TextStyle {
             handle: Handle::NULL,
             name: name.into(),
+            source_flags: 0,
+            big_font_file_present: false,
+            dxf_present: None,
             flags: TextGenerationFlags::new(),
             height: 0.0,
             width_factor: 1.0,
@@ -88,6 +104,7 @@ impl TextStyle {
             big_font_file: String::new(),
             true_type_font: String::new(),
             true_type_font_flags: default_true_type_font_flags(),
+            font_flags: 0,
             xref_dependent: false,
             xref_block_record_handle: Handle::NULL,
             is_shape_file: false,
@@ -101,6 +118,9 @@ impl TextStyle {
         TextStyle {
             handle: Handle::NULL,
             name: "Standard".to_string(),
+            source_flags: 0,
+            big_font_file_present: false,
+            dxf_present: None,
             flags: TextGenerationFlags::new(),
             height: 0.0,
             width_factor: 1.0,
@@ -110,6 +130,7 @@ impl TextStyle {
             big_font_file: String::new(),
             true_type_font: String::new(),
             true_type_font_flags: default_true_type_font_flags(),
+            font_flags: 0,
             xref_dependent: false,
             xref_block_record_handle: Handle::NULL,
             is_shape_file: false,
@@ -213,5 +234,28 @@ mod tests {
 
         style.set_upside_down(true);
         assert!(style.is_upside_down());
+    }
+}
+
+impl PartialEq for TextStyle {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.name == other.name
+            && self.source_flags == other.source_flags
+            && self.flags == other.flags
+            && self.height == other.height
+            && self.width_factor == other.width_factor
+            && self.oblique_angle == other.oblique_angle
+            && self.last_height == other.last_height
+            && self.font_file == other.font_file
+            && self.big_font_file == other.big_font_file
+            && self.true_type_font == other.true_type_font
+            && self.true_type_font_flags == other.true_type_font_flags
+            && self.font_flags == other.font_flags
+            && self.xref_dependent == other.xref_dependent
+            && self.xref_block_record_handle == other.xref_block_record_handle
+            && self.is_shape_file == other.is_shape_file
+            && self.is_vertical == other.is_vertical
+            && self.annotative == other.annotative
     }
 }
