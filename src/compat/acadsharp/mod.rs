@@ -11,21 +11,23 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
-mod entities;
+mod common;
 mod dimension_geometry;
+mod entities;
+mod header;
+mod legacy_identity;
 mod mtext;
 mod mtext_plain_text;
-mod header;
 mod new_document;
 mod objects;
-mod legacy_identity;
+mod palette;
 mod registration;
 mod registration_order;
-mod palette;
 mod tables;
 mod table_dimstyle;
 mod table_viewports;
 mod type_names;
+mod xdata;
 
 pub use new_document::new_document;
 
@@ -195,6 +197,9 @@ fn dump_document_view(doc: &CadDocument, file: &str, reader: &str, read_view: bo
     tables::collect(doc, &mut objects);
     entities::collect(doc, reader, &mut objects);
     objects::collect(doc, reader, &mut objects);
+    if read_view {
+        common::resolve(doc, reader, &mut objects);
+    }
     let mut projected_header = header::header(doc);
     if read_view && legacy_identity::applies(doc, reader) {
         registration_order::apply(doc, reader, &mut objects);
@@ -203,6 +208,9 @@ fn dump_document_view(doc: &CadDocument, file: &str, reader: &str, read_view: bo
         registration::apply(doc, reader, &mut objects);
         registration_order::apply(doc, reader, &mut objects);
         projected_header["HandleSeed"] = json!(registration_order::handle_seed(doc, &objects));
+    }
+    if read_view && registration::source_document(doc) {
+        common::table_defaults(&mut objects);
     }
     // A registered handle may be exposed through multiple model collections.
     // Prefer the first (concrete entity/table) representation over sidecar records.

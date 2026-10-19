@@ -680,13 +680,7 @@ fn line_type_segments(doc: &CadDocument, v: &crate::tables::LineType) -> Value {
 }
 
 fn base(doc: &CadDocument, h: Handle) -> Vec<(&'static str, Value)> {
-    let xdata = if let Some(data) = doc.object_xdata(h) {
-        super::entities::extended_data(doc, data)
-    } else if doc.eed_by_handle.get(&h).is_some_and(|v| !v.is_empty()) {
-        json!(UNMAPPED)
-    } else {
-        json!([])
-    };
+    let xdata = super::xdata::object_extended_data(doc, h);
     vec![
         ("ExtendedData", xdata),
         ("HasDynamicSubclass", json!(false)),
@@ -775,6 +769,8 @@ pub(super) fn text_style(doc: &CadDocument, v: &crate::tables::TextStyle, out: &
         ],
         out,
     );
+    out.last_mut().expect("text style record")["props"]["ExtendedData"] =
+        super::xdata::text_style_extended_data(doc, v);
 }
 
 // DWG does not assign the DXF-only resolved flag in ACadSharp.

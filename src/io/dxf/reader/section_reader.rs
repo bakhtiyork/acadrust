@@ -3535,21 +3535,22 @@ impl<'a> SectionReader<'a> {
             // Tables start with code 0 = "TABLE"
             if pair.code == 0 && pair.value_string == "TABLE" {
                 let result: Result<()> = (|| {
-                // Read table name (code 2)
-                if let Some(name_pair) = self.reader.read_pair()? {
-                    if name_pair.code == 2 {
-                        let table_name = name_pair.value_string.clone();
-                        Self::begin_source_table(document, &table_name);
-                        match table_name.as_str() {
-                            "LAYER" => self.read_layer_table(document)?,
-                            "LTYPE" => self.read_linetype_table(document)?,
-                            "STYLE" => self.read_textstyle_table(document)?,
-                            "BLOCK_RECORD" => self.read_block_record_table(document)?,
-                            "DIMSTYLE" => self.read_dimstyle_table(document)?,
-                            "APPID" => self.read_appid_table(document)?,
-                            "VIEW" => self.read_view_table(document)?,
-                            "VPORT" => self.read_vport_table(document)?,
-                            "UCS" => self.read_ucs_table(document)?,
+                    // Read table name (code 2)
+                    if let Some(name_pair) = self.reader.read_pair()? {
+                        if name_pair.code == 2 {
+                            let table_name = name_pair.value_string.clone();
+                            Self::begin_source_table(document, &table_name);
+                            self.read_table_header_xdata(document)?;
+                            match table_name.as_str() {
+                                "LAYER" => self.read_layer_table(document)?,
+                                "LTYPE" => self.read_linetype_table(document)?,
+                                "STYLE" => self.read_textstyle_table(document)?,
+                                "BLOCK_RECORD" => self.read_block_record_table(document)?,
+                                "DIMSTYLE" => self.read_dimstyle_table(document)?,
+                                "APPID" => self.read_appid_table(document)?,
+                                "VIEW" => self.read_view_table(document)?,
+                                "VPORT" => self.read_vport_table(document)?,
+                                "UCS" => self.read_ucs_table(document)?,
                                 _ => self.skip_to_endtab()?,
                             }
                         let table_handle = match table_name.as_str() {
@@ -3579,6 +3580,85 @@ impl<'a> SectionReader<'a> {
             }
         }
 
+        Ok(())
+    }
+
+    /// Capture XDATA and common defined groups attached to a TABLE header.
+    ///
+    /// A table header is not dispatched through the object readers below, so
+    /// the normal per-record recorder would otherwise miss data between the
+    /// table name and its first entry.  Read through the first code-0 record
+    /// boundary, project the record-level metadata, then put the header back
+    /// on the stream for the table-specific reader to consume normally.
+    fn read_table_header_xdata(&mut self, document: &mut CadDocument) -> Result<()> {
+        self.reader.record_xdata(true);
+        let mut header = Vec::new();
+        let mut boundary = None;
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                boundary = Some(pair);
+                break;
+            }
+            header.push(pair);
+        }
+
+        let (handle, pairs) = self.reader.take_recorded_xdata();
+        // A table header has no native object owner field to apply here, but
+        // clear the recorder's owner slot before the next record starts.
+        self.reader.take_recorded_owner();
+        self.reader.record_xdata(false);
+
+        let handle = handle
+            .and_then(|value| u64::from_str_radix(value.trim(), 16).ok())
+            .map(Handle::new);
+        let (xdata_pairs, reactors, xdictionary) = Self::split_recorded_object_data(pairs);
+        if let Some(handle) = handle {
+            if let Some(reactors) = reactors.filter(|handles| !handles.is_empty()) {
+                document.reactors_by_handle.insert(handle, reactors);
+            }
+            if let Some(xdictionary) = xdictionary {
+                document.xdic_by_handle.insert(handle, xdictionary);
+            }
+
+            // Parse the captured XDATA with the existing parser.  The
+            // boundary is a sentinel so read_extended_data stops before the
+            // table's first entry; it is then replayed with the header.
+            let mut boundary_consumed = false;
+            if !xdata_pairs.is_empty() {
+                if let Some(pair) = boundary.clone() {
+                    self.reader.push_back(pair);
+                }
+                for pair in xdata_pairs.into_iter().rev() {
+                    self.reader.push_back(pair);
+                }
+                let (xdata, next) = self.read_extended_data()?;
+                if let Some(next) = next {
+                    self.reader.push_back(next);
+                    boundary_consumed = true;
+                }
+                if !xdata.is_empty() {
+                    document.object_xdata.insert(handle, xdata);
+                }
+            }
+
+            if !boundary_consumed {
+                if let Some(pair) = boundary {
+                    self.reader.push_back(pair);
+                }
+            }
+            for pair in header.into_iter().rev() {
+                self.reader.push_back(pair);
+            }
+        } else {
+            // Preserve malformed or handle-less table headers exactly as
+            // received so the existing parser can still recover their data.
+            if let Some(pair) = boundary {
+                self.reader.push_back(pair);
+            }
+            for pair in header.into_iter().rev() {
+                self.reader.push_back(pair);
+            }
+        }
         Ok(())
     }
 
@@ -9734,10 +9814,21 @@ impl<'a> SectionReader<'a> {
         let mut handle = Handle::NULL;
         let mut owner = Handle::NULL;
         let mut raw_codes: Vec<(i32, String)> = Vec::new();
+        let mut defined_group_depth = 0usize;
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
                 self.reader.push_back(pair);
                 break;
+            }
+            if pair.code == 102 {
+                let marker = pair.value_string.trim();
+                raw_codes.push((pair.code, pair.value_string.clone()));
+                if marker == "}" {
+                    defined_group_depth = defined_group_depth.saturating_sub(1);
+                } else if marker.starts_with('{') {
+                    defined_group_depth = defined_group_depth.saturating_add(1);
+                }
+                continue;
             }
             match pair.code {
                 5 => {
@@ -9745,7 +9836,7 @@ impl<'a> SectionReader<'a> {
                         handle = Handle::new(h);
                     }
                 }
-                330 => {
+                330 if defined_group_depth == 0 => {
                     // First 330 outside a 102-group is the owner.
                     // Subsequent 330s inside reactor groups are stored as raw codes.
                     if owner == Handle::NULL {
@@ -9756,6 +9847,7 @@ impl<'a> SectionReader<'a> {
                         raw_codes.push((pair.code, pair.value_string.clone()));
                     }
                 }
+                330 => raw_codes.push((pair.code, pair.value_string.clone())),
                 _ => {
                     raw_codes.push((pair.code, pair.value_string.clone()));
                 }
@@ -11939,6 +12031,15 @@ impl<'a> SectionReader<'a> {
                 }
                 Ok(true)
             }
+            // Material handle.  This common code is shared by entity readers
+            // that do not have an object-specific 347 branch (R2007+).
+            347 => {
+                if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                    common.material_handle = Some(Handle::new(h));
+                    common.material_flags = 0b11;
+                }
+                Ok(true)
+            }
             102 => {
                 let val = pair.value_string.trim();
                 if val == "{ACAD_REACTORS" {
@@ -12001,12 +12102,27 @@ impl<'a> SectionReader<'a> {
     /// Assumes the opening "102 {ACAD_REACTORS" has already been consumed.
     fn read_reactor_handles(&mut self) -> Result<Vec<Handle>> {
         let mut handles = Vec::new();
+        let mut depth = 1usize;
         while let Some(pair) = self.reader.read_pair()? {
-            if pair.code == 102 {
-                // Closing "}"
+            if pair.code == 0 {
+                // Preserve a malformed record boundary for the enclosing
+                // entity/object reader instead of consuming the next record.
+                self.reader.push_back(pair);
                 break;
             }
-            if pair.code == 330 {
+            if pair.code == 102 {
+                let marker = pair.value_string.trim();
+                if marker == "}" {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                } else if marker.starts_with('{') {
+                    depth = depth.saturating_add(1);
+                }
+                continue;
+            }
+            if depth == 1 && pair.code == 330 {
                 if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
                     handles.push(Handle::new(h));
                 }
@@ -12019,12 +12135,25 @@ impl<'a> SectionReader<'a> {
     /// Assumes the opening "102 {ACAD_XDICTIONARY" has already been consumed.
     fn read_xdictionary_handle(&mut self) -> Result<Option<Handle>> {
         let mut handle = None;
+        let mut depth = 1usize;
         while let Some(pair) = self.reader.read_pair()? {
-            if pair.code == 102 {
-                // Closing "}"
+            if pair.code == 0 {
+                self.reader.push_back(pair);
                 break;
             }
-            if pair.code == 360 {
+            if pair.code == 102 {
+                let marker = pair.value_string.trim();
+                if marker == "}" {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                } else if marker.starts_with('{') {
+                    depth = depth.saturating_add(1);
+                }
+                continue;
+            }
+            if depth == 1 && pair.code == 360 {
                 if let Ok(h) = u64::from_str_radix(pair.value_string.trim(), 16) {
                     handle = Some(Handle::new(h));
                 }
@@ -12035,9 +12164,22 @@ impl<'a> SectionReader<'a> {
 
     /// Skip an unknown defined group (reads pairs until closing "}")
     fn skip_defined_group(&mut self) -> Result<()> {
+        let mut depth = 1usize;
         while let Some(pair) = self.reader.read_pair()? {
-            if pair.code == 102 && pair.value_string.trim() == "}" {
+            if pair.code == 0 {
+                self.reader.push_back(pair);
                 break;
+            }
+            if pair.code == 102 {
+                let marker = pair.value_string.trim();
+                if marker == "}" {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                } else if marker.starts_with('{') {
+                    depth = depth.saturating_add(1);
+                }
             }
         }
         Ok(())
@@ -22232,6 +22374,7 @@ impl<'a> SectionReader<'a> {
 
     fn read_object_xdata(&mut self, document: &mut CadDocument) -> Result<()> {
         let (handle, pairs) = self.reader.take_recorded_xdata();
+        let owner = self.reader.take_recorded_owner();
         self.reader.record_xdata(false);
         let Some(handle) = handle
             .and_then(|value| u64::from_str_radix(&value, 16).ok())
@@ -22239,7 +22382,19 @@ impl<'a> SectionReader<'a> {
         else {
             return Ok(());
         };
-        if pairs.is_empty()
+        if let Some(owner) = owner {
+            if let Some(object) = document.objects.get_mut(&handle) {
+                object.set_owner(owner);
+            }
+        }
+        let (xdata_pairs, reactors, xdictionary) = Self::split_recorded_object_data(pairs);
+        if let Some(reactors) = reactors.filter(|handles| !handles.is_empty()) {
+            document.reactors_by_handle.insert(handle, reactors);
+        }
+        if let Some(xdictionary) = xdictionary {
+            document.xdic_by_handle.insert(handle, xdictionary);
+        }
+        if xdata_pairs.is_empty()
             || document
                 .objects
                 .get(&handle)
@@ -22249,7 +22404,7 @@ impl<'a> SectionReader<'a> {
         }
         // Replay the pairs through the XDATA parser; it stops at the pair
         // after them, which goes back to the stream.
-        for pair in pairs.into_iter().rev() {
+        for pair in xdata_pairs.into_iter().rev() {
             self.reader.push_back(pair);
         }
         let (xdata, next) = self.read_extended_data()?;
@@ -22260,6 +22415,77 @@ impl<'a> SectionReader<'a> {
             document.object_xdata.insert(handle, xdata);
         }
         Ok(())
+    }
+
+    /// Separate the record-level side channel into XDATA and the two common
+    /// defined groups. Object readers are intentionally heterogeneous: some
+    /// consume these groups into typed fields and others leave them opaque.
+    /// Keeping this pass here lets both paths retain the same document-level
+    /// relationships without replaying a defined group as XDATA.
+    fn split_recorded_object_data(
+        pairs: Vec<super::stream_reader::DxfCodePair>,
+    ) -> (
+        Vec<super::stream_reader::DxfCodePair>,
+        Option<Vec<Handle>>,
+        Option<Handle>,
+    ) {
+        let mut xdata = Vec::new();
+        let mut reactors = None;
+        let mut xdictionary = None;
+        // true = ACAD_REACTORS, false = ACAD_XDICTIONARY
+        let mut defined_group: Option<bool> = None;
+        let mut depth = 0usize;
+
+        for pair in pairs {
+            if pair.code == 102 {
+                let marker = pair.value_string.trim();
+                if defined_group.is_some() {
+                    if marker == "}" {
+                        depth = depth.saturating_sub(1);
+                        if depth == 0 {
+                            defined_group = None;
+                        }
+                    } else if marker.starts_with('{') {
+                        depth = depth.saturating_add(1);
+                    }
+                    continue;
+                }
+                match marker {
+                    "{ACAD_REACTORS" => {
+                        defined_group = Some(true);
+                        depth = 1;
+                        reactors.get_or_insert_with(Vec::new);
+                    }
+                    "{ACAD_XDICTIONARY" => {
+                        defined_group = Some(false);
+                        depth = 1;
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
+            if let Some(is_reactors) = defined_group {
+                if depth == 1 && is_reactors && pair.code == 330 {
+                    if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                        reactors
+                            .get_or_insert_with(Vec::new)
+                            .push(Handle::new(handle));
+                    }
+                } else if depth == 1 && !is_reactors && pair.code == 360 {
+                    if let Ok(handle) = u64::from_str_radix(pair.value_string.trim(), 16) {
+                        xdictionary = Some(Handle::new(handle));
+                    }
+                }
+                continue;
+            }
+
+            if (1000..=1071).contains(&pair.code) {
+                xdata.push(pair);
+            }
+        }
+
+        (xdata, reactors, xdictionary)
     }
 
     /// Read a SORTENTSTABLE object

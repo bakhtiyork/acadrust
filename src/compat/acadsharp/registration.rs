@@ -11,7 +11,7 @@ fn id(value: &Value) -> Option<u64> {
     u64::from_str_radix(value.as_str()?.strip_prefix('#')?, 16).ok()
 }
 
-fn supported(record: &Value, reader: &str) -> bool {
+pub(super) fn supported(record: &Value, reader: &str) -> bool {
     !matches!(record["type"].as_str(), Some("UnknownNonGraphicalObject" | "UnknownEntity"))
         // DXF's VisualStyle callback consumes even the identity fields without
         // assigning them. DWG has no standalone TABLECONTENT reader (inline

@@ -34,7 +34,14 @@ fn props(doc: &CadDocument, h: Handle) -> Value {
 
 #[test]
 fn folded_dxf_markers_retain_distinct_common_state() {
-    let doc = dxf("", "62\n3\n48\n2.5\n60\n1\n370\n35\n102\n{ACAD_REACTORS\n330\nFE00\n102\n}\n102\n{ACAD_XDICTIONARY\n360\nFE01\n102\n}\n1001\nCustom\n1000\nmarker\n", "62\n5\n48\n0.5\n370\n50\n");
+    let mut doc = dxf("", "62\n3\n48\n2.5\n60\n1\n370\n35\n102\n{ACAD_REACTORS\n330\nFE00\n102\n}\n102\n{ACAD_XDICTIONARY\n360\nFE01\n102\n}\n1001\nCustom\n1000\nmarker\n", "62\n5\n48\n0.5\n370\n50\n");
+    // The shared common-data projection resolves references against objects
+    // present in the document, so provide both referenced dictionaries.
+    for handle in [Handle::new(0xFE00), Handle::new(0xFE01)] {
+        let mut dictionary = acadrust::objects::Dictionary::new();
+        dictionary.handle = handle;
+        doc.objects.insert(handle, acadrust::objects::ObjectType::Dictionary(dictionary));
+    }
     let b = doc.block_records.get("Door").unwrap();
     let begin = b.block_entity_common.as_ref().unwrap();
     let end = b.block_end_common.as_ref().unwrap();

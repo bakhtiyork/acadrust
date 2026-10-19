@@ -4267,7 +4267,7 @@ impl CadDocument {
             ObjectType::DgnLineStyle(value) => Some(value.owner),
             ObjectType::ProxyObject(value) => Some(value.owner),
             ObjectType::Unknown { owner, .. } => Some(*owner),
-            ObjectType::UnderlayDefinition(_) => None,
+            ObjectType::UnderlayDefinition(value) => Some(value.owner_handle),
         }
     }
 
@@ -5355,6 +5355,9 @@ impl CadDocument {
                 self.next_handle += 1;
                 br.block_entity_handle = h;
             }
+            if let Some(common) = br.block_entity_common.as_mut() {
+                common.handle = br.block_entity_handle;
+            }
             used_handles.insert(br.block_entity_handle.value());
 
             if br.block_end_handle.is_null() || used_handles.contains(&br.block_end_handle.value())
@@ -5362,6 +5365,9 @@ impl CadDocument {
                 let h = Handle::new(self.next_handle);
                 self.next_handle += 1;
                 br.block_end_handle = h;
+            }
+            if let Some(common) = br.block_end_common.as_mut() {
+                common.handle = br.block_end_handle;
             }
             used_handles.insert(br.block_end_handle.value());
         }

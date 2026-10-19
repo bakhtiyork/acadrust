@@ -118,16 +118,28 @@ pub(crate) fn encode_values_with_encoding(
     b
 }
 
-/// Decode an EED payload byte block into XDATA values, reversing
-/// [`encode_values`]. `wide` selects the R2007+ string encoding; `layer_name`
-/// resolves a layer table handle back to its name. Returns `None` if the bytes
-/// contain an unknown item code or are truncated mid-item, so the caller can
-/// keep the verbatim `raw_dwg_eed` blob instead of a partial record.
-pub fn decode_values(
+/// A decoded EED item with the original numeric layer reference retained for
+/// the ACadSharp compatibility projection.
+#[cfg(feature = "acadsharp-compat")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DecodedXDataValue {
+    Value(XDataValue),
+    Layer { handle: u64, name: String },
+}
+
+/// Decode an EED payload into one output item per encoded value.
+///
+/// The callback lets the native decoder and the compatibility projection use
+/// the same parser without first allocating a `Vec<DecodedXDataValue>` and
+/// then allocating a second vector while mapping it back to `XDataValue`.
+/// The optional layer handle is populated only for code 3; native callers can
+/// ignore it while compatibility callers retain it alongside the layer name.
+fn decode_values_impl<T>(
     bytes: &[u8],
     wide: bool,
     layer_name: impl Fn(u64) -> Option<String>,
-) -> Option<Vec<XDataValue>> {
+    mut map: impl FnMut(XDataValue, Option<u64>) -> T,
+) -> Option<Vec<T>> {
     let mut values = Vec::new();
     let mut i = 0usize;
     let read_u16 = |b: &[u8], i: usize| -> Option<u16> {
@@ -136,10 +148,6 @@ pub fn decode_values(
     let read_f64 = |b: &[u8], i: usize| -> Option<f64> {
         let s: [u8; 8] = b.get(i..i + 8)?.try_into().ok()?;
         Some(f64::from_le_bytes(s))
-    };
-    let _read_u64 = |b: &[u8], i: usize| -> Option<u64> {
-        let s: [u8; 8] = b.get(i..i + 8)?.try_into().ok()?;
-        Some(u64::from_le_bytes(s))
     };
     while i < bytes.len() {
         let code = bytes[i];
@@ -173,13 +181,14 @@ pub fn decode_values(
                         .into_owned();
                     crate::io::dxf::code_page::decode_legacy_escapes(&decoded)
                 };
-                values.push(XDataValue::String(s));
+                values.push(map(XDataValue::String(s), None));
             }
             2 => {
                 let c = *bytes.get(i)?;
                 i += 1;
-                values.push(XDataValue::ControlString(
-                    if c == 1 { "}" } else { "{" }.to_string(),
+                values.push(map(
+                    XDataValue::ControlString(if c == 1 { "}" } else { "{" }.to_string()),
+                    None,
                 ));
             }
             3 => {
@@ -188,14 +197,17 @@ pub fn decode_values(
                 let bytes = bytes.get(i..i + 8)?;
                 let h = u64::from_be_bytes(bytes.try_into().ok()?);
                 i += 8;
-                values.push(XDataValue::LayerName(layer_name(h).unwrap_or_default()));
+                values.push(map(
+                    XDataValue::LayerName(layer_name(h).unwrap_or_default()),
+                    Some(h),
+                ));
             }
             4 => {
                 let n = *bytes.get(i)? as usize;
                 i += 1;
                 let slice = bytes.get(i..i + n)?;
                 i += n;
-                values.push(XDataValue::BinaryData(slice.to_vec()));
+                values.push(map(XDataValue::BinaryData(slice.to_vec()), None));
             }
             5 => {
                 // DWG EED handles are 8-byte BIG-endian values. Decoding
@@ -205,7 +217,7 @@ pub fn decode_values(
                 let bytes = bytes.get(i..i + 8)?;
                 let h = u64::from_be_bytes(bytes.try_into().ok()?);
                 i += 8;
-                values.push(XDataValue::Handle(Handle::new(h)));
+                values.push(map(XDataValue::Handle(Handle::new(h)), None));
             }
             10..=13 => {
                 let x = read_f64(bytes, i)?;
@@ -213,26 +225,32 @@ pub fn decode_values(
                 let z = read_f64(bytes, i + 16)?;
                 i += 24;
                 let p = Vector3::new(x, y, z);
-                values.push(match code {
-                    10 => XDataValue::Point3D(p),
-                    11 => XDataValue::Position3D(p),
-                    12 => XDataValue::Displacement3D(p),
-                    _ => XDataValue::Direction3D(p),
-                });
+                values.push(map(
+                    match code {
+                        10 => XDataValue::Point3D(p),
+                        11 => XDataValue::Position3D(p),
+                        12 => XDataValue::Displacement3D(p),
+                        _ => XDataValue::Direction3D(p),
+                    },
+                    None,
+                ));
             }
             40..=42 => {
                 let v = read_f64(bytes, i)?;
                 i += 8;
-                values.push(match code {
-                    40 => XDataValue::Real(v),
-                    41 => XDataValue::Distance(v),
-                    _ => XDataValue::ScaleFactor(v),
-                });
+                values.push(map(
+                    match code {
+                        40 => XDataValue::Real(v),
+                        41 => XDataValue::Distance(v),
+                        _ => XDataValue::ScaleFactor(v),
+                    },
+                    None,
+                ));
             }
             70 => {
                 let v = i16::from_le_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]);
                 i += 2;
-                values.push(XDataValue::Integer16(v));
+                values.push(map(XDataValue::Integer16(v), None));
             }
             71 => {
                 let v = i32::from_le_bytes([
@@ -242,7 +260,7 @@ pub fn decode_values(
                     *bytes.get(i + 3)?,
                 ]);
                 i += 4;
-                values.push(XDataValue::Integer32(v));
+                values.push(map(XDataValue::Integer32(v), None));
             }
             _ => return None,
         }
@@ -251,6 +269,41 @@ pub fn decode_values(
         }
     }
     Some(values)
+}
+
+/// Decode an EED payload while retaining numeric layer references.
+///
+/// `wide` selects the R2007+ string encoding; `layer_name` resolves a layer
+/// table handle back to its name for the native model. Returns `None` if the
+/// bytes contain an unknown item code or are truncated mid-item, so callers
+/// can keep the verbatim `raw_dwg_eed` blob instead of a partial record.
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn decode_values_with_layer_handles(
+    bytes: &[u8],
+    wide: bool,
+    layer_name: impl Fn(u64) -> Option<String>,
+) -> Option<Vec<DecodedXDataValue>> {
+    decode_values_impl(bytes, wide, layer_name, |value, layer_handle| {
+        match (value, layer_handle) {
+            (XDataValue::LayerName(name), Some(handle)) => {
+                DecodedXDataValue::Layer { handle, name }
+            }
+            (value, _) => DecodedXDataValue::Value(value),
+        }
+    })
+}
+
+/// Decode an EED payload byte block into XDATA values, reversing
+/// [`encode_values`]. `wide` selects the R2007+ string encoding; `layer_name`
+/// resolves a layer table handle back to its name. Returns `None` if the bytes
+/// contain an unknown item code or are truncated mid-item, so the caller can
+/// keep the verbatim `raw_dwg_eed` blob instead of a partial record.
+pub fn decode_values(
+    bytes: &[u8],
+    wide: bool,
+    layer_name: impl Fn(u64) -> Option<String>,
+) -> Option<Vec<XDataValue>> {
+    decode_values_impl(bytes, wide, layer_name, |value, _| value)
 }
 
 #[cfg(test)]

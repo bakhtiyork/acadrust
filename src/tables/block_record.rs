@@ -1,6 +1,7 @@
 //! Block record table entry
 
 use super::TableEntry;
+use crate::entities::EntityCommon;
 use crate::types::{Handle, Vector3};
 
 /// Block record flags
@@ -80,8 +81,10 @@ pub struct BlockRecord {
     /// Common state of DXF BLOCK/ENDBLK markers folded into this definition.
     /// Marker identities remain authoritative in `block_entity_handle` and
     /// `block_end_handle`, including after document handle allocation.
-    pub block_entity_common: Option<Box<crate::entities::EntityCommon>>,
-    pub block_end_common: Option<Box<crate::entities::EntityCommon>>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub block_entity_common: Option<Box<EntityCommon>>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub block_end_common: Option<Box<EntityCommon>>,
     /// Original DXF BLOCK flag word, including bits without a typed flag.
     pub source_flags: i16,
     /// DXF field presence: explodable, scaling, preview, comments, xref path, units.

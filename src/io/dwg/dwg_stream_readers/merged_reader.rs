@@ -440,6 +440,12 @@ impl DwgMergedReader {
     pub fn read_en_color(&mut self) -> (Color, crate::types::Transparency, bool) {
         self.main.read_en_color()
     }
+    pub(crate) fn read_en_color_with_source(
+        &mut self,
+    ) -> (Color, crate::types::Transparency, bool, Option<(u16, u32)>) {
+        self.main.read_en_color_with_source()
+    }
+
     pub fn read_color_by_index(&mut self) -> Color {
         self.main.read_color_by_index()
     }

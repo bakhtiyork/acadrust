@@ -101,6 +101,15 @@ pub(super) fn applies(doc: &CadDocument, reader: &str) -> bool {
 /// Rewrite only canonical references, never arbitrary strings resembling handles.
 fn rewrite(value: &mut Value, name: &str, refs: &HashSet<&str>, map: &HashMap<u64, u64>) {
     match value {
+        Value::Array(pairs) if name == "ExtendedData" => {
+            for pair in pairs {
+                if let Some(&new) = map.get(&id(&pair[0])) {
+                    pair[0] = handle(Handle::new(new));
+                }
+                // RawValue (including numeric layer/handle records) is a
+                // stored source number, not a registered CadObject reference.
+            }
+        }
         Value::String(_) if refs.contains(name) => {
             if let Some(&new) = map.get(&id(value)) {
                 *value = handle(Handle::new(new));

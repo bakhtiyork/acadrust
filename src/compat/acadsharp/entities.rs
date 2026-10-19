@@ -6,7 +6,6 @@
 
 use crate::entities::{Dimension, DimensionType, EntityCommon, EntityType, Spline};
 use crate::types::{DxfVersion, Handle, Vector2, Vector3};
-use crate::xdata::XDataValue;
 use crate::CadDocument;
 use serde_json::{json, Value};
 
@@ -158,8 +157,18 @@ pub(super) fn common(
 ) -> Vec<(&'static str, Value)> {
     vec![
         ("BookColor", optional_handle(common.color_book_handle)),
-        ("Color", color(common.color)),
-        ("ExtendedData", extended_data(doc, &common.extended_data)),
+        (
+            "Color",
+            if super::registration::source_document(doc) {
+                super::common::entity_color(common)
+            } else {
+                color(common.color)
+            },
+        ),
+        (
+            "ExtendedData",
+            super::xdata::extended_data(doc, common.handle, &common.extended_data),
+        ),
         ("HasDynamicSubclass", bool_value(dynamic)),
         ("IsInvisible", bool_value(common.invisible)),
         (
@@ -192,7 +201,14 @@ pub(super) fn common(
         ("ProxyGeometries", array([])),
         ("Reactors", handles(common.reactors.iter().copied())),
         ("SubclassMarker", Value::String(subclass.to_string())),
-        ("Transparency", transparency(common.transparency)),
+        (
+            "Transparency",
+            if super::registration::source_document(doc) {
+                super::common::entity_transparency(common)
+            } else {
+                transparency(common.transparency)
+            },
+        ),
         ("XDictionary", optional_handle(common.xdictionary_handle)),
     ]
 }
@@ -259,62 +275,8 @@ fn dxf_class(name: &str) -> Value {
     )
 }
 
-fn xdata_record(value: &XDataValue) -> Value {
-    let (code, raw, closing) = match value {
-        XDataValue::String(value) => (1000, Value::String(value.clone()), None),
-        XDataValue::ControlString(value) => {
-            let is_closing = value == "}";
-            (
-                1002,
-                integer(if is_closing { '}' as i64 } else { '{' as i64 }),
-                Some(is_closing),
-            )
-        }
-        XDataValue::LayerName(value) => (1003, Value::String(value.clone()), None),
-        XDataValue::BinaryData(value) => (1004, bytes(value), None),
-        XDataValue::Handle(value) => (1005, json!(value.value()), None),
-        XDataValue::Point3D(value) => (1010, vec3(*value), None),
-        XDataValue::Position3D(value) => (1011, vec3(*value), None),
-        XDataValue::Displacement3D(value) => (1012, vec3(*value), None),
-        XDataValue::Direction3D(value) => (1013, vec3(*value), None),
-        XDataValue::Real(value) => (1040, number(*value), None),
-        XDataValue::Distance(value) => (1041, number(*value), None),
-        XDataValue::ScaleFactor(value) => (1042, number(*value), None),
-        XDataValue::Integer16(value) => (1070, integer(*value as i64), None),
-        XDataValue::Integer32(value) => (1071, integer(*value as i64), None),
-    };
-    let mut object = serde_json::Map::new();
-    object.insert("Code".to_string(), enum_value(code));
-    if let Some(is_closing) = closing {
-        object.insert("IsClosing".to_string(), bool_value(is_closing));
-    }
-    object.insert("RawValue".to_string(), raw);
-    Value::Object(object)
-}
-
 fn bytes(value: &[u8]) -> Value {
     Value::String(value.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-pub(super) fn extended_data(doc: &CadDocument, data: &crate::xdata::ExtendedData) -> Value {
-    let mut pairs = Vec::new();
-    for record_data in data.records() {
-        let app_handle = doc
-            .app_ids
-            .get(&record_data.application_name)
-            .map(|app| app.handle)
-            .unwrap_or(Handle::NULL);
-        let records = record_data
-            .values
-            .iter()
-            .map(xdata_record)
-            .collect::<Vec<_>>();
-        pairs.push(Value::Array(vec![
-            handle(app_handle),
-            json!({ "Records": records }),
-        ]));
-    }
-    Value::Array(pairs)
 }
 
 fn field_common(
@@ -645,6 +607,19 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             vec![],
             out,
         );
+        if legacy && !matches!(entity, EntityType::Insert(_)) {
+            // readLegacyPolyline assigns the Seqend directly and never adds
+            // its template to the builder. Scalar codes survive; deferred
+            // table references, reactors and XData therefore stay defaults.
+            let p = &mut out.last_mut().expect("sequence marker")["props"];
+            p["Layer"] = optional_handle(doc.layers.get("0").map(|v| v.handle));
+            p["LineType"] = optional_handle(doc.line_types.get("ByLayer").map(|v| v.handle));
+            p["Material"] = Value::Null;
+            p["BookColor"] = Value::Null;
+            p["XDictionary"] = Value::Null;
+            p["Reactors"] = json!([]);
+            p["ExtendedData"] = json!([]);
+        }
     }
     match entity {
         EntityType::Point(value) => field_common(
