@@ -23,6 +23,9 @@ use super::{color, handle, number, optional_handle, props, record, vec2, vec3};
 mod geo_spatial;
 #[path = "dimension_association.rs"]
 mod dimension_association;
+mod dynamic_actions;
+#[cfg(test)]
+mod dynamic_tests;
 
 const UNLISTED: i64 = -999;
 
@@ -65,7 +68,7 @@ pub(super) fn collect(doc: &crate::CadDocument, reader: &str, out: &mut Vec<Valu
         if emitted.contains(&object_handle) {
             continue;
         }
-        let value = dump_visibility_parameter(object_handle, value);
+        let value = dump_visibility_parameter(doc, reader, object_handle, value);
         out.push(enrich_object_record(doc, object_handle, None, value));
         emitted.insert(object_handle);
     }
@@ -123,8 +126,8 @@ fn dump_object(
         ObjectType::WipeoutVariables(value) => dump_wipeout_variables(map_handle, value),
         ObjectType::Field(value) => dump_field(map_handle, value),
         ObjectType::FieldList(value) => dump_field_list(map_handle, value),
-        ObjectType::BlockVisibilityParameter(value) => dump_visibility_parameter(map_handle, value),
-        ObjectType::DynamicBlock(value) => dump_dynamic_block(map_handle, value),
+        ObjectType::BlockVisibilityParameter(value) => dump_visibility_parameter(_doc, reader, map_handle, value),
+        ObjectType::DynamicBlock(value) => dump_dynamic_block(_doc, reader, map_handle, value),
         ObjectType::ObjectContextData(value) => dump_object_context_data(map_handle, value),
         ObjectType::TableContent(value) => dump_table_content(map_handle, value),
         ObjectType::ProxyObject(value) => dump_proxy_object(map_handle, value),
@@ -1361,12 +1364,17 @@ fn eval_value(value: &BlockEvalValue) -> Value {
 }
 
 fn eval_pair(value: &crate::objects::BlockEvalExpression) -> Value {
+    eval_pair_value(value.value_code, &value.value)
+}
+
+fn eval_pair_value(code: i16, value: &BlockEvalValue) -> Value {
+    // ACadSharp constructs a value pair only for positive evaluation codes.
+    if code <= 0 {
+        return Value::Null;
+    }
     props(
         "DxfValuePair",
-        [
-            ("Code", int(value.value_code as i64)),
-            ("Value", eval_value(&value.value)),
-        ],
+        [("Code", int(code as i64)), ("Value", eval_value(value))],
     )
 }
 
@@ -1390,7 +1398,9 @@ fn one_point_parameter_props(
     ));
     p.push(("Id", int(value.parameter.element.eval.node_id as i64)));
     p.push(("Location", vec3(value.definition_point)));
-    p.push(("GripId", int(value.parameter.element.eval.node_id as i64)));
+    p.push(("GripId", int(value.property_count as i64)));
+    p.push(("DisplacementX", parameter_property(&value.properties[0])));
+    p.push(("DisplacementY", parameter_property(&value.properties[1])));
 }
 
 fn two_point_parameter_props(
@@ -1407,6 +1417,41 @@ fn two_point_parameter_props(
     p.push(("FirstPoint", vec3(value.definition_base_point)));
     p.push(("SecondPoint", vec3(value.definition_end_point)));
     p.push(("BaseLocation", int(value.parameter_base_location as i64)));
+    p.push(("GripIds", json!(value.property_states)));
+    for (name, property) in [
+        "FirstPointDisplacementX",
+        "FirstPointDisplacementY",
+        "SecondPointDisplacementX",
+        "SecondPointDisplacementY",
+    ]
+    .into_iter()
+    .zip(&value.properties)
+    {
+        p.push((name, parameter_property(property)));
+    }
+}
+
+fn eval_connection(id: i32, name: &str) -> Value {
+    props(
+        "EvalConnection",
+        [("Id", int(id as i64)), ("Name", text(name))],
+    )
+}
+
+fn parameter_property(value: &crate::objects::BlockParameterProperty) -> Value {
+    props(
+        "EvalParameterProperty",
+        [(
+            "Connections",
+            Value::Array(
+                value
+                    .connections
+                    .iter()
+                    .map(|connection| eval_connection(connection.code, &connection.name))
+                    .collect(),
+            ),
+        )],
+    )
 }
 
 fn grip_props(value: &crate::objects::BlockGrip, p: &mut Vec<(&'static str, Value)>) {
@@ -1415,8 +1460,9 @@ fn grip_props(value: &crate::objects::BlockGrip, p: &mut Vec<(&'static str, Valu
         ("Cycling", bool_value(value.insert_cycling)),
         ("Id", int(value.element.eval.node_id as i64)),
         ("Location", vec3(value.location)),
-        ("Value93", int(value.flags_91 as i64)),
-        ("Value98", int(value.flags_92 as i64)),
+        ("ExpressionId1", int(value.flags_91 as i64)),
+        ("ExpressionId2", int(value.flags_92 as i64)),
+        ("Value93", int(value.insert_cycling_weight as i64)),
     ]);
 }
 
@@ -1447,35 +1493,60 @@ fn parameter_value_set(value: &crate::objects::BlockParameterValueSet) -> Value 
 }
 
 fn visibility_parameter_props(
+    doc: &crate::CadDocument,
+    reader: &str,
     value: &crate::objects::BlockVisibilityParameter,
     p: &mut Vec<(&'static str, Value)>,
 ) {
     p.extend([
-        ("ChainActions", bool_value(value.chain_actions)),
+        // The C# DWG reader assigns the visibility initialization bit to
+        // ChainActions, overwriting the inherited bit, and leaves Value281 false.
+        (
+            "ChainActions",
+            bool_value(if reader == "dwg" {
+                value.is_initialized
+            } else {
+                value.chain_actions
+            }),
+        ),
         ("Description", text(&value.description)),
         ("ElementName", text(&value.element_name)),
         (
             "EvaluatedValue",
-            eval_pair(&crate::objects::BlockEvalExpression {
-                parent_id: crate::objects::BlockEvalExpression::NO_PARENT,
-                major: value.element_major,
-                minor: value.element_minor,
-                node_id: value.eval_node_id,
-                value_code: value.eval_value_code,
-                value: value.eval_value.clone(),
+            eval_pair_value(value.eval_value_code, &value.eval_value),
+        ),
+        // The C# DXF callback tries the visibility map first: its entity-count
+        // code 93 consumes the inherited grip-ID code without assigning it.
+        (
+            "GripId",
+            int(if reader == "dxf" {
+                0
+            } else {
+                value.property_info_count as i64
             }),
         ),
-        ("GripId", int(value.eval_node_id as i64)),
         ("Id", int(value.eval_node_id as i64)),
         ("Label", text(&value.name)),
         ("Location", vec3(value.def_point)),
         ("ShowProperties", bool_value(value.show_properties)),
         ("Value1071", int(value.element_eed_1071 as i64)),
-        ("Value281", bool_value(value.is_initialized)),
+        (
+            "Value281",
+            bool_value(reader != "dwg" && value.is_initialized),
+        ),
         ("Value91", bool_value(value.unknown_bool)),
         ("Value98", int(value.element_major as i64)),
         ("Value99", int(value.element_minor as i64)),
-        ("Entities", handles(value.all_blocks.iter().copied())),
+        (
+            "Entities",
+            handles(
+                value
+                    .all_blocks
+                    .iter()
+                    .copied()
+                    .filter(|h| doc.get_entity(*h).is_some()),
+            ),
+        ),
         (
             "States",
             Value::Array(
@@ -1483,22 +1554,70 @@ fn visibility_parameter_props(
                     .states
                     .iter()
                     .map(|state| {
-                        props(
+                        // State templates use insertion-ordered sets; unresolved
+                        // handles are omitted when the template is built.
+                        let mut entities = HashSet::new();
+                        let mut expressions = HashSet::new();
+                        let state_value = props(
                             "BlockVisibilityParameter.State",
                             [
-                                ("Entities", handles(state.visible_blocks.iter().copied())),
-                                ("Expressions", handles(state.visible_params.iter().copied())),
+                                (
+                                    "Entities",
+                                    handles(state.visible_blocks.iter().copied().filter(|h| {
+                                        entities.insert(*h) && doc.get_entity(*h).is_some()
+                                    })),
+                                ),
+                                (
+                                    "Expressions",
+                                    handles(state.visible_params.iter().copied().filter(|h| {
+                                        expressions.insert(*h) && is_evaluation_expression(doc, *h)
+                                    })),
+                                ),
                                 ("Name", text(&state.name)),
                             ],
-                        )
+                        );
+                        json!([state.name, state_value])
                     })
                     .collect(),
             ),
         ),
     ]);
+    for (name, property) in ["DisplacementX", "DisplacementY"]
+        .into_iter()
+        .zip(&value.property_info)
+    {
+        p.push((
+            name,
+            props(
+                "EvalParameterProperty",
+                [(
+                    "Connections",
+                    Value::Array(
+                        property
+                            .connections
+                            .iter()
+                            .map(|connection| eval_connection(connection.code, &connection.name))
+                            .collect(),
+                    ),
+                )],
+            ),
+        ));
+    }
+}
+
+fn is_evaluation_expression(doc: &crate::CadDocument, h: Handle) -> bool {
+    match doc.objects.get(&h) {
+        Some(ObjectType::BlockVisibilityParameter(_)) => true,
+        Some(ObjectType::DynamicBlock(object)) => super::schema()
+            .get(dynamic_class_name(object).as_str())
+            .is_some_and(|members| members.contains(&"EvaluatedValue")),
+        _ => doc.block_visibility_params.contains_key(&h),
+    }
 }
 
 fn dump_visibility_parameter(
+    doc: &crate::CadDocument,
+    reader: &str,
     handle_value: Handle,
     value: &crate::objects::BlockVisibilityParameter,
 ) -> Value {
@@ -1506,11 +1625,11 @@ fn dump_visibility_parameter(
         "BLOCKVISIBILITYPARAMETER",
         UNLISTED,
         "AcDbBlockVisibilityParameter",
-        Some(&value.name),
+        Some(&dictionary_name(doc, handle_value, &handle(value.owner)).unwrap_or_default()),
         None,
         None,
     );
-    visibility_parameter_props(value, &mut p);
+    visibility_parameter_props(doc, reader, value, &mut p);
     record(
         handle_value,
         "BlockVisibilityParameter",
@@ -1519,17 +1638,28 @@ fn dump_visibility_parameter(
     )
 }
 
-fn dump_dynamic_block(handle_value: Handle, value: &DynamicBlockObject) -> Value {
+fn dump_dynamic_block(
+    doc: &crate::CadDocument,
+    reader: &str,
+    handle_value: Handle,
+    value: &DynamicBlockObject,
+) -> Value {
     let class = dynamic_class_name(value);
+    let subclass = match class.as_str() {
+        "BlockLookupGrip" => "AcDbBlockLookUpGrip",
+        "BlockLookupParameter" => "AcDbBlockLookUpParameter",
+        "BlockRotationAction" => "AcDbBlockRotationAction",
+        _ => &value.cpp_class_name,
+    };
     let mut p = common(
         &value.dxf_name,
         UNLISTED,
-        &value.cpp_class_name,
-        None,
+        subclass,
+        Some(&dictionary_name(doc, handle_value, &handle(value.owner)).unwrap_or_default()),
         Some(&value.reactors),
         value.xdictionary_handle,
     );
-    dynamic_data_props(&value.data, &mut p);
+    dynamic_data_props(&value.data, &mut p, doc, reader);
     typed_record(handle_value, &class, value.owner, p)
 }
 
@@ -1546,7 +1676,12 @@ fn dynamic_class_name(value: &DynamicBlockObject) -> String {
     }
 }
 
-fn dynamic_data_props(value: &DynamicBlockData, p: &mut Vec<(&'static str, Value)>) {
+fn dynamic_data_props(
+    value: &DynamicBlockData,
+    p: &mut Vec<(&'static str, Value)>,
+    doc: &crate::CadDocument,
+    reader: &str,
+) {
     match value {
         DynamicBlockData::Representation(value) => {
             p.extend([
@@ -1556,6 +1691,10 @@ fn dynamic_data_props(value: &DynamicBlockData, p: &mut Vec<(&'static str, Value
         }
         DynamicBlockData::GripLocationComponent(value) => {
             p.extend([
+                (
+                    "Connection",
+                    eval_connection(value.grip_type, &value.expression),
+                ),
                 ("Id", int(value.eval.node_id as i64)),
                 ("Value98", int(value.eval.major as i64)),
                 ("Value99", int(value.eval.minor as i64)),
@@ -1605,6 +1744,10 @@ fn dynamic_data_props(value: &DynamicBlockData, p: &mut Vec<(&'static str, Value
                 ("FlippedStateName", text(&value.flipped_state_label)),
                 ("Label", text(&value.flip_label)),
                 ("LabelPosition", vec3(value.definition_label_point)),
+                (
+                    "UpdatedFlipConnection",
+                    eval_connection(value.flags_96, &value.tooltip),
+                ),
             ]);
         }
         DynamicBlockData::LinearParameter(value) => {
@@ -1657,7 +1800,9 @@ fn dynamic_data_props(value: &DynamicBlockData, p: &mut Vec<(&'static str, Value
                 ("ValueSet", parameter_value_set(&value.value_set)),
             ]);
         }
-        DynamicBlockData::VisibilityParameter(value) => visibility_parameter_props(value, p),
+        DynamicBlockData::VisibilityParameter(value) => {
+            visibility_parameter_props(doc, reader, value, p)
+        }
         DynamicBlockData::XYParameter(value) => {
             two_point_parameter_props(&value.parameter, p);
             p.extend([
@@ -1787,8 +1932,7 @@ fn dynamic_data_props(value: &DynamicBlockData, p: &mut Vec<(&'static str, Value
                         value
                             .nodes
                             .iter()
-                            .enumerate()
-                            .map(|(index, node)| {
+                            .map(|node| {
                                 json!({
                                     "Data1": node.node_data[0],
                                     "Data2": node.node_data[1],
@@ -1796,8 +1940,8 @@ fn dynamic_data_props(value: &DynamicBlockData, p: &mut Vec<(&'static str, Value
                                     "Data4": node.node_data[3],
                                     "Expression": handle(node.expression),
                                     "Flags": node.edge_flags,
-                                    "Id": node.id,
-                                    "Index": index,
+                                    "Id": node.next_id,
+                                    "Index": node.id,
                                 })
                             })
                             .collect(),
@@ -1809,19 +1953,18 @@ fn dynamic_data_props(value: &DynamicBlockData, p: &mut Vec<(&'static str, Value
                         value
                             .edges
                             .iter()
-                            .enumerate()
-                            .map(|(index, edge)| {
+                            .map(|edge| {
                                 json!({
                                     "Data1": edge.outgoing_edges[0],
                                     "Data2": edge.outgoing_edges[1],
                                     "Data3": edge.outgoing_edges[2],
                                     "Data4": edge.outgoing_edges[3],
                                     "Data5": edge.outgoing_edges[4],
-                                    "Flags": edge.incoming_edge,
+                                    "Flags": edge.next_id,
                                     "FromNodeIndex": edge.source_node,
-                                    "Index": index,
+                                    "Index": edge.id,
                                     "ToNodeIndex": edge.destination_node,
-                                    "TrackedCount": edge.next_id,
+                                    "TrackedCount": edge.incoming_edge,
                                 })
                             })
                             .collect(),
@@ -1855,6 +1998,7 @@ fn dynamic_data_props(value: &DynamicBlockData, p: &mut Vec<(&'static str, Value
         | DynamicBlockData::XYGripEntity
         | DynamicBlockData::Unknown => {}
     }
+    dynamic_actions::extend(value, p, doc);
 }
 
 // The following objects have deliberately small public models in acadrust.
