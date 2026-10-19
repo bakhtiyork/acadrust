@@ -4956,10 +4956,7 @@ impl<'a> DwgObjectWriter<'a> {
         p3d.flags.closed = e.flags.is_closed();
         for v in &e.vertices {
             p3d.vertices.push(Vertex3DPolyline {
-                common: EntityCommon {
-                    layer: e.common.layer.clone(),
-                    ..EntityCommon::new()
-                },
+                common: EntityCommon::with_layer(e.common.layer.clone()),
                 position: v.location,
                 flags: v.flags.bits() as i32,
             });

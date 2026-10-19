@@ -287,12 +287,51 @@ pub struct R12EntityMetadata {
     pub child_viewports: Vec<Option<u16>>,
 }
 
-/// Common entity data shared by all entities
+/// Common entity data shared by all entities.
+///
+/// Identity and source record bytes belong to each entity. The remaining fields
+/// live in [`EntityProperties`], shared by clones and equal DWG children. Field
+/// reads and edits continue to work through `Deref`/`DerefMut`; the first edit
+/// detaches shared properties so siblings never change together. Struct literals
+/// can initialize `properties`, or use `new()` followed by field assignments.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct EntityCommon {
-    /// Unique handle
+    /// Unique handle.
     pub handle: Handle,
+    /// Owner handle (soft pointer, code 330).
+    pub owner_handle: Handle,
+    /// Copy-on-write appearance and metadata, flattened in the serde format.
+    #[cfg_attr(feature = "serde", serde(flatten))]
+    pub properties: std::sync::Arc<EntityProperties>,
+    /// The exact merged-stream bytes this entity was decoded from (DWG only),
+    /// with the framing the writer needs to re-emit them verbatim.
+    /// Set by the DWG reader; cleared by every mutable access (`get_entity_mut`,
+    /// `entities_mut`) and by `add_entity`, so it is only ever present on an
+    /// entity that is byte-for-byte what the source file contained. The writer
+    /// copies such records instead of re-encoding them (same target version only).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_record: Option<std::sync::Arc<RawRecord>>,
+}
+
+impl std::ops::Deref for EntityCommon {
+    type Target = EntityProperties;
+
+    fn deref(&self) -> &Self::Target {
+        &self.properties
+    }
+}
+
+impl std::ops::DerefMut for EntityCommon {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        std::sync::Arc::make_mut(&mut self.properties)
+    }
+}
+
+/// Entity appearance, references and extended data shared until edited.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EntityProperties {
     /// Layer name
     pub layer: String,
     /// DWG layer handle as read from the file. Preserved so consumers can tell
@@ -329,8 +368,6 @@ pub struct EntityCommon {
     pub reactors: Vec<Handle>,
     /// Extended dictionary handle ({ACAD_XDICTIONARY}) — hard-owner handle to a Dictionary
     pub xdictionary_handle: Option<Handle>,
-    /// Owner handle (soft pointer, code 330)
-    pub owner_handle: Handle,
 
     // ── Native reference/round-trip fields ──
     /// AcDbColor object handle for a color-book color — R2004+.
@@ -372,14 +409,6 @@ pub struct EntityCommon {
     /// model, so skipped for serde.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub has_ds_data: bool,
-    /// The exact merged-stream bytes this entity was decoded from (DWG only),
-    /// with the framing the writer needs to re-emit them verbatim.
-    /// Set by the DWG reader; cleared by every mutable access (`get_entity_mut`,
-    /// `entities_mut`) and by `add_entity`, so it is only ever present on an
-    /// entity that is byte-for-byte what the source file contained. The writer
-    /// copies such records instead of re-encoding them (same target version only).
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub raw_record: Option<std::sync::Arc<RawRecord>>,
 }
 
 impl EntityCommon {
@@ -400,11 +429,34 @@ impl EntityCommon {
         self.has_ds_data = source.has_ds_data;
     }
 
-    /// Create new common entity data with defaults
+    /// Create common data with shared defaults and no per-instance allocation.
     pub fn new() -> Self {
-        EntityCommon {
-            raw_record: None,
+        static DEFAULT_PROPERTIES: once_cell::sync::Lazy<std::sync::Arc<EntityProperties>> =
+            once_cell::sync::Lazy::new(|| std::sync::Arc::new(EntityProperties::default()));
+        Self {
             handle: Handle::NULL,
+            owner_handle: Handle::NULL,
+            raw_record: None,
+            properties: DEFAULT_PROPERTIES.clone(),
+        }
+    }
+
+    /// Create with a specific layer.
+    pub fn with_layer(layer: impl Into<String>) -> Self {
+        let mut common = Self::new();
+        common.layer = layer.into();
+        common
+    }
+
+    /// Check whether a linetype name is set (not empty and not "ByLayer")
+    pub fn has_linetype(&self) -> bool {
+        !self.linetype.is_empty() && self.linetype != "ByLayer"
+    }
+}
+
+impl Default for EntityProperties {
+    fn default() -> Self {
+        Self {
             layer: "0".to_string(),
             layer_handle: None,
             color: Color::ByLayer,
@@ -419,7 +471,6 @@ impl EntityCommon {
             graphic_data: None,
             reactors: Vec::new(),
             xdictionary_handle: None,
-            owner_handle: Handle::NULL,
             color_book_handle: None,
             full_visual_style_handle: None,
             face_visual_style_handle: None,
@@ -433,19 +484,6 @@ impl EntityCommon {
             r12_metadata: None,
             has_ds_data: false,
         }
-    }
-
-    /// Create with a specific layer
-    pub fn with_layer(layer: impl Into<String>) -> Self {
-        EntityCommon {
-            layer: layer.into(),
-            ..Self::new()
-        }
-    }
-
-    /// Check whether a linetype name is set (not empty and not "ByLayer")
-    pub fn has_linetype(&self) -> bool {
-        !self.linetype.is_empty() && self.linetype != "ByLayer"
     }
 }
 

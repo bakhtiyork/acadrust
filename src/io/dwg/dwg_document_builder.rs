@@ -178,6 +178,10 @@ fn read_owned_vertex_handles(reader: &mut DwgMergedReader, owned_count: i32) -> 
 /// Pending polyline entities awaiting vertex assembly.
 #[derive(Default)]
 struct PendingPolylines {
+    /// One appearance cache per decoding chunk, never shared between workers.
+    /// Consecutive vertices usually have identical properties; keep identity and
+    /// source bytes separate so a cache hit needs neither strings nor collections.
+    common_cache: Option<(EntityCommonData, EntityCommon)>,
     /// Vertex data keyed by owner (parent polyline) handle.
     vertices: HashMap<u64, Vec<PendingVertex>>,
     /// Retained SEQEND keyed by owner (parent polyline or INSERT) handle.
@@ -3664,12 +3668,26 @@ impl DwgDocumentBuilder {
                     Handle::from(next),
                 );
             }
-            let mut entity_common = map_entity_common(
-                &entity_data,
-                maps,
-                document.header.model_space_block_handle,
-                document.header.paper_space_block_handle,
-            );
+            let model = document.header.model_space_block_handle;
+            let paper = document.header.paper_space_block_handle;
+            let child = matches!(type_code, OBJ_VERTEX_2D | OBJ_VERTEX_3D | OBJ_VERTEX_MESH
+                | OBJ_VERTEX_PFACE | OBJ_VERTEX_PFACE_FACE);
+            let mut entity_common = if child {
+                if let Some((_, common)) = pending.common_cache.as_ref()
+                    .filter(|(source, _)| same_child_properties(source, &entity_data))
+                {
+                    let mut common = common.clone();
+                    common.handle = Handle::from(entity_data.common.handle);
+                    common.owner_handle = entity_owner_handle(&entity_data, model, paper);
+                    common
+                } else {
+                    let common = map_entity_common(&entity_data, maps, model, paper);
+                    pending.common_cache = Some((entity_data.clone(), common.clone()));
+                    common
+                }
+            } else {
+                map_entity_common(&entity_data, maps, model, paper)
+            };
             // Keep the verbatim record so an untouched entity can be copied on write
             // instead of re-encoded (see EntityCommon::raw_record).
             entity_common.raw_record = Some(std::sync::Arc::new(crate::entities::RawRecord {
@@ -8260,23 +8278,42 @@ fn map_dimension_common(
     base.block_name = maps.block_name(common.block_handle);
 }
 
+/// Compare every source field consumed by `map_entity_common` except identity.
+/// Record type/handle, owner and pre-R2004 chain links remain per child. Comparing
+/// the source first avoids allocating layer names or XData on the common path.
+fn same_child_properties(a: &EntityCommonData, b: &EntityCommonData) -> bool {
+    a.layer_handle == b.layer_handle
+        && a.color == b.color
+        && a.line_weight == b.line_weight
+        && a.linetype_flags == b.linetype_flags
+        && a.linetype_handle == b.linetype_handle
+        && a.linetype_scale.to_bits() == b.linetype_scale.to_bits()
+        && a.transparency == b.transparency
+        && a.invisible == b.invisible
+        && a.entity_mode == b.entity_mode
+        && a.xdictionary_handle == b.xdictionary_handle
+        && a.color_book_handle == b.color_book_handle
+        && a.full_visual_style_handle == b.full_visual_style_handle
+        && a.face_visual_style_handle == b.face_visual_style_handle
+        && a.edge_visual_style_handle == b.edge_visual_style_handle
+        && a.material_flags == b.material_flags
+        && a.material_handle == b.material_handle
+        && a.shadow_flags == b.shadow_flags
+        && a.plotstyle_flags == b.plotstyle_flags
+        && a.plotstyle_handle == b.plotstyle_handle
+        && a.has_ds_data == b.has_ds_data
+        && a.reactors == b.reactors
+        && a.graphic_data == b.graphic_data
+        && a.common.eed_raw == b.common.eed_raw
+}
+
 fn map_entity_common(
     data: &EntityCommonData,
     maps: &HandleMaps,
     model_space_handle: Handle,
     paper_space_handle: Handle,
 ) -> EntityCommon {
-    let mut common = EntityCommon::new();
-    common.handle = Handle::from(data.common.handle);
-    // Resolve owner from entity_mode:
-    //   0 = explicit owner (handle read from stream)
-    //   1 = paper space (implicit)
-    //   2 = model space (implicit)
-    common.owner_handle = match data.entity_mode {
-        1 => paper_space_handle,
-        2 => model_space_handle,
-        _ => Handle::from(data.owner_handle),
-    };
+    let mut common = crate::entities::EntityProperties::default();
     common.color = data.color;
     common.transparency = data.transparency;
     common.invisible = data.invisible;
@@ -8324,7 +8361,20 @@ fn map_entity_common(
     // R2013+: geometry-in-AcDs flag, needed to pair AcDs SAB blobs with the
     // right modeler entity in object-stream order.
     common.has_ds_data = data.has_ds_data;
-    common
+    EntityCommon {
+        handle: Handle::from(data.common.handle),
+        owner_handle: entity_owner_handle(data, model_space_handle, paper_space_handle),
+        raw_record: None,
+        properties: std::sync::Arc::new(common),
+    }
+}
+
+fn entity_owner_handle(data: &EntityCommonData, model: Handle, paper: Handle) -> Handle {
+    match data.entity_mode {
+        1 => paper,
+        2 => model,
+        _ => Handle::from(data.owner_handle),
+    }
 }
 
 #[cfg(test)]
@@ -8371,7 +8421,7 @@ mod block_entity_chain_tests {
 
 #[cfg(test)]
 mod layer_handle_tests {
-    use super::{map_entity_common, HandleMaps};
+    use super::{map_entity_common, same_child_properties, HandleMaps};
     use crate::io::dwg::dwg_stream_readers::object_reader::{EntityCommonData, ObjectCommonData};
     use crate::types::{Color, Handle, Transparency};
 
@@ -8413,6 +8463,55 @@ mod layer_handle_tests {
 
     fn map(layer_handle: u64, maps: &HandleMaps) -> crate::entities::EntityCommon {
         map_entity_common(&entity_on_layer(layer_handle), maps, Handle::new(0x1F), Handle::new(0x1B))
+    }
+
+    #[test]
+    fn child_property_cache_separates_appearance_from_identity() {
+        let source = entity_on_layer(0x10);
+        let mut sibling = source.clone();
+        sibling.common.handle += 1;
+        sibling.owner_handle = 0x200;
+        sibling.common.type_code = 10;
+        sibling.prev_entity_handle = Some(0x100);
+        sibling.next_entity_handle = Some(0x102);
+        assert!(same_child_properties(&source, &sibling));
+
+        // Each independently optional preamble field must prevent sharing when
+        // it differs, including fields absent from most real vertex records.
+        let changes: &[fn(&mut EntityCommonData)] = &[
+            |d| d.layer_handle += 1,
+            |d| d.color = Color::Index(3),
+            |d| d.line_weight = 5,
+            |d| d.linetype_flags = 1,
+            |d| d.linetype_handle = 42,
+            |d| d.linetype_scale = 2.0,
+            |d| d.transparency = Transparency::BY_BLOCK,
+            |d| d.invisible = true,
+            |d| d.entity_mode = 0,
+            |d| d.xdictionary_handle = Some(42),
+            |d| d.color_book_handle = Some(42),
+            |d| d.full_visual_style_handle = Some(42),
+            |d| d.face_visual_style_handle = Some(42),
+            |d| d.edge_visual_style_handle = Some(42),
+            |d| d.material_flags = 1,
+            |d| d.material_handle = Some(42),
+            |d| d.shadow_flags = 1,
+            |d| d.plotstyle_flags = 1,
+            |d| d.plotstyle_handle = Some(42),
+            |d| d.has_ds_data = true,
+            |d| d.reactors.push(42),
+            |d| d.graphic_data = Some(vec![1, 2]),
+            |d| d.common.eed_raw.push((42, vec![1, 2])),
+        ];
+        let maps = HandleMaps::new();
+        let mapped = map_entity_common(&source, &maps, Handle::new(1), Handle::new(2));
+        for (index, change) in changes.iter().enumerate() {
+            let mut different = source.clone();
+            change(&mut different);
+            assert!(!same_child_properties(&source, &different), "field {index}");
+            let other = map_entity_common(&different, &maps, Handle::new(1), Handle::new(2));
+            assert_ne!(mapped.properties, other.properties, "field {index}");
+        }
     }
 
     #[test]
