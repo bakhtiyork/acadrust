@@ -2011,6 +2011,256 @@ fn hatch_edge(edge: &crate::entities::BoundaryEdge, dwg: bool) -> Value {
 }
 
 fn collect_viewport(doc: &CadDocument, value: &crate::entities::Viewport, out: &mut Vec<Value>) {
+    use crate::objects::ObjectType;
+    let block = doc
+        .block_records
+        .iter()
+        .find(|b| b.handle == value.common.owner_handle);
+    let id = block
+        .and_then(|b| {
+            b.entity_handles
+                .iter()
+                .filter(|h| matches!(doc.get_entity(**h), Some(EntityType::Viewport(_))))
+                .position(|h| *h == value.common.handle)
+        })
+        .map_or(0, |index| (index + 1) as i16);
+    let represents_paper = id == 1
+        && block.is_some_and(|b| {
+            matches!(doc.objects.get(&b.layout), Some(ObjectType::Layout(layout))
+            if !layout.name.eq_ignore_ascii_case("Model"))
+        })
+        && !(value.source.as_ref().is_some_and(|s| s.dxf_codes.is_some())
+            && doc.version <= DxfVersion::AC1009);
+    let mut seen = std::collections::HashSet::new();
+    let frozen =
+        value.frozen_layers.iter().copied().filter(|h| {
+            !h.is_null() && seen.insert(*h) && doc.layers.iter().any(|l| l.handle == *h)
+        });
+    let status = value
+        .source
+        .as_ref()
+        .and_then(|s| s.status_flags)
+        .unwrap_or_else(|| value.status.to_bits() | (i32::from(value.grid_flags.to_bits()) << 18));
+    let mut fields = vec![
+        (
+            "Boundary",
+            optional_handle(
+                (!value.clip_boundary_handle.is_null()
+                    && doc.get_entity(value.clip_boundary_handle).is_some())
+                .then_some(value.clip_boundary_handle),
+            ),
+        ),
+        ("Brightness", number(value.brightness)),
+        ("DefaultLightingType", integer(value.default_lighting_type)),
+        ("FrozenLayers", handles(frozen)),
+        ("RepresentsPaper", bool_value(represents_paper)),
+        ("Scale", optional_handle(viewport_scale(doc, value))),
+        (
+            "ScaleFactor",
+            number(1.0 / (value.view_height / value.height)),
+        ),
+        ("ShadePlotMode", integer(value.shade_plot_mode)),
+        // Both C# reader templates discard this reference.
+        ("VisualStyle", Value::Null),
+        ("ActiveStatus", integer(1)),
+        ("AmbientLightColor", color(value.ambient_color)),
+        ("BackClipPlane", number(value.back_clip_z)),
+        ("Center", vec3(value.center)),
+        ("CircleZoomPercent", integer(value.circle_sides as i64)),
+        ("Contrast", number(value.contrast)),
+        ("DisplayUcsIcon", bool_value(value.ucs_at_origin)),
+        ("Elevation", number(value.elevation)),
+        ("FrontClipPlane", number(value.front_clip_z)),
+        (
+            "GridSpacing",
+            vec2(Vector2::new(value.grid_spacing.x, value.grid_spacing.y)),
+        ),
+        ("Height", number(value.height)),
+        ("Id", integer(id)),
+        ("LensLength", number(value.lens_length)),
+        ("MajorGridLineFrequency", integer(value.grid_major as i64)),
+        (
+            "RenderMode",
+            enum_value(value.render_mode.to_value() as i64),
+        ),
+        ("SnapAngle", number(value.snap_angle)),
+        (
+            "SnapBase",
+            vec2(Vector2::new(value.snap_base.x, value.snap_base.y)),
+        ),
+        (
+            "SnapSpacing",
+            vec2(Vector2::new(value.snap_spacing.x, value.snap_spacing.y)),
+        ),
+        ("Status", integer(status)),
+        ("StyleSheetName", Value::String(value.style_sheet.clone())),
+        ("TwistAngle", number(value.twist_angle)),
+        ("UcsOrigin", vec3(value.ucs_origin)),
+        ("UcsOrthographicType", integer(value.ucs_ortho_type as i64)),
+        ("UcsPerViewport", bool_value(value.ucs_per_viewport)),
+        ("UcsXAxis", vec3(value.ucs_x_axis)),
+        ("UcsYAxis", vec3(value.ucs_y_axis)),
+        ("UseDefaultLighting", bool_value(value.default_lighting)),
+        (
+            "ViewCenter",
+            vec2(Vector2::new(value.view_center.x, value.view_center.y)),
+        ),
+        ("ViewDirection", vec3(value.view_direction)),
+        ("ViewHeight", number(value.view_height)),
+        ("ViewTarget", vec3(value.view_target)),
+        (
+            "ViewWidth",
+            number(value.view_height / value.height * value.width),
+        ),
+        ("Width", number(value.width)),
+    ];
+
+    // C# does not apply legacy MVIEW XData to viewport geometry. Its absent
+    // DXF properties and pre-version DWG fields keep constructor defaults.
+    let legacy_dwg = doc
+        .dwg_source_version
+        .is_some_and(|v| v <= DxfVersion::AC1014);
+    let absent = |code| {
+        value
+            .source
+            .as_ref()
+            .is_some_and(|s| s.dxf_codes.is_some() && !s.contains(code))
+    };
+    let mut set = |name, replacement| {
+        if let Some((_, field)) = fields.iter_mut().find(|(key, _)| *key == name) {
+            *field = replacement;
+        }
+    };
+    for (name, code, default) in [
+        ("Width", 40, number(0.0)),
+        ("Height", 41, number(0.0)),
+        ("CircleZoomPercent", 72, integer(0)),
+        ("LensLength", 42, number(0.0)),
+        ("ViewHeight", 45, number(0.0)),
+        ("ViewCenter", 12, vec2(Vector2::ZERO)),
+        ("ViewDirection", 16, vec3(Vector3::UNIT_Z)),
+        ("ViewTarget", 17, vec3(Vector3::ZERO)),
+        ("TwistAngle", 51, number(0.0)),
+        ("SnapAngle", 50, number(0.0)),
+        ("SnapBase", 13, vec2(Vector2::ZERO)),
+        ("FrontClipPlane", 43, number(0.0)),
+        ("BackClipPlane", 44, number(0.0)),
+        ("GridSpacing", 15, vec2(Vector2::ZERO)),
+        ("SnapSpacing", 14, vec2(Vector2::ZERO)),
+        ("Status", 90, integer(0)),
+        ("StyleSheetName", 1, Value::Null),
+        ("DisplayUcsIcon", 74, bool_value(false)),
+        ("UcsPerViewport", 71, bool_value(false)),
+        ("UcsOrigin", 110, vec3(Vector3::ZERO)),
+        ("UcsXAxis", 111, vec3(Vector3::UNIT_X)),
+        ("UcsYAxis", 112, vec3(Vector3::UNIT_Y)),
+        ("Elevation", 146, number(0.0)),
+        ("UcsOrthographicType", 79, integer(0)),
+        ("MajorGridLineFrequency", 61, integer(0)),
+        ("UseDefaultLighting", 292, bool_value(false)),
+        ("DefaultLightingType", 282, integer(0)),
+    ] {
+        let legacy_field = legacy_dwg && !matches!(code, 40 | 41);
+        let before_2007 = matches!(code, 61 | 292 | 282)
+            && doc
+                .dwg_source_version
+                .is_some_and(|v| v < DxfVersion::AC1021);
+        if absent(code) || legacy_field || before_2007 {
+            set(name, default);
+        }
+    }
+    if legacy_dwg || absent(331) {
+        set("FrozenLayers", json!([]));
+    }
+    if value.source.is_none() && value.style_sheet.is_empty() {
+        set("StyleSheetName", Value::Null);
+    }
+    // Vector components have independent DXF codes. An omitted X must not
+    // erase a supplied Y (or inherit the native spacing default of ten).
+    if value.source.as_ref().is_some_and(|s| s.dxf_codes.is_some()) {
+        for (name, codes, vector, default) in [
+            ("ViewCenter", [12, 22, 0], value.view_center, Vector3::ZERO),
+            (
+                "ViewDirection",
+                [16, 26, 36],
+                value.view_direction,
+                Vector3::UNIT_Z,
+            ),
+            ("ViewTarget", [17, 27, 37], value.view_target, Vector3::ZERO),
+            ("SnapBase", [13, 23, 0], value.snap_base, Vector3::ZERO),
+            (
+                "SnapSpacing",
+                [14, 24, 0],
+                value.snap_spacing,
+                Vector3::ZERO,
+            ),
+            (
+                "GridSpacing",
+                [15, 25, 0],
+                value.grid_spacing,
+                Vector3::ZERO,
+            ),
+            (
+                "UcsOrigin",
+                [110, 120, 130],
+                value.ucs_origin,
+                Vector3::ZERO,
+            ),
+            (
+                "UcsXAxis",
+                [111, 121, 131],
+                value.ucs_x_axis,
+                Vector3::UNIT_X,
+            ),
+            (
+                "UcsYAxis",
+                [112, 122, 132],
+                value.ucs_y_axis,
+                Vector3::UNIT_Y,
+            ),
+        ] {
+            let x = if absent(codes[0]) {
+                default.x
+            } else {
+                vector.x
+            };
+            let y = if absent(codes[1]) {
+                default.y
+            } else {
+                vector.y
+            };
+            let z = if absent(codes[2]) {
+                default.z
+            } else {
+                vector.z
+            };
+            set(
+                name,
+                if codes[2] == 0 {
+                    vec2(Vector2::new(x, y))
+                } else {
+                    vec3(Vector3::new(x, y, z))
+                },
+            );
+        }
+    }
+    let get_number = |name| {
+        fields
+            .iter()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, v)| v.as_f64())
+            .unwrap()
+    };
+    let height = get_number("Height");
+    let view_height = get_number("ViewHeight");
+    let width = get_number("Width");
+    for (name, field) in &mut fields {
+        match *name {
+            "ScaleFactor" => *field = number(1.0 / (view_height / height)),
+            "ViewWidth" => *field = number(view_height / height * width),
+            _ => {}
+        }
+    }
     field_common(
         doc,
         &value.common,
@@ -2019,58 +2269,33 @@ fn collect_viewport(doc: &CadDocument, value: &crate::entities::Viewport, out: &
         0x22,
         "AcDbViewport",
         false,
-        vec![
-            ("ActiveStatus", integer(value.id as i64)),
-            ("AmbientLightColor", color(value.ambient_color)),
-            ("BackClipPlane", number(value.back_clip_z)),
-            ("Center", vec3(value.center)),
-            ("CircleZoomPercent", integer(value.circle_sides as i64)),
-            ("Contrast", number(value.contrast)),
-            ("DisplayUcsIcon", bool_value(value.ucs_icon_visible)),
-            ("Elevation", number(value.elevation)),
-            ("FrontClipPlane", number(value.front_clip_z)),
-            (
-                "GridSpacing",
-                vec2(Vector2::new(value.grid_spacing.x, value.grid_spacing.y)),
-            ),
-            ("Height", number(value.height)),
-            ("Id", integer(value.id as i64)),
-            ("LensLength", number(value.lens_length)),
-            ("MajorGridLineFrequency", integer(value.grid_major as i64)),
-            (
-                "RenderMode",
-                enum_value(value.render_mode.to_value() as i64),
-            ),
-            ("SnapAngle", number(value.snap_angle)),
-            (
-                "SnapBase",
-                vec2(Vector2::new(value.snap_base.x, value.snap_base.y)),
-            ),
-            (
-                "SnapSpacing",
-                vec2(Vector2::new(value.snap_spacing.x, value.snap_spacing.y)),
-            ),
-            ("Status", enum_value(value.status.to_bits() as i64)),
-            ("StyleSheetName", Value::String(value.style_sheet.clone())),
-            ("TwistAngle", number(value.twist_angle)),
-            ("UcsOrigin", vec3(value.ucs_origin)),
-            ("UcsOrthographicType", integer(value.ucs_ortho_type as i64)),
-            ("UcsPerViewport", bool_value(value.ucs_per_viewport)),
-            ("UcsXAxis", vec3(value.ucs_x_axis)),
-            ("UcsYAxis", vec3(value.ucs_y_axis)),
-            ("UseDefaultLighting", bool_value(value.default_lighting)),
-            (
-                "ViewCenter",
-                vec2(Vector2::new(value.view_center.x, value.view_center.y)),
-            ),
-            ("ViewDirection", vec3(value.view_direction)),
-            ("ViewHeight", number(value.view_height)),
-            ("ViewTarget", vec3(value.view_target)),
-            ("ViewWidth", number(value.width)),
-            ("Width", number(value.width)),
-        ],
+        fields,
         out,
     );
+}
+
+fn viewport_scale(doc: &CadDocument, value: &crate::entities::Viewport) -> Option<Handle> {
+    use crate::objects::ObjectType;
+    // Read only the viewport's dictionary and its one scale XRecord; no
+    // whole-document search on this reference path.
+    let dictionary = value
+        .common
+        .xdictionary_handle
+        .or_else(|| doc.xdic_by_handle.get(&value.common.handle).copied())?;
+    let ObjectType::Dictionary(dictionary) = doc.objects.get(&dictionary)? else {
+        return None;
+    };
+    let record = dictionary.get("ASDK_XREC_ANNOTATION_SCALE_INFO")?;
+    let ObjectType::XRecord(record) = doc.objects.get(&record)? else {
+        return None;
+    };
+    let scale = record
+        .entries
+        .iter()
+        .find(|entry| entry.code == 340)?
+        .value
+        .as_handle()?;
+    matches!(doc.objects.get(&scale), Some(ObjectType::Scale(_))).then_some(scale)
 }
 
 fn collect_wipeout(doc: &CadDocument, value: &crate::entities::Wipeout, out: &mut Vec<Value>) {

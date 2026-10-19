@@ -504,9 +504,19 @@ impl PlotWindow {
 /// settings.rotation = PlotRotation::Degrees90;
 /// settings.paper_units = PlotPaperUnits::Millimeters;
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct PlotSettings {
+    /// Group codes present in the source DXF record.
+    ///
+    /// The native fields intentionally retain their constructor defaults when
+    /// a code is omitted.  ACadSharp exposes a different value for a few of
+    /// those omissions, so the compatibility projection needs to distinguish
+    /// an omitted code from an explicitly empty value without changing native
+    /// equality or writer behavior.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dxf_present_codes: Option<[u64; 6]>,
+
     /// Unique handle
     pub handle: Handle,
     /// Owner handle
@@ -578,6 +588,7 @@ impl PlotSettings {
     /// Create new plot settings
     pub fn new(page_name: impl Into<String>) -> Self {
         Self {
+            dxf_present_codes: None,
             handle: Handle::NULL,
             owner: Handle::NULL,
             reactors: Vec::new(),
@@ -610,6 +621,32 @@ impl PlotSettings {
             visual_style_handle: Handle::NULL,
             cached_scale: None,
         }
+    }
+
+    /// Record a DXF group code while reading the source object.
+    pub(crate) fn record_dxf_code(&mut self, code: i32) {
+        if let Ok(code) = usize::try_from(code) {
+            if let Some(bits) = self
+                .dxf_present_codes
+                .as_mut()
+                .and_then(|codes| codes.get_mut(code / 64))
+            {
+                *bits |= 1 << (code % 64);
+            }
+        }
+    }
+
+    /// Whether the source DXF record contained `code`.
+    pub fn dxf_code_present(&self, code: i32) -> bool {
+        usize::try_from(code)
+            .ok()
+            .and_then(|code| {
+                self.dxf_present_codes
+                    .as_ref()
+                    .and_then(|codes| codes.get(code / 64))
+                    .map(|bits| bits & (1 << (code % 64)) != 0)
+            })
+            .unwrap_or(false)
     }
 
     /// Create with a standard paper size
@@ -772,5 +809,41 @@ impl PlotSettings {
 impl Default for PlotSettings {
     fn default() -> Self {
         Self::new("")
+    }
+}
+
+impl PartialEq for PlotSettings {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.owner == other.owner
+            && self.reactors == other.reactors
+            && self.xdictionary_handle == other.xdictionary_handle
+            && self.page_name == other.page_name
+            && self.printer_name == other.printer_name
+            && self.paper_size == other.paper_size
+            && self.plot_view_name == other.plot_view_name
+            && self.current_style_sheet == other.current_style_sheet
+            && self.paper_width == other.paper_width
+            && self.paper_height == other.paper_height
+            && self.margins == other.margins
+            && self.origin_x == other.origin_x
+            && self.origin_y == other.origin_y
+            && self.plot_window == other.plot_window
+            && self.scale_numerator == other.scale_numerator
+            && self.scale_denominator == other.scale_denominator
+            && self.paper_units == other.paper_units
+            && self.rotation == other.rotation
+            && self.plot_type == other.plot_type
+            && self.scale_type == other.scale_type
+            && self.shade_plot_mode == other.shade_plot_mode
+            && self.shade_plot_resolution == other.shade_plot_resolution
+            && self.shade_plot_dpi == other.shade_plot_dpi
+            && self.flags == other.flags
+            && self.standard_scale_factor == other.standard_scale_factor
+            && self.paper_image_origin_x == other.paper_image_origin_x
+            && self.paper_image_origin_y == other.paper_image_origin_y
+            && self.plot_view_handle == other.plot_view_handle
+            && self.visual_style_handle == other.visual_style_handle
+            && self.cached_scale == other.cached_scale
     }
 }

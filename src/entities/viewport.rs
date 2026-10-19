@@ -227,6 +227,37 @@ impl GridFlags {
     }
 }
 
+/// Bounded source metadata for viewport defaults and raw status flags.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ViewportSource {
+    /// Present DXF codes, or None for a DWG source.
+    pub dxf_codes: Option<[u64; 7]>,
+    /// Group 90 / DWG status word before legacy visibility normalization.
+    pub status_flags: Option<i32>,
+}
+
+impl ViewportSource {
+    pub fn contains(&self, code: usize) -> bool {
+        self.dxf_codes
+            .as_ref()
+            .and_then(|codes| codes.get(code / 64))
+            .is_some_and(|bits| bits & (1 << (code % 64)) != 0)
+    }
+
+    pub(crate) fn insert(&mut self, code: i32) {
+        if let Ok(code) = usize::try_from(code) {
+            if let Some(bits) = self
+                .dxf_codes
+                .as_mut()
+                .and_then(|codes| codes.get_mut(code / 64))
+            {
+                *bits |= 1 << (code % 64);
+            }
+        }
+    }
+}
+
 /// Viewport entity - defines a view of model space within paper space
 ///
 /// Viewports are used in paper space layouts to create windows into model space.
@@ -249,9 +280,12 @@ impl GridFlags {
 /// viewport.view_direction = Vector3::new(0.0, 0.0, 1.0);
 /// viewport.custom_scale = 0.5; // 1:2 scale
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Viewport {
+    /// Source field presence and unnormalized flags; excluded from native equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source: Option<Box<ViewportSource>>,
     /// Common entity properties
     pub common: EntityCommon,
     /// Center point in paper space
@@ -356,10 +390,64 @@ pub struct Viewport {
     pub custom_scale: f64,
 }
 
+impl PartialEq for Viewport {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.center == other.center
+            && self.width == other.width
+            && self.height == other.height
+            && self.status == other.status
+            && self.id == other.id
+            && self.dxf_status == other.dxf_status
+            && self.off_screen == other.off_screen
+            && self.view_center == other.view_center
+            && self.snap_base == other.snap_base
+            && self.snap_spacing == other.snap_spacing
+            && self.grid_spacing == other.grid_spacing
+            && self.view_direction == other.view_direction
+            && self.view_target == other.view_target
+            && self.lens_length == other.lens_length
+            && self.front_clip_z == other.front_clip_z
+            && self.back_clip_z == other.back_clip_z
+            && self.view_height == other.view_height
+            && self.snap_angle == other.snap_angle
+            && self.twist_angle == other.twist_angle
+            && self.circle_sides == other.circle_sides
+            && self.frozen_layers == other.frozen_layers
+            && self.clip_boundary_handle == other.clip_boundary_handle
+            && self.render_mode == other.render_mode
+            && self.style_sheet == other.style_sheet
+            && self.ucs_at_origin == other.ucs_at_origin
+            && self.ucs_per_viewport == other.ucs_per_viewport
+            && self.ucs_icon_visible == other.ucs_icon_visible
+            && self.ucs_origin == other.ucs_origin
+            && self.ucs_x_axis == other.ucs_x_axis
+            && self.ucs_y_axis == other.ucs_y_axis
+            && self.ucs_handle == other.ucs_handle
+            && self.base_ucs_handle == other.base_ucs_handle
+            && self.ucs_ortho_type == other.ucs_ortho_type
+            && self.elevation == other.elevation
+            && self.shade_plot_mode == other.shade_plot_mode
+            && self.grid_flags == other.grid_flags
+            && self.grid_major == other.grid_major
+            && self.background_handle == other.background_handle
+            && self.shade_plot_handle == other.shade_plot_handle
+            && self.visual_style_handle == other.visual_style_handle
+            && self.sun_handle == other.sun_handle
+            && self.default_lighting == other.default_lighting
+            && self.default_lighting_type == other.default_lighting_type
+            && self.brightness == other.brightness
+            && self.contrast == other.contrast
+            && self.ambient_color == other.ambient_color
+            && self.custom_scale == other.custom_scale
+    }
+}
+
 impl Viewport {
     /// Create a new viewport with default settings
     pub fn new() -> Self {
         Self {
+            source: None,
             common: EntityCommon::default(),
             center: Vector3::ZERO,
             width: 297.0,  // A4 width in mm

@@ -35,20 +35,25 @@ pub(super) fn collect(doc: &crate::CadDocument, reader: &str, out: &mut Vec<Valu
     let mut handles: Vec<Handle> = doc.objects.keys().copied().collect();
     handles.sort_unstable();
     let mut emitted = HashSet::with_capacity(handles.len());
-    // Layout.PaperViewport is the first viewport in its associated block,
-    // independent of LastActiveViewport and the source layout's viewport list.
-    // Index once, rather than scanning the document for every layout.
-    let paper_viewports: HashMap<_, _> = doc
+    // Layout.Viewports and Layout.PaperViewport come from the associated
+    // block's entity collection in ACadSharp. Index the typed viewports once
+    // rather than scanning the document for every layout.
+    let layout_viewports: HashMap<_, Vec<_>> = doc
         .block_records
         .iter()
         .map(|block| {
-            let first = block.entity_handles.iter().copied().find(|h| {
-                matches!(
-                    doc.get_entity(*h),
-                    Some(crate::entities::EntityType::Viewport(_))
-                )
-            });
-            (block.handle, first)
+            let viewports = block
+                .entity_handles
+                .iter()
+                .copied()
+                .filter(|h| {
+                    matches!(
+                        doc.get_entity(*h),
+                        Some(crate::entities::EntityType::Viewport(_))
+                    )
+                })
+                .collect();
+            (block.handle, viewports)
         })
         .collect();
 
@@ -56,7 +61,7 @@ pub(super) fn collect(doc: &crate::CadDocument, reader: &str, out: &mut Vec<Valu
         let Some(object) = doc.objects.get(&object_handle) else {
             continue;
         };
-        if let Some(value) = dump_object(doc, reader, object_handle, object, &paper_viewports) {
+        if let Some(value) = dump_object(doc, reader, object_handle, object, &layout_viewports) {
             out.push(enrich_object_record(
                 doc,
                 object_handle,
@@ -114,17 +119,24 @@ fn dump_object(
     reader: &str,
     map_handle: Handle,
     object: &ObjectType,
-    paper_viewports: &HashMap<Handle, Option<Handle>>,
+    layout_viewports: &HashMap<Handle, Vec<Handle>>,
 ) -> Option<Value> {
     Some(match object {
         ObjectType::Dictionary(value) => dump_dictionary(map_handle, value),
         ObjectType::DictionaryWithDefault(value) => dump_dictionary_with_default(map_handle, value),
         ObjectType::XRecord(value) => dump_xrecord(_doc, map_handle, value),
-        ObjectType::Layout(value) => dump_layout(
-            map_handle,
-            value,
-            paper_viewports.get(&value.block_record).copied().flatten(),
-        ),
+        ObjectType::Layout(value) => {
+            let associated_viewports = layout_viewports
+                .get(&value.block_record)
+                .map(Vec::as_slice);
+            dump_layout(
+                _doc,
+                reader,
+                map_handle,
+                value,
+                associated_viewports,
+            )
+        }
         ObjectType::Group(value) => dump_group(map_handle, value),
         ObjectType::MLineStyle(value) => dump_mline_style(_doc, reader, map_handle, value),
         ObjectType::MultiLeaderStyle(value) => dump_mleader_style(_doc, map_handle, value),
@@ -143,7 +155,7 @@ fn dump_object(
         ObjectType::PlaceHolder(value) => dump_placeholder(map_handle, value),
         ObjectType::DictionaryVariable(value) => dump_dictionary_variable(map_handle, value),
         ObjectType::SortEntitiesTable(value) => dump_sort_entities(map_handle, value),
-        ObjectType::PlotSettings(value) => dump_plot_settings(map_handle, value),
+        ObjectType::PlotSettings(value) => dump_plot_settings(_doc, reader, map_handle, value),
         ObjectType::WipeoutVariables(value) => dump_wipeout_variables(map_handle, value),
         ObjectType::Field(value) => dump_field(map_handle, value),
         ObjectType::FieldList(value) => dump_field_list(map_handle, value),
@@ -507,7 +519,170 @@ fn hex_bytes(bytes: &[u8]) -> String {
     value
 }
 
-fn dump_layout(handle_value: Handle, value: &Layout, paper_viewport: Option<Handle>) -> Value {
+fn valid_block_record(doc: &crate::CadDocument, value: Handle) -> Option<Handle> {
+    (!value.is_null() && doc.block_records.iter().any(|block| block.handle == value))
+        .then_some(value)
+}
+
+fn valid_ucs(doc: &crate::CadDocument, value: Handle) -> Option<Handle> {
+    (!value.is_null() && doc.ucss.iter().any(|ucs| ucs.handle() == value)).then_some(value)
+}
+
+fn valid_viewport(doc: &crate::CadDocument, value: Handle) -> Option<Handle> {
+    (!value.is_null()
+        && matches!(
+            doc.get_entity(value),
+            Some(crate::entities::EntityType::Viewport(_))
+        ))
+    .then_some(value)
+}
+
+fn source_dxf(doc: &crate::CadDocument) -> bool {
+    doc.dwg_source_version.is_none() && doc.header.dxf_source_variables.is_some()
+}
+
+fn raw_code_present(codes: &Option<Vec<(i32, String)>>, code: i32) -> bool {
+    codes
+        .as_ref()
+        .is_some_and(|codes| codes.iter().any(|(value, _)| *value == code))
+}
+
+fn dxf_plot_code_present(value: &PlotSettings, code: i32) -> bool {
+    value.dxf_code_present(code)
+}
+
+fn plot_string(value: &str, null_when_empty: bool) -> Value {
+    if value.is_empty() && null_when_empty {
+        Value::Null
+    } else {
+        text(value)
+    }
+}
+
+fn dump_layout(
+    doc: &crate::CadDocument,
+    reader: &str,
+    handle_value: Handle,
+    value: &Layout,
+    associated_viewports: Option<&[Handle]>,
+) -> Value {
+    let is_new = reader == "new";
+    let dxf_source = doc.dwg_source_version.is_none()
+        && (reader == "dxf" || source_dxf(doc) || value.raw_plot_settings_codes.is_some());
+    let dwg_source = doc
+        .dwg_source_version
+        .or_else(|| (reader == "dwg").then_some(doc.version));
+    let raw_plot_code = |code| raw_code_present(&value.raw_plot_settings_codes, code);
+    let min_limits = if is_new && value.min_limits == (0.0, 0.0) {
+        (-20.0, -7.5)
+    } else {
+        value.min_limits
+    };
+    let max_limits = if is_new && value.max_limits == (0.0, 0.0) {
+        (277.0, 202.5)
+    } else {
+        value.max_limits
+    };
+    let min_extents = if is_new && value.min_extents == (0.0, 0.0, 0.0) {
+        (25.7, 19.5, 0.0)
+    } else {
+        value.min_extents
+    };
+    let max_extents = if is_new && value.max_extents == (12.0, 9.0, 0.0) {
+        (231.3, 175.5, 0.0)
+    } else {
+        value.max_extents
+    };
+    // DxfObjectsSectionReader.readLayout tries the Layout map before the
+    // PlotSettings map, regardless of subclass. Codes 1 and 70 are consumed
+    // as Name/LayoutFlags, leaving the inherited properties at their defaults.
+    let flags = if is_new || dxf_source {
+        688
+    } else {
+        value.plot_flags.to_bits() as i64
+    };
+    let layout_flags = if is_new && value.flags == 0 {
+        1
+    } else {
+        value.flags as i64
+    };
+    let page_name = if is_new || dxf_source {
+        "none_device"
+    } else {
+        value.plot_page_name.as_str()
+    };
+    let paper_size = if (is_new || (dxf_source && !raw_plot_code(4))) && value.paper_size.is_empty()
+    {
+        "ISO_A4_(210.00_x_297.00_MM)"
+    } else {
+        value.paper_size.as_str()
+    };
+    let paper_units =
+        if (is_new || (dxf_source && !raw_plot_code(72))) && value.plot_paper_units == 0 {
+            1
+        } else {
+            value.plot_paper_units
+        };
+    let plot_type = if (is_new || (dxf_source && !raw_plot_code(74))) && value.plot_type == 5 {
+        1
+    } else {
+        value.plot_type
+    };
+    let plot_view_name_is_null = is_new
+        || dwg_source.is_some_and(|version| version >= DxfVersion::AC1018)
+        || (dxf_source && !raw_plot_code(6));
+    let style_sheet_is_null = is_new || (dxf_source && !raw_plot_code(7));
+    let printer_name_is_null = is_new || (dxf_source && !raw_plot_code(2));
+    // These are three independent C# stored properties, not alias getters:
+    // DWG assigns only the vector; DXF assigns only the two scalar properties.
+    let (paper_image_origin, paper_image_origin_x, paper_image_origin_y) = if dxf_source {
+        (
+            Vector2::ZERO,
+            value.paper_image_origin_x,
+            value.paper_image_origin_y,
+        )
+    } else if dwg_source.is_some() {
+        (
+            Vector2::new(value.paper_image_origin_x, value.paper_image_origin_y),
+            0.0,
+            0.0,
+        )
+    } else {
+        (
+            Vector2::new(value.paper_image_origin_x, value.paper_image_origin_y),
+            value.paper_image_origin_x,
+            value.paper_image_origin_y,
+        )
+    };
+    let paper_width = if (is_new || (dxf_source && !raw_plot_code(44))) && value.paper_width == 0.0
+    {
+        297.0
+    } else {
+        value.paper_width
+    };
+    let paper_height =
+        if (is_new || (dxf_source && !raw_plot_code(45))) && value.paper_height == 0.0 {
+            210.0
+        } else {
+            value.paper_height
+        };
+    let shade_plot_resolution = if is_new || (dxf_source && !raw_plot_code(77)) {
+        0
+    } else {
+        value.shade_plot_resolution as i64
+    };
+    let shade_plot_dpi = if value.shade_plot_dpi <= 0
+        && (is_new
+            || (dxf_source && !raw_plot_code(78))
+            || dwg_source.is_some_and(|version| version < DxfVersion::AC1018))
+    {
+        300
+    } else {
+        value.shade_plot_dpi as i64
+    };
+    let is_model = value.name.eq_ignore_ascii_case("Model");
+    let paper_viewport = associated_viewports.and_then(|viewports| viewports.first().copied());
+
     let mut p = common(
         "LAYOUT",
         0x52,
@@ -517,50 +692,67 @@ fn dump_layout(handle_value: Handle, value: &Layout, paper_viewport: Option<Hand
         value.xdictionary_handle,
     );
     p.extend([
-        ("AssociatedBlock", handle(value.block_record)),
-        ("BaseUCS", optional_handle(Some(value.base_ucs))),
-        ("Elevation", number(value.elevation)),
-        ("Flags", int(value.plot_flags.to_bits() as i64)),
-        ("InsertionBasePoint", tuple3(value.insertion_base)),
-        ("IsPaperSpace", bool_value(value.flags & 1 != 0)),
-        ("LastActiveViewport", optional_handle(Some(value.viewport))),
-        ("LayoutFlags", int(value.flags as i64)),
-        ("MaxExtents", tuple3(value.max_extents)),
-        ("MaxLimits", tuple2(value.max_limits)),
-        ("MinExtents", tuple3(value.min_extents)),
-        ("MinLimits", tuple2(value.min_limits)),
-        ("Origin", tuple3(value.ucs_origin)),
-        ("PageName", text(&value.plot_page_name)),
-        ("PaperHeight", number(value.paper_height)),
         (
-            "PaperImageOrigin",
-            vec2(Vector2::new(
-                value.paper_image_origin_x,
-                value.paper_image_origin_y,
-            )),
+            "AssociatedBlock",
+            optional_handle(valid_block_record(doc, value.block_record)),
         ),
-        ("PaperImageOriginX", number(value.paper_image_origin_x)),
-        ("PaperImageOriginY", number(value.paper_image_origin_y)),
+        ("BaseUCS", optional_handle(valid_ucs(doc, value.base_ucs))),
+        ("Elevation", number(value.elevation)),
+        ("Flags", int(flags)),
+        ("InsertionBasePoint", tuple3(value.insertion_base)),
+        ("IsPaperSpace", bool_value(!is_model)),
+        (
+            "LastActiveViewport",
+            // DXF fills LasActiveViewportHandle, but CadLayoutTemplate builds
+            // only ActiveViewportHandle (the field populated by DWG).
+            optional_handle(if dxf_source {
+                None
+            } else {
+                valid_viewport(doc, value.viewport)
+            }),
+        ),
+        ("LayoutFlags", int(layout_flags)),
+        ("MaxExtents", tuple3(max_extents)),
+        ("MaxLimits", tuple2(max_limits)),
+        ("MinExtents", tuple3(min_extents)),
+        ("MinLimits", tuple2(min_limits)),
+        ("Origin", tuple3(value.ucs_origin)),
+        ("PageName", text(page_name)),
+        ("PaperHeight", number(paper_height)),
+        ("PaperImageOrigin", vec2(paper_image_origin)),
+        ("PaperImageOriginX", number(paper_image_origin_x)),
+        ("PaperImageOriginY", number(paper_image_origin_y)),
         ("PaperRotation", int(value.plot_rotation as i64)),
-        ("PaperSize", text(&value.paper_size)),
-        ("PaperUnits", int(value.plot_paper_units as i64)),
-        ("PaperWidth", number(value.paper_width)),
+        ("PaperSize", text(paper_size)),
+        ("PaperUnits", int(paper_units as i64)),
+        ("PaperWidth", number(paper_width)),
         ("PlotOriginX", number(value.plot_origin_x)),
         ("PlotOriginY", number(value.plot_origin_y)),
-        ("PlotType", int(value.plot_type as i64)),
-        ("PlotViewName", text(&value.plot_view_name)),
-        ("ScaledFit", int(value.plot_scale_type as i64)),
-        ("ShadePlotDPI", int(value.shade_plot_dpi as i64)),
-        ("ShadePlotMode", int(value.shade_plot_mode as i64)),
+        ("PlotType", int(plot_type as i64)),
         (
-            "ShadePlotResolutionMode",
-            int(value.shade_plot_resolution as i64),
+            "PlotViewName",
+            if dwg_source.is_some_and(|version| version >= DxfVersion::AC1018) {
+                Value::Null
+            } else {
+                plot_string(&value.plot_view_name, plot_view_name_is_null)
+            },
         ),
+        ("ScaledFit", int(value.plot_scale_type as i64)),
+        ("ShadePlotDPI", int(shade_plot_dpi)),
+        ("ShadePlotIDHandle", int(0)),
+        ("ShadePlotMode", int(value.shade_plot_mode as i64)),
+        ("ShadePlotResolutionMode", int(shade_plot_resolution)),
         ("StandardScale", number(value.plot_scale_factor)),
-        ("StyleSheet", text(&value.plot_style_sheet)),
-        ("SystemPrinterName", text(&value.plot_printer_name)),
+        (
+            "StyleSheet",
+            plot_string(&value.plot_style_sheet, style_sheet_is_null),
+        ),
+        (
+            "SystemPrinterName",
+            plot_string(&value.plot_printer_name, printer_name_is_null),
+        ),
         ("TabOrder", int(value.tab_order as i64)),
-        ("UCS", optional_handle(Some(value.named_ucs))),
+        ("UCS", optional_handle(valid_ucs(doc, value.named_ucs))),
         ("UcsOrthographicType", int(value.ucs_ortho_type as i64)),
         (
             "UnprintableMargin",
@@ -585,14 +777,23 @@ fn dump_layout(handle_value: Handle, value: &Layout, paper_viewport: Option<Hand
     p.push(("DenominatorScale", number(value.plot_scale_denominator)));
     p.push((
         "PrintScale",
-        number(if value.plot_scale_denominator == 0.0 {
-            1.0
-        } else {
-            value.plot_scale_numerator / value.plot_scale_denominator
-        }),
+        number(value.plot_scale_numerator / value.plot_scale_denominator),
     ));
-    p.push(("Viewports", handles(value.viewports.iter().copied())));
-    p.push(("PaperViewport", optional_handle(paper_viewport)));
+    p.push((
+        "Viewports",
+        associated_viewports
+            .map(|viewports| handles(viewports.iter().copied()))
+            .unwrap_or(Value::Null),
+    ));
+    p.push((
+        "PaperViewport",
+        if associated_viewports.is_some() {
+            optional_handle(paper_viewport)
+        } else {
+            // Enumerable.FirstOrDefault receives null when AssociatedBlock is absent.
+            text("!throws:ArgumentNullException")
+        },
+    ));
     record(handle_value, "Layout", value.owner, props("Layout", p))
 }
 
@@ -1582,7 +1783,91 @@ fn paper_margin(value: &crate::objects::PaperMargin) -> Value {
     )
 }
 
-fn dump_plot_settings(handle_value: Handle, value: &PlotSettings) -> Value {
+fn dump_plot_settings(
+    doc: &crate::CadDocument,
+    reader: &str,
+    handle_value: Handle,
+    value: &PlotSettings,
+) -> Value {
+    let is_new = reader == "new";
+    let dxf_source = doc.dwg_source_version.is_none()
+        && (reader == "dxf" || source_dxf(doc) || value.dxf_present_codes.is_some());
+    let dwg_source = doc
+        .dwg_source_version
+        .or_else(|| (reader == "dwg").then_some(doc.version));
+    let dxf_code = |code| dxf_plot_code_present(value, code);
+    let flags = if is_new || (dxf_source && !dxf_code(70) && value.flags.to_bits() == 0) {
+        688
+    } else {
+        value.flags.to_bits() as i64
+    };
+    let page_name = if (is_new || (dxf_source && !dxf_code(1))) && value.page_name.is_empty() {
+        "none_device"
+    } else {
+        value.page_name.as_str()
+    };
+    let plot_view_name_is_null = is_new
+        || dwg_source.is_some_and(|version| version >= DxfVersion::AC1018)
+        || (dxf_source && !dxf_code(6));
+    // These are three independent C# stored properties, not alias getters:
+    // DWG assigns only the vector; DXF assigns only the two scalar properties.
+    let (paper_image_origin, paper_image_origin_x, paper_image_origin_y) = if dxf_source {
+        (
+            Vector2::ZERO,
+            value.paper_image_origin_x,
+            value.paper_image_origin_y,
+        )
+    } else if dwg_source.is_some() {
+        (
+            Vector2::new(value.paper_image_origin_x, value.paper_image_origin_y),
+            0.0,
+            0.0,
+        )
+    } else {
+        (
+            Vector2::new(value.paper_image_origin_x, value.paper_image_origin_y),
+            value.paper_image_origin_x,
+            value.paper_image_origin_y,
+        )
+    };
+    let paper_size = if (is_new || (dxf_source && !dxf_code(4))) && value.paper_size.is_empty() {
+        "ISO_A4_(210.00_x_297.00_MM)"
+    } else {
+        value.paper_size.as_str()
+    };
+    let paper_width = if (is_new || (dxf_source && !dxf_code(44))) && value.paper_width == 0.0 {
+        297.0
+    } else {
+        value.paper_width
+    };
+    let paper_height = if (is_new || (dxf_source && !dxf_code(45))) && value.paper_height == 0.0 {
+        210.0
+    } else {
+        value.paper_height
+    };
+    let paper_units =
+        if (is_new || (dxf_source && !dxf_code(72))) && value.paper_units.to_code() == 0 {
+            1
+        } else {
+            value.paper_units.to_code()
+        };
+    let plot_type = if (is_new || (dxf_source && !dxf_code(74))) && value.plot_type.to_code() == 4 {
+        1
+    } else {
+        value.plot_type.to_code()
+    };
+    let shade_plot_resolution = if is_new || (dxf_source && !dxf_code(77)) {
+        0
+    } else {
+        value.shade_plot_resolution.to_code()
+    };
+    let shade_plot_dpi = if value.shade_plot_dpi <= 0
+        && (is_new || dwg_source.is_some_and(|version| version < DxfVersion::AC1018))
+    {
+        300
+    } else {
+        value.shade_plot_dpi as i64
+    };
     let mut p = common(
         "PLOTSETTINGS",
         UNLISTED,
@@ -1593,46 +1878,51 @@ fn dump_plot_settings(handle_value: Handle, value: &PlotSettings) -> Value {
     );
     p.extend([
         ("DenominatorScale", number(value.scale_denominator)),
-        ("Flags", int(value.flags.to_bits() as i64)),
+        ("Flags", int(flags)),
         ("NumeratorScale", number(value.scale_numerator)),
-        ("PageName", text(&value.page_name)),
-        ("PaperHeight", number(value.paper_height)),
-        (
-            "PaperImageOrigin",
-            vec2(Vector2::new(
-                value.paper_image_origin_x,
-                value.paper_image_origin_y,
-            )),
-        ),
-        ("PaperImageOriginX", number(value.paper_image_origin_x)),
-        ("PaperImageOriginY", number(value.paper_image_origin_y)),
+        ("PageName", text(page_name)),
+        ("PaperHeight", number(paper_height)),
+        ("PaperImageOrigin", vec2(paper_image_origin)),
+        ("PaperImageOriginX", number(paper_image_origin_x)),
+        ("PaperImageOriginY", number(paper_image_origin_y)),
         ("PaperRotation", int(value.rotation.to_code() as i64)),
-        ("PaperSize", text(&value.paper_size)),
-        ("PaperUnits", int(value.paper_units.to_code() as i64)),
-        ("PaperWidth", number(value.paper_width)),
+        ("PaperSize", text(paper_size)),
+        ("PaperUnits", int(paper_units as i64)),
+        ("PaperWidth", number(paper_width)),
         ("PlotOriginX", number(value.origin_x)),
         ("PlotOriginY", number(value.origin_y)),
-        ("PlotType", int(value.plot_type.to_code() as i64)),
-        ("PlotViewName", text(&value.plot_view_name)),
+        ("PlotType", int(plot_type as i64)),
+        (
+            "PlotViewName",
+            if dwg_source.is_some_and(|version| version >= DxfVersion::AC1018) {
+                Value::Null
+            } else {
+                plot_string(&value.plot_view_name, plot_view_name_is_null)
+            },
+        ),
         (
             "PrintScale",
-            number(if value.scale_denominator == 0.0 {
-                1.0
-            } else {
-                value.scale_numerator / value.scale_denominator
-            }),
+            number(value.scale_numerator / value.scale_denominator),
         ),
         ("ScaledFit", int(value.scale_type.to_code() as i64)),
-        ("ShadePlotDPI", int(value.shade_plot_dpi as i64)),
-        ("ShadePlotIDHandle", json!(value.plot_view_handle.value())),
+        ("ShadePlotDPI", int(shade_plot_dpi)),
+        // ACadSharp marks code 333 as an ignored reference and never assigns
+        // it while reading either DXF or DWG.
+        ("ShadePlotIDHandle", int(0)),
         ("ShadePlotMode", int(value.shade_plot_mode.to_code() as i64)),
-        (
-            "ShadePlotResolutionMode",
-            int(value.shade_plot_resolution.to_code() as i64),
-        ),
+        ("ShadePlotResolutionMode", int(shade_plot_resolution as i64)),
         ("StandardScale", number(value.standard_scale_factor)),
-        ("StyleSheet", text(&value.current_style_sheet)),
-        ("SystemPrinterName", text(&value.printer_name)),
+        (
+            "StyleSheet",
+            plot_string(
+                &value.current_style_sheet,
+                is_new || (dxf_source && !dxf_code(7)),
+            ),
+        ),
+        (
+            "SystemPrinterName",
+            plot_string(&value.printer_name, is_new || (dxf_source && !dxf_code(2))),
+        ),
         ("UnprintableMargin", paper_margin(&value.margins)),
         ("WindowLowerLeftX", number(value.plot_window.lower_left_x)),
         ("WindowLowerLeftY", number(value.plot_window.lower_left_y)),

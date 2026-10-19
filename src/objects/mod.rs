@@ -534,6 +534,7 @@ impl ObjectType {
                 *raw_dwg_version = None;
             }
             ObjectType::Layout(value) => value.raw_plot_settings_codes = None,
+            ObjectType::PlotSettings(value) => value.dxf_present_codes = None,
             _ => {}
         }
     }
@@ -591,6 +592,9 @@ impl ObjectType {
         match (self, source) {
             (Self::Layout(value), Self::Layout(source)) => {
                 value.raw_plot_settings_codes = source.raw_plot_settings_codes.clone();
+            }
+            (Self::PlotSettings(value), Self::PlotSettings(source)) => {
+                value.dxf_present_codes = source.dxf_present_codes;
             }
             (Self::XRecord(value), Self::XRecord(source)) => {
                 value.raw_dwg_data = source.raw_dwg_data.clone();
