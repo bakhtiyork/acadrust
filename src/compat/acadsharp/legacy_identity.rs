@@ -158,7 +158,19 @@ fn dictionary(h: u64, owner: u64, name: &str) -> Value {
     )
 }
 
-pub(super) fn apply(doc: &CadDocument, header: &mut Value, records: &mut Vec<Value>) {
+/// Handle rewrite retained for rendering one deferred record after replay.
+pub(super) struct Rewrite {
+    refs: HashSet<&'static str>,
+    map: HashMap<u64, u64>,
+}
+
+impl Rewrite {
+    pub(super) fn apply(&self, value: &mut Value) {
+        rewrite(value, "", &self.refs, &self.map);
+    }
+}
+
+pub(super) fn apply(doc: &CadDocument, header: &mut Value, records: &mut Vec<Value>) -> Rewrite {
     let source_tables = doc.legacy_dxf_tables.as_ref().expect("R12 source tables");
     let source_blocks = doc.legacy_dxf_blocks.as_deref().unwrap_or(&[]);
     let mut prototypes = HashMap::new();
@@ -576,6 +588,7 @@ pub(super) fn apply(doc: &CadDocument, header: &mut Value, records: &mut Vec<Val
         }
     }
     *records = out;
+    Rewrite { refs, map }
 }
 
 #[cfg(test)]

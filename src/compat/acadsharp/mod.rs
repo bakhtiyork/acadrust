@@ -24,6 +24,7 @@ mod objects;
 mod palette;
 mod registration;
 mod registration_order;
+mod stream;
 mod tables;
 mod table_dimstyle;
 mod table_viewports;
@@ -193,6 +194,28 @@ pub fn dump_reader_document(doc: &CadDocument, file: &str, reader: &str) -> Valu
     dump_document_view(doc, file, reader, true)
 }
 
+/// Write the canonical inventory without retaining its JSON property trees.
+/// Use a buffered writer for files or other expensive output sinks.
+pub fn write_document(
+    doc: &CadDocument,
+    file: &str,
+    reader: &str,
+    writer: &mut impl std::io::Write,
+) -> serde_json::Result<()> {
+    stream::write_view(doc, file, reader, false, writer)
+}
+
+/// Streaming counterpart of [`dump_reader_document`], including the reader's
+/// registration and handle-remapping policy.
+pub fn write_reader_document(
+    doc: &CadDocument,
+    file: &str,
+    reader: &str,
+    writer: &mut impl std::io::Write,
+) -> serde_json::Result<()> {
+    stream::write_view(doc, file, reader, true, writer)
+}
+
 fn dump_document_view(doc: &CadDocument, file: &str, reader: &str, read_view: bool) -> Value {
     let mut objects = Vec::new();
     tables::collect(doc, &mut objects);
@@ -237,16 +260,38 @@ pub fn error_dump(file: &str, reader: &str, error: &str) -> Value {
 }
 /// Read once in failsafe mode. Reader panics become canonical error dumps.
 pub fn dump_file(path: &Path) -> Value {
-    use crate::io::dwg::{DwgReadOptions, DwgReader};
-    use crate::io::dxf::{DxfReader, DxfReaderConfiguration};
     let file = path.file_name().unwrap_or_default().to_string_lossy();
     let reader = path
         .extension()
         .unwrap_or_default()
         .to_string_lossy()
         .to_ascii_lowercase();
+    match read_file(path, &reader) {
+        Ok(doc) => dump_reader_document(&doc, &file, &reader),
+        Err(error) => error_dump(&file, &reader, &error),
+    }
+}
+
+/// Read in failsafe mode and stream a canonical dump. Reader failures are
+/// serialized as error dumps; output failures are returned to the caller.
+pub fn write_file(path: &Path, writer: &mut impl std::io::Write) -> serde_json::Result<()> {
+    let file = path.file_name().unwrap_or_default().to_string_lossy();
+    let reader = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    match read_file(path, &reader) {
+        Ok(doc) => write_reader_document(&doc, &file, &reader, writer),
+        Err(error) => serde_json::to_writer(writer, &error_dump(&file, &reader, &error)),
+    }
+}
+
+fn read_file(path: &Path, reader: &str) -> Result<CadDocument, String> {
+    use crate::io::dwg::{DwgReadOptions, DwgReader};
+    use crate::io::dxf::{DxfReader, DxfReaderConfiguration};
     let result = std::panic::catch_unwind(|| -> crate::Result<CadDocument> {
-        match reader.as_str() {
+        match reader {
             "dxf" => DxfReader::from_file(path)?
                 .with_configuration(DxfReaderConfiguration {
                     failsafe: true,
@@ -260,11 +305,11 @@ pub fn dump_file(path: &Path) -> Value {
         }
     });
     match result {
-        Ok(Ok(doc)) => dump_reader_document(&doc, &file, &reader),
+        Ok(Ok(doc)) => Ok(doc),
         Ok(Err(e)) => {
             let debug = format!("{e:?}");
             let kind = debug.split(['(', ' ', '{']).next().unwrap_or("DxfError");
-            error_dump(&file, &reader, &format!("{kind}: {e}"))
+            Err(format!("{kind}: {e}"))
         }
         Err(payload) => {
             let message = payload
@@ -272,7 +317,7 @@ pub fn dump_file(path: &Path) -> Value {
                 .map(String::as_str)
                 .or_else(|| payload.downcast_ref::<&str>().copied())
                 .unwrap_or("reader panicked");
-            error_dump(&file, &reader, &format!("Panic: {message}"))
+            Err(format!("Panic: {message}"))
         }
     }
 }

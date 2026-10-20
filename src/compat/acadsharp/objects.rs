@@ -29,89 +29,111 @@ mod dynamic_tests;
 
 const UNLISTED: i64 = -999;
 
-/// Emit all non-entity objects.  The document map is handle keyed, but map
-/// iteration is intentionally not part of the dump contract, so sort first.
-pub(super) fn collect(doc: &crate::CadDocument, reader: &str, out: &mut Vec<Value>) {
-    let mut handles: Vec<Handle> = doc.objects.keys().copied().collect();
-    handles.sort_unstable();
-    let mut emitted = HashSet::with_capacity(handles.len());
-    // Layout.Viewports and Layout.PaperViewport come from the associated
-    // block's entity collection in ACadSharp. Index the typed viewports once
-    // rather than scanning the document for every layout.
-    let layout_viewports: HashMap<_, Vec<_>> = doc
-        .block_records
-        .iter()
-        .map(|block| {
-            let viewports = block
-                .entity_handles
-                .iter()
-                .copied()
-                .filter(|h| {
-                    matches!(
-                        doc.get_entity(*h),
-                        Some(crate::entities::EntityType::Viewport(_))
-                    )
-                })
-                .collect();
-            (block.handle, viewports)
-        })
-        .collect();
+/// Borrowed object recipes and a single layout index shared by both passes.
+pub(super) struct Records<'a> {
+    doc: &'a crate::CadDocument,
+    reader: &'a str,
+    layout_viewports: HashMap<Handle, Vec<Handle>>,
+    sources: Vec<Source<'a>>,
+}
 
-    for object_handle in handles {
-        let Some(object) = doc.objects.get(&object_handle) else {
-            continue;
-        };
-        if let Some(value) = dump_object(doc, reader, object_handle, object, &layout_viewports) {
-            out.push(enrich_object_record(
-                doc,
-                object_handle,
+enum Source<'a> {
+    Object(Handle, &'a ObjectType),
+    Visibility(Handle, &'a crate::objects::BlockVisibilityParameter),
+    Field(Handle, &'a crate::document::FieldDef),
+}
+
+impl<'a> Records<'a> {
+    pub(super) fn new(doc: &'a crate::CadDocument, reader: &'a str) -> Self {
+        let layout_viewports: HashMap<_, Vec<_>> = doc
+            .block_records
+            .iter()
+            .map(|block| {
+                let viewports = block
+                    .entity_handles
+                    .iter()
+                    .copied()
+                    .filter(|h| {
+                        matches!(
+                            doc.get_entity(*h),
+                            Some(crate::entities::EntityType::Viewport(_))
+                        )
+                    })
+                    .collect();
+                (block.handle, viewports)
+            })
+            .collect();
+        let mut sources = Vec::new();
+        let mut emitted = HashSet::new();
+        let mut handles: Vec<_> = doc.objects.keys().copied().collect();
+        handles.sort_unstable();
+        for h in handles {
+            sources.push(Source::Object(h, &doc.objects[&h]));
+            emitted.insert(h);
+        }
+        let mut handles: Vec<_> = doc.block_visibility_params.keys().copied().collect();
+        handles.sort_unstable();
+        for h in handles {
+            let value = &doc.block_visibility_params[&h];
+            let h = if value.handle.is_null() {
+                h
+            } else {
+                value.handle
+            };
+            if emitted.insert(h) {
+                sources.push(Source::Visibility(h, value));
+            }
+        }
+        let mut handles: Vec<_> = doc.fields.keys().copied().collect();
+        handles.sort_unstable();
+        for h in handles {
+            let value = &doc.fields[&h];
+            let h = if value.handle.is_null() {
+                h
+            } else {
+                value.handle
+            };
+            if emitted.insert(h) {
+                sources.push(Source::Field(h, value));
+            }
+        }
+        Self {
+            doc,
+            reader,
+            layout_viewports,
+            sources,
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.sources.len()
+    }
+
+    pub(super) fn render(&self, index: usize) -> Value {
+        match self.sources[index] {
+            Source::Object(h, object) => enrich_object_record(
+                self.doc,
+                h,
                 Some(object),
-                value,
-            ));
-            emitted.insert(object_handle);
+                dump_object(self.doc, self.reader, h, object, &self.layout_viewports)
+                    .expect("every native object has a canonical representation"),
+            ),
+            Source::Visibility(h, value) => enrich_object_record(
+                self.doc,
+                h,
+                None,
+                dump_visibility_parameter(self.doc, self.reader, h, value),
+            ),
+            Source::Field(h, value) => {
+                enrich_object_record(self.doc, h, None, dump_field_definition(h, value))
+            }
         }
     }
+}
 
-    // Several DWG readers retain these records in side maps while leaving the
-    // original object as an opaque/unknown stream entry.  Emit a typed record
-    // only when the object map does not already provide one.
-    let mut visibility_handles: Vec<Handle> = doc.block_visibility_params.keys().copied().collect();
-    visibility_handles.sort_unstable();
-    for map_handle in visibility_handles {
-        let Some(value) = doc.block_visibility_params.get(&map_handle) else {
-            continue;
-        };
-        let object_handle = if value.handle.is_null() {
-            map_handle
-        } else {
-            value.handle
-        };
-        if emitted.contains(&object_handle) {
-            continue;
-        }
-        let value = dump_visibility_parameter(doc, reader, object_handle, value);
-        out.push(enrich_object_record(doc, object_handle, None, value));
-        emitted.insert(object_handle);
-    }
-
-    let mut field_handles: Vec<Handle> = doc.fields.keys().copied().collect();
-    field_handles.sort_unstable();
-    for map_handle in field_handles {
-        let Some(value) = doc.fields.get(&map_handle) else {
-            continue;
-        };
-        let object_handle = if value.handle.is_null() {
-            map_handle
-        } else {
-            value.handle
-        };
-        if emitted.contains(&object_handle) {
-            continue;
-        }
-        let value = dump_field_definition(object_handle, value);
-        out.push(enrich_object_record(doc, object_handle, None, value));
-        emitted.insert(object_handle);
-    }
+pub(super) fn collect(doc: &crate::CadDocument, reader: &str, out: &mut Vec<Value>) {
+    let records = Records::new(doc, reader);
+    out.extend((0..records.len()).map(|index| records.render(index)));
 }
 
 fn dump_object(

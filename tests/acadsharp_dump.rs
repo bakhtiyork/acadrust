@@ -568,3 +568,166 @@ fn mtext_height_and_alignment_use_the_retained_fields() {
     assert_eq!(p["InsertPoint"], json!([4.0, 5.0, 6.0]));
     assert_eq!(p["RectangleHeight"], 0.0);
 }
+
+fn assert_stream_bytes(doc: &CadDocument, reader: &str, reader_view: bool) {
+    let mut bytes = Vec::new();
+    let expected = if reader_view {
+        dump::write_reader_document(doc, "escaped \"file\"\n.dxf", reader, &mut bytes).unwrap();
+        dump::dump_reader_document(doc, "escaped \"file\"\n.dxf", reader)
+    } else {
+        dump::write_document(doc, "escaped \"file\"\n.dxf", reader, &mut bytes).unwrap();
+        dump::dump_document(doc, "escaped \"file\"\n.dxf", reader)
+    };
+    assert_eq!(bytes, serde_json::to_vec(&expected).unwrap());
+}
+
+#[test]
+fn streaming_preserves_inventory_and_reader_projection_bytes() {
+    let mut doc = dump::new_document();
+    let mut line = Line::default();
+    line.start.x = f64::INFINITY;
+    line.end.y = f64::NAN;
+    line.common.color = Color::from_rgb(11, 23, 45);
+    let h = doc.add_entity(EntityType::Line(line)).unwrap();
+    let mut text = acadrust::entities::MText::new();
+    text.value = "雪 \\ \"quoted\"\n\t\u{0}".into();
+    doc.add_entity(EntityType::MText(Box::new(text))).unwrap();
+    let mut xrecord = XRecord::new();
+    xrecord.handle = Handle::new(0x4000);
+    xrecord.owner = doc.header.named_objects_dict_handle;
+    xrecord.add_handle(330, h);
+    xrecord.add_handle(330, Handle::new(0xFFFF));
+    xrecord.add_string(1, "#20 is text");
+    doc.objects
+        .insert(xrecord.handle, ObjectType::XRecord(xrecord));
+    let ObjectType::Dictionary(root) = doc
+        .objects
+        .get_mut(&doc.header.named_objects_dict_handle)
+        .unwrap()
+    else {
+        panic!("default root dictionary");
+    };
+    root.entries.push(("record".into(), Handle::new(0x4000)));
+    // A sidecar at an entity handle must still lose to the concrete entity.
+    let mut duplicate = Dictionary::new();
+    duplicate.handle = h;
+    doc.objects.insert(h, ObjectType::Dictionary(duplicate));
+    for reader in ["new", "dwg", "dxf"] {
+        assert_stream_bytes(&doc, reader, false);
+        assert_stream_bytes(&doc, reader, true);
+    }
+    doc.header.source_handle_seed = Some(0x5000);
+    for reader in ["dwg", "dxf"] {
+        assert_stream_bytes(&doc, reader, true);
+    }
+}
+
+#[test]
+fn streaming_preserves_legacy_replay_and_compound_child_bytes() {
+    use acadrust::io::dxf::DxfReader;
+    use std::io::Cursor;
+    // Unnamed style prototypes, handle allocation, nested entities, and source
+    // references all exercise the deferred record's identity across replay.
+    let source = concat!(
+        "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n9\n$HANDSEED\n5\n100\n0\nENDSEC\n",
+        "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nSTYLE\n",
+        "0\nSTYLE\n2\n\n70\n1\n3\nfirst.shx\n0\nSTYLE\n2\n\n70\n1\n3\nsecond.shx\n",
+        "0\nENDTAB\n0\nENDSEC\n",
+        "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\n*Model_Space\n70\n0\n0\nENDBLK\n5\n20\n0\nENDSEC\n",
+        "0\nSECTION\n2\nENTITIES\n",
+        "0\nINSERT\n5\n30\n2\n*Model_Space\n66\n1\n10\n0\n20\n0\n",
+        "0\nATTRIB\n5\n31\n1\nlabel\n2\nTAG\n70\n0\n10\n0\n20\n0\n40\n1\n0\nSEQEND\n5\n32\n",
+        "0\nPOLYLINE\n5\n40\n66\n1\n70\n8\n",
+        "0\nVERTEX\n5\n41\n10\n1\n20\n2\n30\n3\n70\n32\n0\nSEQEND\n5\n42\n",
+        "0\nENDSEC\n0\nEOF\n"
+    );
+    let doc = DxfReader::from_reader(Cursor::new(source.as_bytes()))
+        .unwrap()
+        .read()
+        .unwrap();
+    assert_stream_bytes(&doc, "dxf", true);
+    assert_stream_bytes(&doc, "dxf", false);
+    let modern = source.replace("AC1009", "AC1015");
+    let doc = DxfReader::from_reader(Cursor::new(modern.into_bytes()))
+        .unwrap()
+        .read()
+        .unwrap();
+    assert_stream_bytes(&doc, "dxf", true);
+}
+
+#[test]
+fn streaming_propagates_output_errors_and_preserves_reader_error_bytes() {
+    struct FailingWriter(usize);
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.0 == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "test sink",
+                ));
+            }
+            let count = bytes.len().min(self.0);
+            self.0 -= count;
+            Ok(count)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let doc = dump::new_document();
+    let size = serde_json::to_vec(&dump::dump_document(&doc, "", "new"))
+        .unwrap()
+        .len();
+    for limit in [0, 12, size - 3] {
+        let error = dump::write_document(&doc, "", "new", &mut FailingWriter(limit)).unwrap_err();
+        assert_eq!(error.io_error_kind(), Some(std::io::ErrorKind::BrokenPipe));
+    }
+    let dir = Scratch::new();
+    let input = dir.0.join("invalid.dxf");
+    std::fs::write(&input, b"AutoCAD Binary DXF").unwrap();
+    let mut bytes = Vec::new();
+    dump::write_file(&input, &mut bytes).unwrap();
+    assert_eq!(bytes, serde_json::to_vec(&dump::dump_file(&input)).unwrap());
+}
+
+#[test]
+fn cli_streaming_preserves_input_alias_and_truncates_existing_output() {
+    let dir = Scratch::new();
+    let input = dir.0.join("drawing.dxf");
+    std::fs::write(
+        &input,
+        b"0\nSECTION\n2\nENTITIES\n0\nLINE\n5\n30\n10\n1\n20\n2\n11\n3\n21\n4\n0\nENDSEC\n0\nEOF\n",
+    )
+    .unwrap();
+    let expected = serde_json::to_vec(&dump::dump_file(&input)).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_acad-dump"))
+        .arg("dump")
+        .arg(&input)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(std::fs::read(&input).unwrap(), expected);
+    let output = dir.0.join("new.json");
+    let expected = serde_json::to_vec(&dump_document(&dump::new_document(), "", "new")).unwrap();
+    std::fs::write(&output, vec![b'x'; expected.len() + 1024]).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_acad-dump"))
+        .args(["dump", "--new-document"])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(std::fs::read(&output).unwrap(), expected);
+    assert_eq!(
+        String::from_utf8(result.stdout).unwrap(),
+        format!("\t{} bytes\n", expected.len()),
+    );
+}

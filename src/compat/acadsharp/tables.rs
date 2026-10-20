@@ -145,117 +145,137 @@ fn entry(
     p.extend(base(doc, h));
     out.push(record(h, ty, owner, props(ty, p)));
 }
-pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
-    table(doc, &doc.layers, "LayersTable", out);
+/// Borrowed recipes keep table properties out of the document-wide plan.
+pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
+    let mut records: Vec<Box<dyn Fn() -> Value + '_>> = Vec::new();
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.layers, "LayersTable", &mut out);
+        out.pop().expect("table record")
+    }));
     for v in doc.layers.iter() {
-        entry(
-            doc,
-            v.handle,
-            "Layer",
-            doc.layers.handle(),
-            vec![
-                (
-                    "Flags",
-                    json!(
-                        symbol_flags(doc, v.source_flags) & !23
-                            | i16::from(v.flags.frozen)
-                            | (i16::from(v.flags.frozen_in_new_viewport) << 1)
-                            | (i16::from(v.flags.locked) << 2)
-                            | (i16::from(v.flags.xref_dependent) << 4)
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            entry(
+                doc,
+                v.handle,
+                "Layer",
+                doc.layers.handle(),
+                vec![
+                    (
+                        "Flags",
+                        json!(
+                            symbol_flags(doc, v.source_flags) & !23
+                                | i16::from(v.flags.frozen)
+                                | (i16::from(v.flags.frozen_in_new_viewport) << 1)
+                                | (i16::from(v.flags.locked) << 2)
+                                | (i16::from(v.flags.xref_dependent) << 4)
+                        ),
                     ),
-                ),
-                ("Color", json!(color(v.color))),
-                ("IsOn", json!(!v.flags.off)),
-                (
-                    "LineType",
-                    json!(doc
-                        .line_types
-                        .get(&v.line_type)
-                        .map(|v| handle(v.handle))
-                        .unwrap_or_else(|| json!(UNMAPPED))),
-                ),
-                ("LineWeight", json!(v.line_weight.value())),
-                (
-                    "Material",
-                    if super::registration::source_document(doc) {
-                        Value::Null
-                    } else {
-                        optional_handle(Some(v.material))
-                    },
-                ),
-                ("Name", json!(v.name)),
-                (
-                    "PlotFlag",
-                    json!(v.is_plottable && !v.name.eq_ignore_ascii_case("defpoints")),
-                ),
-                (
-                    "PlotStyleName",
-                    json!(if source_dwg(doc) {
-                        0
-                    } else {
-                        v.plotstyle_handle.value()
-                    }),
-                ),
-            ],
-            out,
-        );
+                    ("Color", json!(color(v.color))),
+                    ("IsOn", json!(!v.flags.off)),
+                    (
+                        "LineType",
+                        json!(doc
+                            .line_types
+                            .get(&v.line_type)
+                            .map(|v| handle(v.handle))
+                            .unwrap_or_else(|| json!(UNMAPPED))),
+                    ),
+                    ("LineWeight", json!(v.line_weight.value())),
+                    (
+                        "Material",
+                        if super::registration::source_document(doc) {
+                            Value::Null
+                        } else {
+                            optional_handle(Some(v.material))
+                        },
+                    ),
+                    ("Name", json!(v.name)),
+                    (
+                        "PlotFlag",
+                        json!(v.is_plottable && !v.name.eq_ignore_ascii_case("defpoints")),
+                    ),
+                    (
+                        "PlotStyleName",
+                        json!(if source_dwg(doc) {
+                            0
+                        } else {
+                            v.plotstyle_handle.value()
+                        }),
+                    ),
+                ],
+                &mut out,
+            );
+            out.pop().expect("table entry")
+        }));
     }
-    table(doc, &doc.line_types, "LineTypesTable", out);
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.line_types, "LineTypesTable", &mut out);
+        out.pop().expect("table record")
+    }));
     for v in doc.line_types.iter() {
-        entry(
-            doc,
-            v.handle,
-            "LineType",
-            doc.line_types.handle(),
-            vec![
-                (
-                    "Flags",
-                    json!(
-                        symbol_flags(doc, v.source_flags) & !16
-                            | (i16::from(v.xref_dependent) << 4)
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            entry(
+                doc,
+                v.handle,
+                "LineType",
+                doc.line_types.handle(),
+                vec![
+                    (
+                        "Flags",
+                        json!(
+                            symbol_flags(doc, v.source_flags) & !16
+                                | (i16::from(v.xref_dependent) << 4)
+                        ),
                     ),
-                ),
-                ("Alignment", character(v.alignment)),
-                (
-                    "Description",
-                    if !v.description_present
-                        && (v.description.is_empty()
-                            || (super::registration::source_document(doc)
-                                && v.name.eq_ignore_ascii_case("Continuous")
-                                && v.description == "Solid line"))
-                    {
-                        Value::Null
-                    } else {
-                        json!(v.description)
-                    },
-                ),
-                ("Segments", line_type_segments(doc, v)),
-                (
-                    "HasShapes",
-                    json!(v
-                        .elements
-                        .iter()
-                        .any(|s| s.complex.as_ref().is_some_and(|c| matches!(
-                            c.content,
-                            crate::tables::linetype::LineTypeComplexContent::Shape { .. }
-                        )))),
-                ),
-                ("IsComplex", json!(!v.elements.is_empty())),
-                ("Name", json!(v.name)),
-                (
-                    "PatternLength",
-                    number(v.elements.iter().map(|s| s.length.abs()).sum()),
-                ),
-            ],
-            out,
-        );
+                    ("Alignment", character(v.alignment)),
+                    (
+                        "Description",
+                        if !v.description_present
+                            && (v.description.is_empty()
+                                || (super::registration::source_document(doc)
+                                    && v.name.eq_ignore_ascii_case("Continuous")
+                                    && v.description == "Solid line"))
+                        {
+                            Value::Null
+                        } else {
+                            json!(v.description)
+                        },
+                    ),
+                    ("Segments", line_type_segments(doc, v)),
+                    (
+                        "HasShapes",
+                        json!(v.elements.iter().any(|s| s.complex.as_ref().is_some_and(
+                            |c| matches!(
+                                c.content,
+                                crate::tables::linetype::LineTypeComplexContent::Shape { .. }
+                            )
+                        ))),
+                    ),
+                    ("IsComplex", json!(!v.elements.is_empty())),
+                    ("Name", json!(v.name)),
+                    (
+                        "PatternLength",
+                        number(v.elements.iter().map(|s| s.length.abs()).sum()),
+                    ),
+                ],
+                &mut out,
+            );
+            out.pop().expect("table entry")
+        }));
     }
-    table(doc, &doc.text_styles, "TextStylesTable", out);
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.text_styles, "TextStylesTable", &mut out);
+        out.pop().expect("table record")
+    }));
     let mut used_names = std::collections::HashSet::new();
     let mut unnamed = 0;
     for v in doc.text_styles.iter() {
-        text_style(doc, v, out);
-        if v.name.is_empty() {
+        let name = if v.name.is_empty() {
             let name = loop {
                 let candidate = format!("unnamed{unnamed}");
                 unnamed += 1;
@@ -264,270 +284,337 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
                 }
             };
             used_names.insert(crate::tables::normalize_name(&name));
-            out.last_mut().unwrap()["props"]["Name"] = json!(name);
+            Some(name)
         } else {
             used_names.insert(crate::tables::normalize_name(&v.name));
+            None
+        };
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            text_style(doc, v, &mut out);
+            let mut value = out.pop().expect("text style record");
+            if let Some(name) = &name {
+                value["props"]["Name"] = json!(name);
+            }
+            value
+        }));
+    }
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.block_records, "BlockRecordsTable", &mut out);
+        out.pop().expect("table record")
+    }));
+    for v in doc.block_records.iter() {
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            entry(
+                doc,
+                v.handle,
+                "BlockRecord",
+                doc.block_records.handle(),
+                vec![
+                    (
+                        "AttributeDefinitions",
+                        json!(v
+                            .entity_handles
+                            .iter()
+                            .filter(|h| matches!(
+                                doc.get_entity(**h),
+                                Some(crate::entities::EntityType::AttributeDefinition(_))
+                            ))
+                            .copied()
+                            .map(handle)
+                            .collect::<Vec<_>>()),
+                    ),
+                    ("BlockEnd", json!(optional_handle(Some(v.block_end_handle)))),
+                    (
+                        "BlockEntity",
+                        json!(optional_handle(Some(v.block_entity_handle))),
+                    ),
+                    ("CanScale", json!(block_can_scale(doc, v))),
+                    ("Flags", json!(block_flags(doc, v))),
+                    ("Source", block_source(doc, v)),
+                    (
+                        "Entities",
+                        json!(v
+                            .entity_handles
+                            .iter()
+                            .copied()
+                            .map(handle)
+                            .collect::<Vec<_>>()),
+                    ),
+                    (
+                        "EvaluationGraph",
+                        optional_handle(extension_entry(doc, v.handle, "ACAD_ENHANCEDBLOCK")),
+                    ),
+                    (
+                        "IsDynamic",
+                        json!(extension_entry(doc, v.handle, "ACAD_ENHANCEDBLOCK").is_some()),
+                    ),
+                    (
+                        "SortEntitiesTable",
+                        optional_handle(extension_entry(doc, v.handle, "ACAD_SORTENTS")),
+                    ),
+                    (
+                        "HasAttributes",
+                        json!(v.entity_handles.iter().any(|h| matches!(
+                            doc.get_entity(*h),
+                            Some(crate::entities::EntityType::AttributeDefinition(_))
+                        ))),
+                    ),
+                    ("IsAnonymous", json!(block_flags(doc, v) & 1 != 0)),
+                    ("IsExplodable", json!(block_explodable(doc, v))),
+                    ("IsUnloaded", json!(v.flags.is_xref_unloaded)),
+                    ("Layout", json!(optional_handle(Some(v.layout)))),
+                    ("Name", json!(block_name(doc, v))),
+                    ("Preview", block_preview(doc, v)),
+                    (
+                        "Units",
+                        json!(
+                            if (source_dwg(doc) && doc.version < crate::types::DxfVersion::AC1021)
+                                || v.dxf_present.is_some_and(|p| p & 32 == 0)
+                            {
+                                0
+                            } else {
+                                v.units
+                            }
+                        ),
+                    ),
+                    (
+                        "Viewports",
+                        json!(v
+                            .entity_handles
+                            .iter()
+                            .filter(|h| matches!(
+                                doc.get_entity(**h),
+                                Some(crate::entities::EntityType::Viewport(_))
+                            ))
+                            .copied()
+                            .map(handle)
+                            .collect::<Vec<_>>()),
+                    ),
+                ],
+                &mut out,
+            );
+
+            out.pop().expect("table entry")
+        }));
+        for (end, h) in [(false, v.block_entity_handle), (true, v.block_end_handle)] {
+            if !h.is_null() && doc.get_entity(h).is_none() {
+                records.push(Box::new(move || {
+                    let mut out = Vec::new();
+                    super::entities::block_record_marker(doc, v, end, &mut out);
+                    out.pop().expect("block marker")
+                }));
+            }
         }
     }
-    table(doc, &doc.block_records, "BlockRecordsTable", out);
-    for v in doc.block_records.iter() {
-        entry(
-            doc,
-            v.handle,
-            "BlockRecord",
-            doc.block_records.handle(),
-            vec![
-                (
-                    "AttributeDefinitions",
-                    json!(v
-                        .entity_handles
-                        .iter()
-                        .filter(|h| matches!(
-                            doc.get_entity(**h),
-                            Some(crate::entities::EntityType::AttributeDefinition(_))
-                        ))
-                        .copied()
-                        .map(handle)
-                        .collect::<Vec<_>>()),
-                ),
-                ("BlockEnd", json!(optional_handle(Some(v.block_end_handle)))),
-                (
-                    "BlockEntity",
-                    json!(optional_handle(Some(v.block_entity_handle))),
-                ),
-                ("CanScale", json!(block_can_scale(doc, v))),
-                ("Flags", json!(block_flags(doc, v))),
-                ("Source", block_source(doc, v)),
-                (
-                    "Entities",
-                    json!(v
-                        .entity_handles
-                        .iter()
-                        .copied()
-                        .map(handle)
-                        .collect::<Vec<_>>()),
-                ),
-                (
-                    "EvaluationGraph",
-                    optional_handle(extension_entry(doc, v.handle, "ACAD_ENHANCEDBLOCK")),
-                ),
-                (
-                    "IsDynamic",
-                    json!(extension_entry(doc, v.handle, "ACAD_ENHANCEDBLOCK").is_some()),
-                ),
-                (
-                    "SortEntitiesTable",
-                    optional_handle(extension_entry(doc, v.handle, "ACAD_SORTENTS")),
-                ),
-                (
-                    "HasAttributes",
-                    json!(v.entity_handles.iter().any(|h| matches!(
-                        doc.get_entity(*h),
-                        Some(crate::entities::EntityType::AttributeDefinition(_))
-                    ))),
-                ),
-                ("IsAnonymous", json!(block_flags(doc, v) & 1 != 0)),
-                ("IsExplodable", json!(block_explodable(doc, v))),
-                ("IsUnloaded", json!(v.flags.is_xref_unloaded)),
-                ("Layout", json!(optional_handle(Some(v.layout)))),
-                ("Name", json!(block_name(doc, v))),
-                ("Preview", block_preview(doc, v)),
-                (
-                    "Units",
-                    json!(if (source_dwg(doc) && doc.version < crate::types::DxfVersion::AC1021)
-                        || v.dxf_present.is_some_and(|p| p & 32 == 0)
-                    { 0 } else { v.units }),
-                ),
-                (
-                    "Viewports",
-                    json!(v
-                        .entity_handles
-                        .iter()
-                        .filter(|h| matches!(
-                            doc.get_entity(**h),
-                            Some(crate::entities::EntityType::Viewport(_))
-                        ))
-                        .copied()
-                        .map(handle)
-                        .collect::<Vec<_>>()),
-                ),
-            ],
-            out,
-        );
-        block_entities(doc, v, out);
-    }
-    table(doc, &doc.dim_styles, "DimensionStylesTable", out);
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.dim_styles, "DimensionStylesTable", &mut out);
+        out.pop().expect("table record")
+    }));
     for v in doc.dim_styles.iter() {
-        entry(
-            doc,
-            v.handle,
-            "DimensionStyle",
-            doc.dim_styles.handle(),
-            super::table_dimstyle::map(doc, v),
-            out,
-        );
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            entry(
+                doc,
+                v.handle,
+                "DimensionStyle",
+                doc.dim_styles.handle(),
+                super::table_dimstyle::map(doc, v),
+                &mut out,
+            );
+            out.pop().expect("table entry")
+        }));
     }
-    table(doc, &doc.app_ids, "AppIdsTable", out);
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.app_ids, "AppIdsTable", &mut out);
+        out.pop().expect("table record")
+    }));
     for v in doc.app_ids.iter() {
-        entry(
-            doc,
-            v.handle,
-            "AppId",
-            doc.app_ids.handle(),
-            vec![
-                ("Name", json!(v.name)),
-                ("Flags", json!(symbol_flags(doc, v.source_flags))),
-            ],
-            out,
-        );
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            entry(
+                doc,
+                v.handle,
+                "AppId",
+                doc.app_ids.handle(),
+                vec![
+                    ("Name", json!(v.name)),
+                    ("Flags", json!(symbol_flags(doc, v.source_flags))),
+                ],
+                &mut out,
+            );
+            out.pop().expect("table entry")
+        }));
     }
-    table(doc, &doc.views, "ViewsTable", out);
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.views, "ViewsTable", &mut out);
+        out.pop().expect("table record")
+    }));
     for v in doc.views.iter() {
-        entry(
-            doc,
-            v.handle,
-            "View",
-            doc.views.handle(),
-            vec![
-                (
-                    "Flags",
-                    json!(
-                        (v.xref_dependent as i16) * 16
-                            | (v.xref_resolved as i16) * 32
-                            | (v.xref_reference as i16) * 64
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            entry(
+                doc,
+                v.handle,
+                "View",
+                doc.views.handle(),
+                vec![
+                    (
+                        "Flags",
+                        json!(
+                            (v.xref_dependent as i16) * 16
+                                | (v.xref_resolved as i16) * 32
+                                | (v.xref_reference as i16) * 64
+                        ),
                     ),
-                ),
-                ("Angle", json!(number(v.twist_angle))),
-                ("BackClipping", json!(number(v.back_clip))),
-                (
-                    "Center",
-                    json!(json!([number(v.center.x), number(v.center.y)])),
-                ),
-                ("Direction", json!(vec3(v.direction))),
-                ("FrontClipping", json!(number(v.front_clip))),
-                ("Height", json!(number(v.height))),
-                ("IsPlottable", json!(v.camera_plottable)),
-                ("IsUcsAssociated", json!(v.ucs_associated)),
-                ("LensLength", json!(number(v.lens_length))),
-                ("Name", json!(v.name)),
-                ("RenderMode", json!(v.render_mode as i16)),
-                ("Target", json!(vec3(v.target))),
-                ("UcsElevation", json!(number(v.ucs_elevation))),
-                ("UcsOrigin", json!(vec3(v.ucs_origin))),
-                ("UcsOrthographicType", json!(v.ucs_ortho_type)),
-                (
-                    "VisualStyle",
-                    json!(optional_handle(Some(v.visual_style_handle))),
-                ),
-                ("Width", json!(number(v.width))),
-            ]
-            .into_iter()
-            .chain(super::table_viewports::view_overrides(doc, v))
-            .collect(),
-            out,
-        );
+                    ("Angle", json!(number(v.twist_angle))),
+                    ("BackClipping", json!(number(v.back_clip))),
+                    (
+                        "Center",
+                        json!(json!([number(v.center.x), number(v.center.y)])),
+                    ),
+                    ("Direction", json!(vec3(v.direction))),
+                    ("FrontClipping", json!(number(v.front_clip))),
+                    ("Height", json!(number(v.height))),
+                    ("IsPlottable", json!(v.camera_plottable)),
+                    ("IsUcsAssociated", json!(v.ucs_associated)),
+                    ("LensLength", json!(number(v.lens_length))),
+                    ("Name", json!(v.name)),
+                    ("RenderMode", json!(v.render_mode as i16)),
+                    ("Target", json!(vec3(v.target))),
+                    ("UcsElevation", json!(number(v.ucs_elevation))),
+                    ("UcsOrigin", json!(vec3(v.ucs_origin))),
+                    ("UcsOrthographicType", json!(v.ucs_ortho_type)),
+                    (
+                        "VisualStyle",
+                        json!(optional_handle(Some(v.visual_style_handle))),
+                    ),
+                    ("Width", json!(number(v.width))),
+                ]
+                .into_iter()
+                .chain(super::table_viewports::view_overrides(doc, v))
+                .collect(),
+                &mut out,
+            );
+            out.pop().expect("table entry")
+        }));
     }
-    table(doc, &doc.vports, "VPortsTable", out);
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.vports, "VPortsTable", &mut out);
+        out.pop().expect("table record")
+    }));
     for v in doc.vports.iter() {
-        entry(
-            doc,
-            v.handle,
-            "VPort",
-            doc.vports.handle(),
-            vec![
-                (
-                    "Flags",
-                    json!(
-                        (v.xref_dependent as i16) * 16
-                            | (v.xref_resolved as i16) * 32
-                            | (v.xref_reference as i16) * 64
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            entry(
+                doc,
+                v.handle,
+                "VPort",
+                doc.vports.handle(),
+                vec![
+                    (
+                        "Flags",
+                        json!(
+                            (v.xref_dependent as i16) * 16
+                                | (v.xref_resolved as i16) * 32
+                                | (v.xref_reference as i16) * 64
+                        ),
                     ),
-                ),
-                ("AmbientColor", json!(color(v.ambient_color))),
-                ("AspectRatio", json!(number(v.aspect_ratio))),
-                ("BackClippingPlane", json!(number(v.back_clip))),
-                ("BaseUcs", json!(optional_handle(Some(v.base_ucs_handle)))),
-                ("BottomLeft", json!(vec2(v.lower_left))),
-                ("Brightness", json!(number(v.brightness))),
-                ("Center", json!(vec2(v.view_center))),
-                ("CircleZoomPercent", json!(v.circle_zoom)),
-                ("Contrast", json!(number(v.contrast))),
-                ("DefaultLighting", json!(v.default_lighting_type)),
-                ("Direction", json!(vec3(v.view_direction))),
-                ("Elevation", json!(number(v.ucs_elevation))),
-                ("FrontClippingPlane", json!(number(v.front_clip))),
-                ("GridFlags", json!(v.grid_flags.to_bits())),
-                ("GridSpacing", json!(vec2(v.grid_spacing))),
-                ("IsometricSnap", json!(v.snap_style)),
-                ("LensLength", json!(number(v.lens_length))),
-                ("MinorGridLinesPerMajorGridLine", json!(v.grid_major)),
-                ("Name", json!(v.name)),
-                ("NamedUcs", json!(optional_handle(Some(v.named_ucs_handle)))),
-                ("Origin", json!(vec3(v.ucs_origin))),
-                ("OrthographicType", json!(v.ucs_ortho_type)),
-                ("RenderMode", json!(v.render_mode as i16)),
-                ("ShowGrid", json!(v.grid_on)),
-                ("SnapBasePoint", json!(vec2(v.snap_base))),
-                ("SnapIsoPair", json!(v.snap_isopair)),
-                ("SnapOn", json!(v.snap_on)),
-                ("SnapRotation", json!(number(v.snap_rotation))),
-                ("SnapSpacing", json!(vec2(v.snap_spacing))),
-                ("Target", json!(vec3(v.view_target))),
-                ("TopRight", json!(vec2(v.upper_right))),
-                ("TwistAngle", json!(number(v.view_twist))),
-                ("UseDefaultLighting", json!(v.use_default_lights)),
-                ("ViewHeight", json!(number(v.view_height))),
-                (
-                    "VisualStyle",
-                    json!(optional_handle(Some(v.visual_style_handle))),
-                ),
-                ("XAxis", json!(vec3(v.ucs_x_axis))),
-                ("YAxis", json!(vec3(v.ucs_y_axis))),
-            ]
-            .into_iter()
-            .chain(super::table_viewports::vport_overrides(doc, v))
-            .collect(),
-            out,
-        );
+                    ("AmbientColor", json!(color(v.ambient_color))),
+                    ("AspectRatio", json!(number(v.aspect_ratio))),
+                    ("BackClippingPlane", json!(number(v.back_clip))),
+                    ("BaseUcs", json!(optional_handle(Some(v.base_ucs_handle)))),
+                    ("BottomLeft", json!(vec2(v.lower_left))),
+                    ("Brightness", json!(number(v.brightness))),
+                    ("Center", json!(vec2(v.view_center))),
+                    ("CircleZoomPercent", json!(v.circle_zoom)),
+                    ("Contrast", json!(number(v.contrast))),
+                    ("DefaultLighting", json!(v.default_lighting_type)),
+                    ("Direction", json!(vec3(v.view_direction))),
+                    ("Elevation", json!(number(v.ucs_elevation))),
+                    ("FrontClippingPlane", json!(number(v.front_clip))),
+                    ("GridFlags", json!(v.grid_flags.to_bits())),
+                    ("GridSpacing", json!(vec2(v.grid_spacing))),
+                    ("IsometricSnap", json!(v.snap_style)),
+                    ("LensLength", json!(number(v.lens_length))),
+                    ("MinorGridLinesPerMajorGridLine", json!(v.grid_major)),
+                    ("Name", json!(v.name)),
+                    ("NamedUcs", json!(optional_handle(Some(v.named_ucs_handle)))),
+                    ("Origin", json!(vec3(v.ucs_origin))),
+                    ("OrthographicType", json!(v.ucs_ortho_type)),
+                    ("RenderMode", json!(v.render_mode as i16)),
+                    ("ShowGrid", json!(v.grid_on)),
+                    ("SnapBasePoint", json!(vec2(v.snap_base))),
+                    ("SnapIsoPair", json!(v.snap_isopair)),
+                    ("SnapOn", json!(v.snap_on)),
+                    ("SnapRotation", json!(number(v.snap_rotation))),
+                    ("SnapSpacing", json!(vec2(v.snap_spacing))),
+                    ("Target", json!(vec3(v.view_target))),
+                    ("TopRight", json!(vec2(v.upper_right))),
+                    ("TwistAngle", json!(number(v.view_twist))),
+                    ("UseDefaultLighting", json!(v.use_default_lights)),
+                    ("ViewHeight", json!(number(v.view_height))),
+                    (
+                        "VisualStyle",
+                        json!(optional_handle(Some(v.visual_style_handle))),
+                    ),
+                    ("XAxis", json!(vec3(v.ucs_x_axis))),
+                    ("YAxis", json!(vec3(v.ucs_y_axis))),
+                ]
+                .into_iter()
+                .chain(super::table_viewports::vport_overrides(doc, v))
+                .collect(),
+                &mut out,
+            );
+            out.pop().expect("table entry")
+        }));
     }
-    table(doc, &doc.ucss, "UCSTable", out);
+    records.push(Box::new(move || {
+        let mut out = Vec::new();
+        table(doc, &doc.ucss, "UCSTable", &mut out);
+        out.pop().expect("table record")
+    }));
     for v in doc.ucss.iter() {
-        entry(
-            doc,
-            v.handle,
-            "UCS",
-            doc.ucss.handle(),
-            vec![
-                (
-                    "Flags",
-                    json!(
-                        (v.xref_dependent as i16) * 16
-                            | (v.xref_resolved as i16) * 32
-                            | (v.xref_reference as i16) * 64
+        records.push(Box::new(move || {
+            let mut out = Vec::new();
+            entry(
+                doc,
+                v.handle,
+                "UCS",
+                doc.ucss.handle(),
+                vec![
+                    (
+                        "Flags",
+                        json!(
+                            (v.xref_dependent as i16) * 16
+                                | (v.xref_resolved as i16) * 32
+                                | (v.xref_reference as i16) * 64
+                        ),
                     ),
-                ),
-                ("Elevation", json!(number(v.elevation))),
-                ("Name", json!(v.name)),
-                ("Origin", json!(vec3(v.origin))),
-                ("OrthographicType", json!(v.ortho_type)),
-                ("OrthographicViewType", json!(v.ortho_view_type)),
-                ("XAxis", json!(vec3(v.x_axis))),
-                ("YAxis", json!(vec3(v.y_axis))),
-            ],
-            out,
-        );
+                    ("Elevation", json!(number(v.elevation))),
+                    ("Name", json!(v.name)),
+                    ("Origin", json!(vec3(v.origin))),
+                    ("OrthographicType", json!(v.ortho_type)),
+                    ("OrthographicViewType", json!(v.ortho_view_type)),
+                    ("XAxis", json!(vec3(v.x_axis))),
+                    ("YAxis", json!(vec3(v.y_axis))),
+                ],
+                &mut out,
+            );
+            out.pop().expect("table entry")
+        }));
     }
+    records
 }
 
-fn block_entities(doc: &CadDocument, b: &crate::tables::BlockRecord, out: &mut Vec<Value>) {
-    // Prefer actual entities. Folded DXF markers retain their common state on
-    // the record; implicit source markers use the reference entity defaults.
-    if !b.block_entity_handle.is_null() && doc.get_entity(b.block_entity_handle).is_none() {
-        super::entities::block_record_marker(doc, b, false, out);
-    }
-    if !b.block_end_handle.is_null() && doc.get_entity(b.block_end_handle).is_none() {
-        super::entities::block_record_marker(doc, b, true, out);
-    }
+pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
+    out.extend(records(doc).into_iter().map(|render| render()));
 }
 
 pub(super) fn block_flags(doc: &CadDocument, b: &crate::tables::BlockRecord) -> i16 {

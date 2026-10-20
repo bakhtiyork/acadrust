@@ -22,9 +22,9 @@ pub(super) fn supported(record: &Value, reader: &str) -> bool {
 
 /// Apply reader registration policy after projection, before handle deduplication.
 /// Constructed documents retain their explicit registration map.
-pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) {
+pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -> HashSet<u64> {
     if !source_document(doc) {
-        return;
+        return HashSet::new();
     }
     // First concrete representation wins, as in the canonical dumper.
     let mut index = HashMap::with_capacity(records.len());
@@ -250,7 +250,7 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) {
             if let Some(crate::objects::ObjectType::XRecord(native)) =
                 doc.objects.get(&Handle::new(h))
             {
-                if let Some(entries) = record["props"]["Entries"].as_array_mut() {
+                if let Some(entries) = record["props"].get_mut("Entries").and_then(Value::as_array_mut) {
                     for (entry, projected) in native.entries.iter().zip(entries) {
                         if let crate::objects::XRecordValue::Handle(target) = entry.value {
                             projected["Value"] = if template_handles.contains(&target.value()) {
@@ -302,6 +302,7 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) {
         }
         true
     });
+    template_handles
 }
 
 #[cfg(test)]

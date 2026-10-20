@@ -7,7 +7,7 @@
 use crate::entities::{Dimension, DimensionType, EntityCommon, EntityType, Spline};
 use crate::types::{DxfVersion, Handle, Vector2, Vector3};
 use crate::CadDocument;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::{color, handle, number, optional_handle, props, record, transparency, vec2, vec3};
 
@@ -350,57 +350,8 @@ fn vertex_record(
 }
 
 fn polyline3d_vertices(
-    doc: &CadDocument,
     value: &crate::entities::Polyline3D,
-    legacy: bool,
-    out: &mut Vec<Value>,
 ) -> Value {
-    for vertex in &value.vertices {
-        if !vertex.handle.is_null() {
-            // The original handle/layer-only API permits callers to append a
-            // partially identified child directly. An unbound child has no
-            // retained source common state; preserve that unknown metadata.
-            if vertex.common.owner_handle.is_null() {
-                let type_name = if legacy { "Vertex2D" } else { "Vertex3D" };
-                let layer = doc.layers.get(&vertex.layer).map(|layer| layer.handle);
-                out.push(record(
-                    vertex.handle,
-                    type_name,
-                    value.common.handle,
-                    props(
-                        type_name,
-                        vec![
-                            ("Flags", integer(vertex.flags)),
-                            ("Layer", optional_handle(layer)),
-                            ("Location", vec3(vertex.position)),
-                            ("ObjectName", Value::String("VERTEX".into())),
-                            ("ObjectType", enum_value(if legacy { 0x0A } else { 0x0B })),
-                            ("ProxyGeometries", array([])),
-                            (
-                                "SubclassMarker",
-                                Value::String(
-                                    if legacy { "AcDb2dVertex" } else { "AcDb3dPolylineVertex" }.into(),
-                                ),
-                            ),
-                        ],
-                    ),
-                ));
-                continue;
-            }
-            out.push(vertex_record(
-                doc,
-                &vertex.common,
-                if legacy { "Vertex2D" } else { "Vertex3D" },
-                vertex.position,
-                vertex.flags as i64,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                0,
-            ));
-        }
-    }
     if value.vertices.iter().all(|v| !v.handle.is_null()) {
         handles(value.vertices.iter().map(|v| v.handle))
     } else {
@@ -743,26 +694,545 @@ fn insert_attributes<'a>(
         .collect()
 }
 
-/// Visit the backing collection, including structural BLOCK/ENDBLK records
-/// hidden by the public drawing-entity iterator, and retained children.
-pub(super) fn collect(doc: &CadDocument, reader: &str, out: &mut Vec<Value>) {
-    let legacy = reader == "dxf" && matches!(doc.version, crate::types::DxfVersion::AC1009 | crate::types::DxfVersion::Unknown);
-    for entity in &doc.entities {
-        collect_entity(doc, entity, legacy, out);
+#[derive(Copy, Clone)]
+enum RecordPart {
+    Parent,
+    Seqend,
+    InsertAttribute(usize),
+    Polyline2DVertex(usize),
+    Polyline3DVertex(usize),
+    PolyfaceVertex(usize),
+    PolyfaceFace(usize),
+    PolygonMeshVertex(usize),
+}
+
+/// One output record backed by one native entity and, where applicable, one
+/// retained child.  The descriptor owns no projected data; rendering it
+/// allocates only the single canonical record being requested.
+#[derive(Copy, Clone)]
+pub(super) struct Record<'a> {
+    entity: &'a EntityType,
+    part: RecordPart,
+}
+
+impl<'a> Record<'a> {
+    pub(super) fn render(&self, doc: &CadDocument, reader: &str) -> Value {
+        let legacy = reader == "dxf"
+            && matches!(
+                doc.version,
+                crate::types::DxfVersion::AC1009 | crate::types::DxfVersion::Unknown
+            );
+        let mut out = Vec::with_capacity(1);
+        collect_entity_part(doc, self.entity, legacy, self.part, &mut out);
+        debug_assert_eq!(out.len(), 1);
+        out.pop()
+            .expect("entity record descriptor rendered no record")
+    }
+
+    /// Render only the identity and registration fields needed before the
+    /// final canonical pass. Ordinary entities use the native common state
+    /// directly; opaque projections fall back to the full renderer and then
+    /// discard every property not needed by registration.
+    pub(super) fn metadata(&self, doc: &CadDocument, reader: &str) -> Value {
+        let legacy = reader == "dxf"
+            && matches!(
+                doc.version,
+                crate::types::DxfVersion::AC1009 | crate::types::DxfVersion::Unknown
+            );
+        if let Some(value) = metadata_fast(doc, self.entity, self.part, legacy) {
+            return value;
+        }
+        metadata_from_render(self.render(doc, reader))
     }
 }
 
-fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mut Vec<Value>) {
-    let first = out.len();
-    let seqend = match entity {
-        EntityType::Insert(e) => e.seqend.as_ref(),
-        EntityType::Polyline2D(e) => e.seqend.as_ref(),
-        EntityType::Polyline3D(e) => e.seqend.as_ref(),
-        EntityType::PolyfaceMesh(e) => e.seqend.as_ref(),
-        EntityType::PolygonMesh(e) => e.seqend.as_ref(),
-        _ => None,
+struct MetadataIdentity {
+    handle: Handle,
+    owner: Handle,
+    type_name: &'static str,
+    subclass: &'static str,
+    xdictionary: Option<Handle>,
+    block_name: Option<String>,
+    include_xdictionary: bool,
+}
+
+fn metadata_record(
+    handle_value: Handle,
+    type_name: &'static str,
+    owner: Handle,
+    subclass: &'static str,
+    xdictionary: Option<Handle>,
+    block_name: Option<&str>,
+    include_xdictionary: bool,
+) -> Value {
+    let mut mapped = Map::new();
+    // Registration only needs presence to distinguish graph entities. The
+    // final render retains the canonical empty array.
+    mapped.insert("ProxyGeometries".into(), Value::Null);
+    mapped.insert("SubclassMarker".into(), Value::String(subclass.into()));
+    if include_xdictionary {
+        mapped.insert("XDictionary".into(), optional_handle(xdictionary));
+    }
+    if let Some(name) = block_name {
+        mapped.insert("Name".into(), Value::String(name.to_owned()));
+    }
+    record(handle_value, type_name, owner, Value::Object(mapped))
+}
+
+fn metadata_from_render(mut value: Value) -> Value {
+    let mut mapped = Map::new();
+    for key in ["ProxyGeometries", "SubclassMarker", "XDictionary"] {
+        if let Some(property) = value["props"].get(key) {
+            mapped.insert(key.to_owned(), property.clone());
+        }
+    }
+    if value["type"] == "Block" {
+        if let Some(name) = value["props"].get("Name") {
+            mapped.insert("Name".into(), name.clone());
+        }
+    }
+    value["props"] = Value::Object(mapped);
+    value
+}
+
+fn metadata_identity(
+    doc: &CadDocument,
+    entity: &EntityType,
+    legacy: bool,
+) -> Option<MetadataIdentity> {
+    let common = entity.common();
+    let (type_name, subclass, block_name) = match entity {
+        EntityType::Point(_) => ("Point", "AcDbPoint", None),
+        EntityType::Line(_) => ("Line", "AcDbLine", None),
+        EntityType::Circle(_) => ("Circle", "AcDbCircle", None),
+        EntityType::Arc(_) => ("Arc", "AcDbArc", None),
+        EntityType::Ellipse(_) => ("Ellipse", "AcDbEllipse", None),
+        EntityType::Polyline(_) => ("Polyline3D", "AcDb3dPolyline", None),
+        EntityType::Polyline2D(_) => ("Polyline2D", "AcDb2dPolyline", None),
+        EntityType::Polyline3D(_) => {
+            if legacy {
+                ("Polyline2D", "AcDb2dPolyline", None)
+            } else {
+                ("Polyline3D", "AcDb3dPolyline", None)
+            }
+        }
+        EntityType::LwPolyline(_) => ("LwPolyline", "AcDbPolyline", None),
+        EntityType::Text(_) => ("TextEntity", "AcDbText", None),
+        EntityType::MText(_) => ("MText", "AcDbMText", None),
+        EntityType::Spline(_) | EntityType::Helix(_) => ("Spline", "AcDbSpline", None),
+        EntityType::Dimension(value) => match value.as_ref() {
+            Dimension::Aligned(_) => ("DimensionAligned", "AcDbAlignedDimension", None),
+            Dimension::Linear(_) => ("DimensionLinear", "AcDbRotatedDimension", None),
+            Dimension::Radius(_) => ("DimensionRadius", "AcDbRadialDimension", None),
+            Dimension::Diameter(_) => ("DimensionDiameter", "AcDbDiametricDimension", None),
+            Dimension::Angular2Ln(_) => {
+                ("DimensionAngular2Line", "AcDb2LineAngularDimension", None)
+            }
+            Dimension::Angular3Pt(_) => ("DimensionAngular3Pt", "AcDb3PointAngularDimension", None),
+            Dimension::Ordinate(_) => ("DimensionOrdinate", "AcDbOrdinateDimension", None),
+            Dimension::Arc(_) => ("DimensionArc", "AcDbArcDimension", None),
+            Dimension::LargeRadial(_) => ("DimensionRadius", "AcDbRadialDimensionLarge", None),
+        },
+        EntityType::Hatch(_) => ("Hatch", "AcDbHatch", None),
+        EntityType::Solid(_) => ("Solid", "AcDbTrace", None),
+        EntityType::Face3D(_) => ("Face3D", "AcDbFace", None),
+        EntityType::Insert(value) => (
+            "Insert",
+            if value.is_array() {
+                "AcDbMInsertBlock"
+            } else {
+                "AcDbBlockReference"
+            },
+            None,
+        ),
+        EntityType::Block(value) => {
+            let name = doc
+                .block_records
+                .get(&value.name)
+                .filter(|block| block.handle == common.owner_handle)
+                .map(|block| super::tables::block_name(doc, block).to_owned())
+                .unwrap_or_else(|| value.name.clone());
+            ("Block", "AcDbBlockBegin", Some(name))
+        }
+        EntityType::BlockEnd(_) => ("BlockEnd", "AcDbBlockEnd", None),
+        EntityType::Ray(_) => ("Ray", "AcDbRay", None),
+        EntityType::XLine(_) => ("XLine", "AcDbXline", None),
+        EntityType::Viewport(_) => ("Viewport", "AcDbViewport", None),
+        EntityType::AttributeDefinition(_) => {
+            ("AttributeDefinition", "AcDbAttributeDefinition", None)
+        }
+        EntityType::AttributeEntity(_) => ("AttributeEntity", "AcDbAttribute", None),
+        EntityType::Leader(_) => ("Leader", "AcDbLeader", None),
+        EntityType::MultiLeader(_) => ("MultiLeader", "AcDbMLeader", None),
+        EntityType::MLine(_) => ("MLine", "AcDbMline", None),
+        EntityType::Mesh(_) => ("Mesh", "AcDbSubDMesh", None),
+        EntityType::RasterImage(_) => ("RasterImage", "AcDbRasterImage", None),
+        EntityType::Solid3D(_) => ("Solid3D", "AcDb3dSolid", None),
+        EntityType::Region(_) => ("Region", "AcDbModelerGeometry", None),
+        EntityType::Body(_) => ("CadBody", "AcDbModelerGeometry", None),
+        EntityType::Surface(_) => ("Surface", "AcDbSurface", None),
+        EntityType::Table(_) => ("TableEntity", "AcDbTable", None),
+        EntityType::Tolerance(_) => ("Tolerance", "AcDbFcf", None),
+        EntityType::PolyfaceMesh(_) => {
+            if legacy {
+                ("Polyline2D", "AcDb2dPolyline", None)
+            } else {
+                ("PolyfaceMesh", "AcDbPolyFaceMesh", None)
+            }
+        }
+        EntityType::PolygonMesh(_) => {
+            if legacy {
+                ("Polyline2D", "AcDb2dPolyline", None)
+            } else {
+                ("PolygonMesh", "AcDbPolygonMesh", None)
+            }
+        }
+        EntityType::Wipeout(_) => ("Wipeout", "AcDbWipeout", None),
+        EntityType::Shape(_) => ("Shape", "AcDbShape", None),
+        EntityType::Underlay(value) => (
+            match value.underlay_type {
+                crate::entities::UnderlayType::Pdf => "PdfUnderlay",
+                crate::entities::UnderlayType::Dwf => "DwfUnderlay",
+                crate::entities::UnderlayType::Dgn => "DgnUnderlay",
+            },
+            "AcDbUnderlayReference",
+            None,
+        ),
+        EntityType::Seqend(_) => ("Seqend", "AcDbEntity", None),
+        EntityType::Ole2Frame(_) => ("Ole2Frame", "AcDbOle2Frame", None),
+        EntityType::Light(_) => ("Light", "AcDbLight", None),
+        EntityType::SectionSymbol(_) => ("SectionSymbol", "AcDbSection", None),
+        EntityType::ViewBorder(_) => ("ViewBorder", "AcDbViewBorder", None),
+        EntityType::Extended(value) => match &value.data {
+            crate::entities::ExtendedEntityData::Proxy(_) => {
+                ("ProxyEntity", "AcDbProxyEntity", None)
+            }
+            crate::entities::ExtendedEntityData::OleFrame(_) => {
+                ("Ole2Frame", "AcDbOle2Frame", None)
+            }
+            _ => {
+                let type_name = super::type_names::canonical(value.class_name())
+                    .filter(|name| super::schema().contains_key(*name))
+                    .unwrap_or("UnknownEntity");
+                (type_name, "AcDbEntity", None)
+            }
+        },
+        // A valid AEC wall has an opaque, class-specific projection. Let the
+        // fallback preserve its exact type and registration fields.
+        EntityType::Unknown(value) if value.dxf_name == "AEC_WALL" => return None,
+        EntityType::Unknown(value) => {
+            let type_name = super::type_names::canonical(&value.dxf_name)
+                .filter(|name| super::schema().contains_key(*name))
+                .unwrap_or("UnknownEntity");
+            (type_name, "AcDbEntity", None)
+        }
     };
-    if let Some(seqend) = seqend.filter(|s| !s.common.handle.is_null()) {
+    Some(MetadataIdentity {
+        handle: common.handle,
+        owner: common.owner_handle,
+        type_name: if super::schema().contains_key(type_name) {
+            type_name
+        } else {
+            "UnknownEntity"
+        },
+        subclass,
+        xdictionary: common.xdictionary_handle.filter(|h| !h.is_null()),
+        block_name,
+        include_xdictionary: true,
+    })
+}
+
+fn metadata_fast(
+    doc: &CadDocument,
+    entity: &EntityType,
+    part: RecordPart,
+    legacy: bool,
+) -> Option<Value> {
+    match part {
+        RecordPart::Parent => {
+            let identity = metadata_identity(doc, entity, legacy)?;
+            Some(metadata_record(
+                identity.handle,
+                identity.type_name,
+                identity.owner,
+                identity.subclass,
+                identity.xdictionary,
+                identity.block_name.as_deref(),
+                identity.include_xdictionary,
+            ))
+        }
+        RecordPart::Seqend => {
+            let common = match entity {
+                EntityType::Insert(value) => &value.seqend.as_ref()?.common,
+                EntityType::Polyline2D(value) => &value.seqend.as_ref()?.common,
+                EntityType::Polyline3D(value) => &value.seqend.as_ref()?.common,
+                EntityType::PolyfaceMesh(value) => &value.seqend.as_ref()?.common,
+                EntityType::PolygonMesh(value) => &value.seqend.as_ref()?.common,
+                _ => return None,
+            };
+            let xdictionary = if legacy && !matches!(entity, EntityType::Insert(_)) {
+                None
+            } else {
+                common.xdictionary_handle.filter(|h| !h.is_null())
+            };
+            Some(metadata_record(
+                common.handle,
+                "Seqend",
+                common.owner_handle,
+                "AcDbEntity",
+                xdictionary,
+                None,
+                true,
+            ))
+        }
+        RecordPart::InsertAttribute(index) => {
+            let EntityType::Insert(value) = entity else {
+                return None;
+            };
+            let attribute = value.attributes.get(index)?;
+            Some(metadata_record(
+                attribute.common.handle,
+                "AttributeEntity",
+                value.common.handle,
+                "AcDbAttribute",
+                attribute.common.xdictionary_handle.filter(|h| !h.is_null()),
+                None,
+                true,
+            ))
+        }
+        RecordPart::Polyline2DVertex(index) => {
+            let EntityType::Polyline2D(value) = entity else {
+                return None;
+            };
+            let vertex = value.vertices.get(index)?;
+            Some(metadata_record(
+                vertex.common.handle,
+                "Vertex2D",
+                vertex.common.owner_handle,
+                "AcDb2dVertex",
+                vertex.common.xdictionary_handle.filter(|h| !h.is_null()),
+                None,
+                true,
+            ))
+        }
+        RecordPart::Polyline3DVertex(index) => {
+            let EntityType::Polyline3D(value) = entity else {
+                return None;
+            };
+            let vertex = value.vertices.get(index)?;
+            if vertex.common.owner_handle.is_null() {
+                return Some(metadata_record(
+                    vertex.handle,
+                    if legacy { "Vertex2D" } else { "Vertex3D" },
+                    value.common.handle,
+                    if legacy {
+                        "AcDb2dVertex"
+                    } else {
+                        "AcDb3dPolylineVertex"
+                    },
+                    None,
+                    None,
+                    false,
+                ));
+            }
+            Some(metadata_record(
+                vertex.handle,
+                if legacy { "Vertex2D" } else { "Vertex3D" },
+                vertex.common.owner_handle,
+                if legacy {
+                    "AcDb2dVertex"
+                } else {
+                    "AcDb3dPolylineVertex"
+                },
+                vertex.common.xdictionary_handle.filter(|h| !h.is_null()),
+                None,
+                true,
+            ))
+        }
+        RecordPart::PolyfaceVertex(index) => {
+            let EntityType::PolyfaceMesh(value) = entity else {
+                return None;
+            };
+            let vertex = value.vertices.get(index)?;
+            Some(metadata_record(
+                vertex.common.handle,
+                if legacy { "Vertex2D" } else { "VertexFaceMesh" },
+                vertex.common.owner_handle,
+                if legacy {
+                    "AcDb2dVertex"
+                } else {
+                    "AcDbPolyFaceMeshVertex"
+                },
+                vertex.common.xdictionary_handle.filter(|h| !h.is_null()),
+                None,
+                true,
+            ))
+        }
+        RecordPart::PolyfaceFace(index) => {
+            let EntityType::PolyfaceMesh(value) = entity else {
+                return None;
+            };
+            let face = value.faces.get(index)?;
+            Some(metadata_record(
+                face.common.handle,
+                if legacy {
+                    "Vertex2D"
+                } else {
+                    "VertexFaceRecord"
+                },
+                face.common.owner_handle,
+                if legacy {
+                    "AcDb2dVertex"
+                } else {
+                    "AcDbFaceRecord"
+                },
+                face.common.xdictionary_handle.filter(|h| !h.is_null()),
+                None,
+                true,
+            ))
+        }
+        RecordPart::PolygonMeshVertex(index) => {
+            let EntityType::PolygonMesh(value) = entity else {
+                return None;
+            };
+            let vertex = value.vertices.get(index)?;
+            Some(metadata_record(
+                vertex.common.handle,
+                if legacy {
+                    "Vertex2D"
+                } else {
+                    "PolygonMeshVertex"
+                },
+                vertex.common.owner_handle,
+                if legacy {
+                    "AcDb2dVertex"
+                } else {
+                    "AcDbPolygonMeshVertex"
+                },
+                vertex.common.xdictionary_handle.filter(|h| !h.is_null()),
+                None,
+                true,
+            ))
+        }
+    }
+}
+
+/// Enumerate entity records in the same order as the compatibility collector.
+/// Structural children are represented by descriptors and rendered only when
+/// requested, so a child never requires materializing its siblings.
+pub(super) fn records<'a>(doc: &'a CadDocument, _reader: &str) -> Vec<Record<'a>> {
+    let mut result = Vec::new();
+    for stored in &doc.entities {
+        let entity = stored.as_ref();
+        let seqend = match entity {
+            EntityType::Insert(e) => e.seqend.as_ref(),
+            EntityType::Polyline2D(e) => e.seqend.as_ref(),
+            EntityType::Polyline3D(e) => e.seqend.as_ref(),
+            EntityType::PolyfaceMesh(e) => e.seqend.as_ref(),
+            EntityType::PolygonMesh(e) => e.seqend.as_ref(),
+            _ => None,
+        };
+        if seqend.is_some_and(|value| !value.common.handle.is_null()) {
+            result.push(Record {
+                entity,
+                part: RecordPart::Seqend,
+            });
+        }
+        match entity {
+            EntityType::Insert(value) => {
+                for (index, _) in value.attributes.iter().enumerate() {
+                    result.push(Record {
+                        entity,
+                        part: RecordPart::InsertAttribute(index),
+                    });
+                }
+            }
+            EntityType::Polyline2D(value) => {
+                for (index, vertex) in value.vertices.iter().enumerate() {
+                    if !vertex.common.handle.is_null() {
+                        result.push(Record {
+                            entity,
+                            part: RecordPart::Polyline2DVertex(index),
+                        });
+                    }
+                }
+            }
+            EntityType::Polyline3D(value) => {
+                for (index, vertex) in value.vertices.iter().enumerate() {
+                    if !vertex.handle.is_null() {
+                        result.push(Record {
+                            entity,
+                            part: RecordPart::Polyline3DVertex(index),
+                        });
+                    }
+                }
+            }
+            EntityType::PolyfaceMesh(value) => {
+                for (index, vertex) in value.vertices.iter().enumerate() {
+                    if !vertex.common.handle.is_null() {
+                        result.push(Record {
+                            entity,
+                            part: RecordPart::PolyfaceVertex(index),
+                        });
+                    }
+                }
+                for (index, face) in value.faces.iter().enumerate() {
+                    if !face.common.handle.is_null() {
+                        result.push(Record {
+                            entity,
+                            part: RecordPart::PolyfaceFace(index),
+                        });
+                    }
+                }
+            }
+            EntityType::PolygonMesh(value) => {
+                for (index, vertex) in value.vertices.iter().enumerate() {
+                    if !vertex.common.handle.is_null() {
+                        result.push(Record {
+                            entity,
+                            part: RecordPart::PolygonMeshVertex(index),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+        result.push(Record {
+            entity,
+            part: RecordPart::Parent,
+        });
+    }
+    result
+}
+
+/// Visit the backing collection, including structural BLOCK/ENDBLK records
+/// hidden by the public drawing-entity iterator, and retained children.
+pub(super) fn collect(doc: &CadDocument, reader: &str, out: &mut Vec<Value>) {
+    for record in records(doc, reader) {
+        out.push(record.render(doc, reader));
+    }
+}
+
+fn collect_entity_part(
+    doc: &CadDocument,
+    entity: &EntityType,
+    legacy: bool,
+    part: RecordPart,
+    out: &mut Vec<Value>,
+) {
+    let first = out.len();
+    if matches!(part, RecordPart::Seqend) {
+        let seqend = match entity {
+            EntityType::Insert(e) => e.seqend.as_ref(),
+            EntityType::Polyline2D(e) => e.seqend.as_ref(),
+            EntityType::Polyline3D(e) => e.seqend.as_ref(),
+            EntityType::PolyfaceMesh(e) => e.seqend.as_ref(),
+            EntityType::PolygonMesh(e) => e.seqend.as_ref(),
+            _ => None,
+        };
+        let seqend = seqend
+            .filter(|value| !value.common.handle.is_null())
+            .expect("sequence descriptor without sequence entity");
         field_common(
             doc,
             &seqend.common,
@@ -787,6 +1257,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             p["Reactors"] = json!([]);
             p["ExtendedData"] = json!([]);
         }
+        return;
     }
     match entity {
         EntityType::Point(value) => field_common(
@@ -938,89 +1409,145 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             );
         }
         EntityType::Polyline2D(value) => {
-            for vertex in &value.vertices {
-                if !vertex.common.handle.is_null() {
-                    let (start, end) = vertex
-                        .source_widths
-                        .unwrap_or((vertex.start_width, vertex.end_width));
+            if let RecordPart::Polyline2DVertex(index) = part {
+                let vertex = value
+                    .vertices
+                    .get(index)
+                    .filter(|vertex| !vertex.common.handle.is_null())
+                    .expect("polyline vertex descriptor without vertex");
+                let (start, end) = vertex
+                    .source_widths
+                    .unwrap_or((vertex.start_width, vertex.end_width));
+                out.push(vertex_record(
+                    doc,
+                    &vertex.common,
+                    "Vertex2D",
+                    vertex.location,
+                    vertex.flags.bits() as i64,
+                    vertex.bulge,
+                    vertex.curve_tangent,
+                    start,
+                    end,
+                    vertex.id,
+                ));
+            } else {
+                let (start, end) = value
+                    .source_widths
+                    .unwrap_or((value.start_width, value.end_width));
+                field_common(
+                    doc,
+                    &value.common,
+                    "Polyline2D",
+                    "POLYLINE",
+                    0x0F,
+                    "AcDb2dPolyline",
+                    false,
+                    vec![
+                        ("Elevation", number(value.elevation)),
+                        ("EndWidth", number(end)),
+                        ("Flags", enum_value(value.flags.bits() as i64)),
+                        ("IsClosed", bool_value(value.is_closed())),
+                        ("MatchVerticesEntityProperties", bool_value(true)),
+                        ("Normal", vec3(value.normal)),
+                        ("SmoothSurface", enum_value(value.smooth_surface as i64)),
+                        ("StartWidth", number(start)),
+                        ("Thickness", number(value.thickness)),
+                        (
+                            "Vertices",
+                            if value.vertices.iter().all(|v| !v.common.handle.is_null()) {
+                                handles(value.vertices.iter().map(|v| v.common.handle))
+                            } else {
+                                unmapped()
+                            },
+                        ),
+                    ],
+                    out,
+                );
+            }
+        }
+        EntityType::Polyline3D(value) => {
+            if let RecordPart::Polyline3DVertex(index) = part {
+                let vertex = value
+                    .vertices
+                    .get(index)
+                    .filter(|vertex| !vertex.handle.is_null())
+                    .expect("polyline vertex descriptor without vertex");
+                if vertex.common.owner_handle.is_null() {
+                    let type_name = if legacy { "Vertex2D" } else { "Vertex3D" };
+                    let layer = doc.layers.get(&vertex.layer).map(|layer| layer.handle);
+                    out.push(record(
+                        vertex.handle,
+                        type_name,
+                        value.common.handle,
+                        props(
+                            type_name,
+                            vec![
+                                ("Flags", integer(vertex.flags)),
+                                ("Layer", optional_handle(layer)),
+                                ("Location", vec3(vertex.position)),
+                                ("ObjectName", Value::String("VERTEX".into())),
+                                ("ObjectType", enum_value(if legacy { 0x0A } else { 0x0B })),
+                                ("ProxyGeometries", array([])),
+                                (
+                                    "SubclassMarker",
+                                    Value::String(
+                                        if legacy {
+                                            "AcDb2dVertex"
+                                        } else {
+                                            "AcDb3dPolylineVertex"
+                                        }
+                                        .into(),
+                                    ),
+                                ),
+                            ],
+                        ),
+                    ));
+                } else {
                     out.push(vertex_record(
                         doc,
                         &vertex.common,
-                        "Vertex2D",
-                        vertex.location,
-                        vertex.flags.bits() as i64,
-                        vertex.bulge,
-                        vertex.curve_tangent,
-                        start,
-                        end,
-                        vertex.id,
+                        if legacy { "Vertex2D" } else { "Vertex3D" },
+                        vertex.position,
+                        vertex.flags as i64,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0,
+                        0,
                     ));
                 }
+            } else {
+                let vertices = polyline3d_vertices(value);
+                field_common(
+                    doc,
+                    &value.common,
+                    if legacy { "Polyline2D" } else { "Polyline3D" },
+                    "POLYLINE",
+                    if legacy { 0x0F } else { 0x10 },
+                    if legacy {
+                        "AcDb2dPolyline"
+                    } else {
+                        "AcDb3dPolyline"
+                    },
+                    false,
+                    vec![
+                        ("Elevation", number(value.elevation)),
+                        ("EndWidth", number(value.default_end_width)),
+                        ("Flags", enum_value(value.flags.to_bits() as i64)),
+                        ("IsClosed", bool_value(value.is_closed())),
+                        ("MatchVerticesEntityProperties", bool_value(true)),
+                        ("Normal", vec3(value.normal)),
+                        (
+                            "SmoothSurface",
+                            enum_value(value.smooth_type.to_value() as i64),
+                        ),
+                        ("StartWidth", number(value.default_start_width)),
+                        ("Thickness", number(value.thickness)),
+                        ("Vertices", vertices),
+                    ],
+                    out,
+                );
             }
-            let (start, end) = value
-                .source_widths
-                .unwrap_or((value.start_width, value.end_width));
-            field_common(
-                doc,
-                &value.common,
-                "Polyline2D",
-                "POLYLINE",
-                0x0F,
-                "AcDb2dPolyline",
-                false,
-                vec![
-                    ("Elevation", number(value.elevation)),
-                    ("EndWidth", number(end)),
-                    ("Flags", enum_value(value.flags.bits() as i64)),
-                    ("IsClosed", bool_value(value.is_closed())),
-                    ("MatchVerticesEntityProperties", bool_value(true)),
-                    ("Normal", vec3(value.normal)),
-                    ("SmoothSurface", enum_value(value.smooth_surface as i64)),
-                    ("StartWidth", number(start)),
-                    ("Thickness", number(value.thickness)),
-                    (
-                        "Vertices",
-                        if value.vertices.iter().all(|v| !v.common.handle.is_null()) {
-                            handles(value.vertices.iter().map(|v| v.common.handle))
-                        } else {
-                            unmapped()
-                        },
-                    ),
-                ],
-                out,
-            );
-        }
-        EntityType::Polyline3D(value) => {
-            let vertices = polyline3d_vertices(doc, value, legacy, out);
-            field_common(
-                doc,
-                &value.common,
-                if legacy { "Polyline2D" } else { "Polyline3D" },
-                "POLYLINE",
-                if legacy { 0x0F } else { 0x10 },
-                if legacy {
-                    "AcDb2dPolyline"
-                } else {
-                    "AcDb3dPolyline"
-                },
-                false,
-                vec![
-                    ("Elevation", number(value.elevation)),
-                    ("EndWidth", number(value.default_end_width)),
-                    ("Flags", enum_value(value.flags.to_bits() as i64)),
-                    ("IsClosed", bool_value(value.is_closed())),
-                    ("MatchVerticesEntityProperties", bool_value(true)),
-                    ("Normal", vec3(value.normal)),
-                    (
-                        "SmoothSurface",
-                        enum_value(value.smooth_type.to_value() as i64),
-                    ),
-                    ("StartWidth", number(value.default_start_width)),
-                    ("Thickness", number(value.thickness)),
-                    ("Vertices", vertices),
-                ],
-                out,
-            );
         }
         EntityType::LwPolyline(value) => field_common(
             doc,
@@ -1115,55 +1642,57 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             out,
         ),
         EntityType::Insert(value) => {
-            let attributes = insert_attributes(doc, value, legacy);
-            // Emit every retained ATTRIB record.  In an R12 file ACadSharp
-            // keeps ownerless attributes in the block collection even though
-            // they are absent from Insert.Attributes.
-            for attribute in &value.attributes {
+            if let RecordPart::InsertAttribute(index) = part {
+                let attribute = value
+                    .attributes
+                    .get(index)
+                    .expect("insert attribute descriptor without attribute");
                 collect_attribute_inline(doc, attribute, value.common.handle, out);
-            }
-            let attribute_handles = attributes
-                .iter()
-                .map(|attribute| handle(attribute.common.handle))
-                .collect::<Vec<_>>();
-            field_common(
-                doc,
-                &value.common,
-                "Insert",
-                if value.is_array() { "INSERT" } else { "INSERT" },
-                if value.is_array() { 8 } else { 7 },
-                if value.is_array() {
-                    "AcDbMInsertBlock"
-                } else {
-                    "AcDbBlockReference"
-                },
-                true,
-                vec![
-                    ("Attributes", array(attribute_handles.into_iter())),
-                    (
-                        "Block",
-                        optional_handle(
-                            doc.block_records
-                                .get(&value.block_name)
-                                .map(|block| block.handle),
+            } else {
+                let attributes = insert_attributes(doc, value, legacy);
+                let attribute_handles = attributes
+                    .iter()
+                    .map(|attribute| handle(attribute.common.handle))
+                    .collect::<Vec<_>>();
+                field_common(
+                    doc,
+                    &value.common,
+                    "Insert",
+                    "INSERT",
+                    if value.is_array() { 8 } else { 7 },
+                    if value.is_array() {
+                        "AcDbMInsertBlock"
+                    } else {
+                        "AcDbBlockReference"
+                    },
+                    true,
+                    vec![
+                        ("Attributes", array(attribute_handles.into_iter())),
+                        (
+                            "Block",
+                            optional_handle(
+                                doc.block_records
+                                    .get(&value.block_name)
+                                    .map(|block| block.handle),
+                            ),
                         ),
-                    ),
-                    ("ColumnCount", integer(value.column_count as i64)),
-                    ("ColumnSpacing", number(value.column_spacing)),
-                    ("HasAttributes", bool_value(!attributes.is_empty())),
-                    ("IsMultiple", bool_value(value.is_array())),
-                    ("InsertPoint", vec3(value.insert_point)),
-                    ("Normal", vec3(value.normal)),
-                    ("Rotation", number(value.rotation)),
-                    ("RowCount", integer(value.row_count as i64)),
-                    ("RowSpacing", number(value.row_spacing)),
-                    ("SpatialFilter", insert_spatial_filter(doc, value)),
-                    ("XScale", number(value.x_scale())),
-                    ("YScale", number(value.y_scale())),
-                    ("ZScale", number(value.z_scale())),
-                ],
-                out,
-            );
+                        ("ColumnCount", integer(value.column_count as i64)),
+                        ("ColumnSpacing", number(value.column_spacing)),
+                        ("HasAttributes", bool_value(!attributes.is_empty())),
+                        ("IsMultiple", bool_value(value.is_array())),
+                        ("InsertPoint", vec3(value.insert_point)),
+                        ("Normal", vec3(value.normal)),
+                        ("Rotation", number(value.rotation)),
+                        ("RowCount", integer(value.row_count as i64)),
+                        ("RowSpacing", number(value.row_spacing)),
+                        ("SpatialFilter", insert_spatial_filter(doc, value)),
+                        ("XScale", number(value.x_scale())),
+                        ("YScale", number(value.y_scale())),
+                        ("ZScale", number(value.z_scale())),
+                    ],
+                    out,
+                );
+            }
         }
         EntityType::Solid(value) => field_common(
             doc,
@@ -1464,8 +1993,8 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             ],
             out,
         ),
-        EntityType::PolyfaceMesh(value) => collect_polyface(doc, value, legacy, out),
-        EntityType::PolygonMesh(value) => collect_polygon_mesh(doc, value, legacy, out),
+        EntityType::PolyfaceMesh(value) => collect_polyface(doc, value, legacy, part, out),
+        EntityType::PolygonMesh(value) => collect_polygon_mesh(doc, value, legacy, part, out),
         EntityType::Solid3D(value) => collect_modeler_geometry(
             doc,
             &value.common,
@@ -2773,68 +3302,60 @@ fn collect_polyface(
     doc: &CadDocument,
     value: &crate::entities::PolyfaceMesh,
     legacy: bool,
+    part: RecordPart,
     out: &mut Vec<Value>,
 ) {
-    let vertices_complete = value
-        .vertices
-        .iter()
-        .all(|vertex| !vertex.common.handle.is_null());
-    let vertices = value
-        .vertices
-        .iter()
-        .filter_map(|vertex| {
-            if vertex.common.handle.is_null() {
-                return None;
-            }
-            field_common(
-                doc,
-                &vertex.common,
-                if legacy { "Vertex2D" } else { "VertexFaceMesh" },
-                "VERTEX",
-                if legacy { 0x0A } else { 0x0D },
-                if legacy {
-                    "AcDb2dVertex"
-                } else {
-                    "AcDbPolyFaceMeshVertex"
-                },
-                false,
-                vec![
-                    ("Bulge", number(vertex.bulge)),
-                    ("CurveTangent", number(vertex.curve_tangent)),
-                    ("EndWidth", number(vertex.end_width)),
-                    ("Flags", enum_value(vertex.flags.bits() as i64)),
-                    ("Id", integer(vertex.id as i64)),
-                    ("Location", vec3(vertex.location)),
-                    ("StartWidth", number(vertex.start_width)),
-                ],
-                out,
-            );
-            Some(handle(vertex.common.handle))
-        })
-        .collect::<Vec<_>>();
-    let faces_complete = value.faces.iter().all(|face| !face.common.handle.is_null());
-    let faces = value
-        .faces
-        .iter()
-        .filter_map(|face| {
-            if face.common.handle.is_null() {
-                return None;
-            }
+    if let RecordPart::PolyfaceVertex(index) = part {
+        let vertex = value
+            .vertices
+            .get(index)
+            .filter(|vertex| !vertex.common.handle.is_null())
+            .expect("polyface vertex descriptor without vertex");
+        field_common(
+            doc,
+            &vertex.common,
+            if legacy { "Vertex2D" } else { "VertexFaceMesh" },
+            "VERTEX",
+            if legacy { 0x0A } else { 0x0D },
             if legacy {
-                out.push(vertex_record(
-                    doc,
-                    &face.common,
-                    "Vertex2D",
-                    Vector3::ZERO,
-                    face.flags.bits() as i64,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    0,
-                ));
-                return Some(handle(face.common.handle));
-            }
+                "AcDb2dVertex"
+            } else {
+                "AcDbPolyFaceMeshVertex"
+            },
+            false,
+            vec![
+                ("Bulge", number(vertex.bulge)),
+                ("CurveTangent", number(vertex.curve_tangent)),
+                ("EndWidth", number(vertex.end_width)),
+                ("Flags", enum_value(vertex.flags.bits() as i64)),
+                ("Id", integer(vertex.id as i64)),
+                ("Location", vec3(vertex.location)),
+                ("StartWidth", number(vertex.start_width)),
+            ],
+            out,
+        );
+        return;
+    }
+    if let RecordPart::PolyfaceFace(index) = part {
+        let face = value
+            .faces
+            .get(index)
+            .filter(|face| !face.common.handle.is_null())
+            .expect("polyface face descriptor without face");
+        if legacy {
+            out.push(vertex_record(
+                doc,
+                &face.common,
+                "Vertex2D",
+                Vector3::ZERO,
+                face.flags.bits() as i64,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+            ));
+        } else {
             field_common(
                 doc,
                 &face.common,
@@ -2858,6 +3379,31 @@ fn collect_polyface(
                 ],
                 out,
             );
+        }
+        return;
+    }
+    let vertices_complete = value
+        .vertices
+        .iter()
+        .all(|vertex| !vertex.common.handle.is_null());
+    let vertices = value
+        .vertices
+        .iter()
+        .filter_map(|vertex| {
+            if vertex.common.handle.is_null() {
+                return None;
+            }
+            Some(handle(vertex.common.handle))
+        })
+        .collect::<Vec<_>>();
+    let faces_complete = value.faces.iter().all(|face| !face.common.handle.is_null());
+    let faces = value
+        .faces
+        .iter()
+        .filter_map(|face| {
+            if face.common.handle.is_null() {
+                return None;
+            }
             Some(handle(face.common.handle))
         })
         .collect::<Vec<_>>();
@@ -2902,9 +3448,9 @@ fn collect_polyface(
                 "Vertices",
                 if vertices_complete {
                     if legacy {
-                        array(vertices.into_iter().chain(faces))
+                        array(vertices.iter().cloned().chain(faces.iter().cloned()))
                     } else {
-                        array(vertices)
+                        array(vertices.iter().cloned())
                     }
                 } else {
                     unmapped()
@@ -2919,24 +3465,29 @@ fn collect_polygon_mesh(
     doc: &CadDocument,
     value: &crate::entities::PolygonMeshEntity,
     legacy: bool,
+    part: RecordPart,
     out: &mut Vec<Value>,
 ) {
-    let vertices_complete = value
-        .vertices
-        .iter()
-        .all(|vertex| !vertex.common.handle.is_null());
-    let vertices = value
-        .vertices
-        .iter()
-        .filter_map(|vertex| {
-            if vertex.common.handle.is_null() {
-                return None;
-            }
-            if legacy {
-                out.push(vertex_record(doc, &vertex.common, "Vertex2D", vertex.location,
-                    vertex.flags as i64, 0.0, 0.0, 0.0, 0.0, 0));
-                return Some(handle(vertex.common.handle));
-            }
+    if let RecordPart::PolygonMeshVertex(index) = part {
+        let vertex = value
+            .vertices
+            .get(index)
+            .filter(|vertex| !vertex.common.handle.is_null())
+            .expect("polygon mesh vertex descriptor without vertex");
+        if legacy {
+            out.push(vertex_record(
+                doc,
+                &vertex.common,
+                "Vertex2D",
+                vertex.location,
+                vertex.flags as i64,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0,
+            ));
+        } else {
             field_common(
                 doc,
                 &vertex.common,
@@ -2951,6 +3502,20 @@ fn collect_polygon_mesh(
                 ],
                 out,
             );
+        }
+        return;
+    }
+    let vertices_complete = value
+        .vertices
+        .iter()
+        .all(|vertex| !vertex.common.handle.is_null());
+    let vertices = value
+        .vertices
+        .iter()
+        .filter_map(|vertex| {
+            if vertex.common.handle.is_null() {
+                return None;
+            }
             Some(handle(vertex.common.handle))
         })
         .collect::<Vec<_>>();
@@ -3252,4 +3817,231 @@ fn collect_mline(doc: &CadDocument, value: &crate::entities::MLine, out: &mut Ve
         ],
         out,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entities::{
+        AttributeEntity, Insert, Line, Polyline2D, Polyline3D, Seqend, Vertex2D, Vertex3DPolyline,
+    };
+    use crate::types::Color;
+    use std::sync::Arc;
+
+    fn handle_value(value: u64) -> Handle {
+        Handle::new(value)
+    }
+
+    fn synthetic_document(version: DxfVersion) -> CadDocument {
+        let mut doc = CadDocument::new();
+        doc.version = version;
+
+        let mut line = Line::from_coords(0.0, 0.0, 0.0, 1.0, 1.0, 0.0);
+        line.common.handle = handle_value(0x10);
+        line.common.owner_handle = handle_value(0x01);
+        line.common.xdictionary_handle = Some(handle_value(0x11));
+        doc.entities.push(Arc::new(EntityType::Line(line)));
+
+        let mut polyline = Polyline2D::new();
+        polyline.common.handle = handle_value(0x20);
+        polyline.common.owner_handle = handle_value(0x01);
+        polyline.common.color = Color::from_rgb(10, 20, 30);
+        polyline.common.xdictionary_handle = Some(handle_value(0x21));
+        let mut vertex = Vertex2D::new(Vector3::new(2.0, 3.0, 0.0));
+        vertex.common.handle = handle_value(0x22);
+        vertex.common.owner_handle = polyline.common.handle;
+        vertex.common.xdictionary_handle = Some(handle_value(0x23));
+        polyline.vertices.push(vertex);
+        let mut polyline_end = Seqend::new();
+        polyline_end.common.handle = handle_value(0x24);
+        polyline_end.common.owner_handle = polyline.common.handle;
+        polyline.seqend = Some(Box::new(polyline_end));
+        doc.entities
+            .push(Arc::new(EntityType::Polyline2D(polyline)));
+
+        let mut polyline3d = Polyline3D::new();
+        polyline3d.common.handle = handle_value(0x30);
+        polyline3d.common.owner_handle = handle_value(0x01);
+        let mut unowned_vertex = Vertex3DPolyline::new(Vector3::new(4.0, 5.0, 6.0));
+        unowned_vertex.common.handle = handle_value(0x31);
+        // A source 3D vertex can retain an identity without an owner. The
+        // renderer must preserve it while retaining the parent relationship.
+        unowned_vertex.common.owner_handle = Handle::NULL;
+        polyline3d.vertices.push(unowned_vertex);
+        let mut owned_vertex = Vertex3DPolyline::new(Vector3::new(7.0, 8.0, 9.0));
+        owned_vertex.common.handle = handle_value(0x32);
+        owned_vertex.common.owner_handle = polyline3d.common.handle;
+        polyline3d.vertices.push(owned_vertex);
+        doc.entities
+            .push(Arc::new(EntityType::Polyline3D(polyline3d)));
+
+        let mut insert = Insert::new("MODEL_SPACE", Vector3::ZERO);
+        insert.common.handle = handle_value(0x40);
+        insert.common.owner_handle = handle_value(0x01);
+        let mut attribute = AttributeEntity::new("TAG".to_owned(), "value".to_owned());
+        attribute.common.handle = handle_value(0x41);
+        attribute.common.owner_handle = Handle::NULL;
+        insert.attributes.push(attribute);
+        let mut insert_end = Seqend::new();
+        insert_end.common.handle = handle_value(0x42);
+        insert_end.common.owner_handle = insert.common.handle;
+        insert.seqend = Some(Box::new(insert_end));
+        doc.entities.push(Arc::new(EntityType::Insert(insert)));
+
+        doc
+    }
+
+    fn default_entity_variants() -> Vec<EntityType> {
+        vec![
+            EntityType::Point(Default::default()),
+            EntityType::Line(Default::default()),
+            EntityType::Circle(Default::default()),
+            EntityType::Arc(Default::default()),
+            EntityType::Ellipse(Default::default()),
+            EntityType::Polyline(Default::default()),
+            EntityType::Polyline2D(Default::default()),
+            EntityType::Polyline3D(Default::default()),
+            EntityType::LwPolyline(Default::default()),
+            EntityType::Text(Default::default()),
+            EntityType::MText(Default::default()),
+            EntityType::Spline(Default::default()),
+            EntityType::Helix(Default::default()),
+            EntityType::Hatch(Default::default()),
+            EntityType::BlockEnd(Default::default()),
+            EntityType::Ray(Default::default()),
+            EntityType::XLine(Default::default()),
+            EntityType::Viewport(Default::default()),
+            EntityType::AttributeDefinition(Default::default()),
+            EntityType::AttributeEntity(Default::default()),
+            EntityType::Leader(Default::default()),
+            EntityType::MultiLeader(Default::default()),
+            EntityType::MLine(Default::default()),
+            EntityType::Mesh(Default::default()),
+            EntityType::RasterImage(Default::default()),
+            EntityType::Solid3D(Default::default()),
+            EntityType::Region(Default::default()),
+            EntityType::Body(Default::default()),
+            EntityType::Table(Default::default()),
+            EntityType::Tolerance(Default::default()),
+            EntityType::PolyfaceMesh(Default::default()),
+            EntityType::Wipeout(Default::default()),
+            EntityType::Shape(Default::default()),
+            EntityType::Underlay(Default::default()),
+            EntityType::Seqend(Default::default()),
+            EntityType::Ole2Frame(Default::default()),
+            EntityType::PolygonMesh(Default::default()),
+            EntityType::Light(Default::default()),
+            EntityType::SectionSymbol(Default::default()),
+            EntityType::ViewBorder(Default::default()),
+            EntityType::Dimension(Box::new(Dimension::Aligned(Default::default()))),
+            EntityType::Dimension(Box::new(Dimension::Linear(Default::default()))),
+            EntityType::Dimension(Box::new(Dimension::Radius(Default::default()))),
+            EntityType::Dimension(Box::new(Dimension::Diameter(Default::default()))),
+            EntityType::Dimension(Box::new(Dimension::Angular2Ln(Default::default()))),
+            EntityType::Dimension(Box::new(Dimension::Angular3Pt(Default::default()))),
+            EntityType::Dimension(Box::new(Dimension::Ordinate(Default::default()))),
+            EntityType::Dimension(Box::new(Dimension::Arc(Default::default()))),
+            EntityType::Dimension(Box::new(Dimension::LargeRadial(Default::default()))),
+        ]
+    }
+
+    fn document_with_default_variants(version: DxfVersion) -> (CadDocument, usize) {
+        let mut doc = CadDocument::new();
+        doc.version = version;
+        let mut entities = default_entity_variants();
+        let count = entities.len();
+        for (index, entity) in entities.iter_mut().enumerate() {
+            let common = entity.common_mut();
+            common.handle = handle_value(0x100 + index as u64);
+            common.owner_handle = handle_value(0x01);
+            common.xdictionary_handle = Some(handle_value(0x1000 + index as u64));
+        }
+        doc.entities.extend(entities.into_iter().map(Arc::new));
+        (doc, count)
+    }
+
+    fn assert_metadata_matches(full: &Value, metadata: &Value) {
+        assert_eq!(metadata["handle"], full["handle"]);
+        assert_eq!(metadata["type"], full["type"]);
+        assert_eq!(metadata["owner"], full["owner"]);
+
+        let full_props = full["props"].as_object().expect("full properties");
+        let metadata_props = metadata["props"].as_object().expect("metadata properties");
+        assert_eq!(
+            metadata_props.get("SubclassMarker"),
+            full_props.get("SubclassMarker")
+        );
+        assert_eq!(
+            metadata_props.contains_key("ProxyGeometries"),
+            full_props.contains_key("ProxyGeometries")
+        );
+        if let Some(expected) = full_props.get("XDictionary") {
+            match metadata_props.get("XDictionary") {
+                Some(actual) => assert_eq!(actual, expected),
+                None => assert_eq!(expected.as_str(), Some(UNMAPPED)),
+            }
+        }
+        assert!(metadata_props.keys().all(|key| {
+            matches!(
+                key.as_str(),
+                "Name" | "SubclassMarker" | "ProxyGeometries" | "XDictionary"
+            )
+        }));
+    }
+
+    #[test]
+    fn records_render_one_value_and_metadata_is_reduced() {
+        for (version, reader) in [
+            (DxfVersion::AC1032, "dwg"),
+            (DxfVersion::AC1032, "dxf"),
+            (DxfVersion::AC1009, "dxf"),
+        ] {
+            let doc = synthetic_document(version);
+            let descriptors = records(&doc, reader);
+            assert!(descriptors.len() >= 9);
+
+            let mut collected = Vec::new();
+            collect(&doc, reader, &mut collected);
+            assert_eq!(collected.len(), descriptors.len());
+            for (descriptor, collected_value) in descriptors.iter().zip(&collected) {
+                let rendered = descriptor.render(&doc, reader);
+                assert_eq!(&rendered, collected_value);
+                assert_metadata_matches(&rendered, &descriptor.metadata(&doc, reader));
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_polyline_children_keep_identity_and_partial_3d_vertices() {
+        let doc = synthetic_document(DxfVersion::AC1009);
+        let descriptors = records(&doc, "dxf");
+        let values: Vec<_> = descriptors
+            .iter()
+            .map(|record| record.render(&doc, "dxf"))
+            .collect();
+
+        assert!(values.iter().any(|value| {
+            value["handle"] == handle(handle_value(0x31)) && value["type"] == "Vertex2D"
+        }));
+        assert!(values.iter().any(|value| {
+            value["handle"] == handle(handle_value(0x41))
+                && value["type"] == "AttributeEntity"
+        }));
+        assert!(values.iter().any(|value| {
+            value["handle"] == handle(handle_value(0x42)) && value["type"] == "Seqend"
+        }));
+    }
+
+    #[test]
+    fn metadata_matches_every_default_entity_variant_and_dimension() {
+        let (doc, count) = document_with_default_variants(DxfVersion::AC1032);
+        let descriptors = records(&doc, "dxf");
+        assert_eq!(descriptors.len(), count);
+        for descriptor in descriptors {
+            let rendered = descriptor.render(&doc, "dxf");
+            let metadata = descriptor.metadata(&doc, "dxf");
+            assert_metadata_matches(&rendered, &metadata);
+            assert_eq!(metadata["props"]["SubclassMarker"], rendered["props"]["SubclassMarker"]);
+        }
+    }
 }
