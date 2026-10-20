@@ -20549,6 +20549,11 @@ impl<'a> SectionReader<'a> {
         let mut table = crate::entities::Table::new(Vector3::zero(), 0, 0);
         table.rows.clear();
         table.columns.clear();
+        // TABLE inherits INSERT's block-reference fields. Keep these source
+        // values separate from table/cell fields that reuse group codes.
+        let mut dxf_insert_scale = Some(Vector3::new(1.0, 1.0, 1.0));
+        let mut dxf_insert_rotation = Some(0.0);
+        let mut dxf_insert_array = Some((1u16, 1u16, 0.0f64, 0.0f64));
 
         let mut row_heights: Vec<f64> = Vec::new();
         let mut col_widths: Vec<f64> = Vec::new();
@@ -20586,6 +20591,68 @@ impl<'a> SectionReader<'a> {
                     // The overridden properties, so the cell's own values win
                     // over the row, column and table styles.
                     style.property_flags |= crate::entities::table::legacy_override_properties(bit);
+                }
+            }
+            // Keep the raw outer group-code values exactly as encountered.  TABLE
+            // reuses 41/42/43/50 in later subclasses, while native insert fields
+            // below are intentionally scoped to AcDbBlockReference.
+            if cur.is_none() && !in_value {
+                match pair.code {
+                    41 => {
+                        if let Some(value) = pair.as_double() {
+                            dxf_insert_scale
+                                .get_or_insert(Vector3::new(1.0, 1.0, 1.0))
+                                .x = value;
+                        }
+                    }
+                    42 => {
+                        if let Some(value) = pair.as_double() {
+                            dxf_insert_scale
+                                .get_or_insert(Vector3::new(1.0, 1.0, 1.0))
+                                .y = value;
+                        }
+                    }
+                    43 => {
+                        if let Some(value) = pair.as_double() {
+                            dxf_insert_scale
+                                .get_or_insert(Vector3::new(1.0, 1.0, 1.0))
+                                .z = value;
+                        }
+                    }
+                    50 => {
+                        if let Some(value) = pair.as_double() {
+                            dxf_insert_rotation = Some(value.to_radians());
+                        }
+                    }
+                    70 => {
+                        if let Some(value) = pair.as_i16() {
+                            dxf_insert_array
+                                .get_or_insert((1, 1, 0.0, 0.0))
+                                .0 = value.max(0) as u16;
+                        }
+                    }
+                    71 => {
+                        if let Some(value) = pair.as_i16() {
+                            dxf_insert_array
+                                .get_or_insert((1, 1, 0.0, 0.0))
+                                .1 = value.max(0) as u16;
+                        }
+                    }
+                    44 => {
+                        if let Some(value) = pair.as_double() {
+                            dxf_insert_array
+                                .get_or_insert((1, 1, 0.0, 0.0))
+                                .2 = value;
+                        }
+                    }
+                    45 => {
+                        if let Some(value) = pair.as_double() {
+                            dxf_insert_array
+                                .get_or_insert((1, 1, 0.0, 0.0))
+                                .3 = value;
+                        }
+                    }
+                    _ => {}
                 }
             }
             match pair.code {
@@ -20683,11 +20750,46 @@ impl<'a> SectionReader<'a> {
                         style.horizontal_cell_margin = Some(value);
                     }
                 }
-                41 if cur.is_none() => {
+                41 if cur.is_none()
+                    && table.legacy_style_override.is_some()
+                    && !section.eq_ignore_ascii_case("AcDbBlockReference") =>
+                {
                     if let (Some(style), Some(value)) =
                         (table.legacy_style_override.as_mut(), pair.as_double())
                     {
                         style.vertical_cell_margin = Some(value);
+                    }
+                }
+                41 if cur.is_none()
+                    && !in_value
+                    && section.eq_ignore_ascii_case("AcDbBlockReference") =>
+                {
+                    if let Some(value) = pair.as_double() {
+                        table.insert_scale.x = value;
+                    }
+                }
+                42 if cur.is_none()
+                    && !in_value
+                    && section.eq_ignore_ascii_case("AcDbBlockReference") =>
+                {
+                    if let Some(value) = pair.as_double() {
+                        table.insert_scale.y = value;
+                    }
+                }
+                43 if cur.is_none()
+                    && !in_value
+                    && section.eq_ignore_ascii_case("AcDbBlockReference") =>
+                {
+                    if let Some(value) = pair.as_double() {
+                        table.insert_scale.z = value;
+                    }
+                }
+                50 if cur.is_none()
+                    && !in_value
+                    && section.eq_ignore_ascii_case("AcDbBlockReference") =>
+                {
+                    if let Some(value) = pair.as_double() {
+                        table.insert_rotation = value.to_radians();
                     }
                 }
                 280 if cur.is_none() => {
@@ -21184,6 +21286,7 @@ impl<'a> SectionReader<'a> {
                 name: String::new(),
                 width: w,
                 style: None,
+                source_style_type: None,
                 custom_data: 0,
                 custom_data_items: Vec::new(),
                 style_id: 0,
@@ -21200,6 +21303,7 @@ impl<'a> SectionReader<'a> {
                 height: h,
                 cells: Vec::new(),
                 style: None,
+                source_style_type: None,
                 custom_data: 0,
                 custom_data_items: Vec::new(),
                 style_id: 0,
@@ -21217,6 +21321,9 @@ impl<'a> SectionReader<'a> {
         }
 
         table.insertion_point = insertion_point.get_point().unwrap_or(Vector3::zero());
+        table.dxf_insert_scale = dxf_insert_scale;
+        table.dxf_insert_rotation = dxf_insert_rotation;
+        table.dxf_insert_array = dxf_insert_array;
         if let Some(h) = horizontal.get_point() {
             table.horizontal_direction = h;
         }

@@ -3588,10 +3588,10 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_bit(!style.fill_enabled);
             }
             if flags & 0x04 != 0 {
-                self.writer.write_cm_color(&style.background_color);
+                self.writer.write_cm_true_color(&style.background_color);
             }
             if flags & 0x08 != 0 {
-                self.writer.write_cm_color(&style.content_color);
+                self.writer.write_cm_true_color(&style.content_color);
             }
             if flags & 0x10 != 0 {
                 self.writer.write_handle(
@@ -3609,7 +3609,7 @@ impl<'a> DwgObjectWriter<'a> {
                 (0x200, 0x2000, &style.left_border),
             ] {
                 if flags & color_bit != 0 {
-                    self.writer.write_cm_color(&border.color);
+                    self.writer.write_cm_true_color(&border.color);
                 }
                 if flags & lw_bit != 0 {
                     self.writer.write_bit_short(border.line_weight.as_i16());
@@ -3662,7 +3662,7 @@ impl<'a> DwgObjectWriter<'a> {
                     .get(index)
                     .cloned()
                     .unwrap_or(Color::ByBlock);
-                self.writer.write_cm_color(&color);
+                self.writer.write_cm_true_color(&color);
                 index += 1;
             }
         }
@@ -3682,7 +3682,7 @@ impl<'a> DwgObjectWriter<'a> {
                     .get(index)
                     .cloned()
                     .unwrap_or(Color::ByBlock);
-                self.writer.write_cm_color(&color);
+                self.writer.write_cm_true_color(&color);
                 index += 1;
             }
         }
@@ -3732,7 +3732,7 @@ impl<'a> DwgObjectWriter<'a> {
         for bit in 0..18 {
             if value.flags & (1 << bit) != 0 {
                 let color = value.values.get(index).cloned().unwrap_or(Color::ByBlock);
-                self.writer.write_cm_color(&color);
+                self.writer.write_cm_true_color(&color);
                 index += 1;
             }
         }
@@ -3816,12 +3816,21 @@ impl<'a> DwgObjectWriter<'a> {
             self.write_table_content(e);
             self.writer.write_bit_short(e.dwg_unknown_short);
             self.writer.write_3bit_double(e.horizontal_direction);
-            let has_break_data =
-                !e.break_options.is_empty() || !e.break_data.is_empty() || e.break_spacing != 0.0;
+            let has_break_data = e.has_break_data
+                || !e.break_options.is_empty()
+                || !e.break_data.is_empty()
+                || e.break_spacing != 0.0;
             self.writer.write_bit_long(has_break_data as i32);
             if has_break_data {
                 self.writer.write_bit_long(e.break_options.bits() as i32);
-                self.writer.write_bit_long(e.break_flow_direction as i32);
+                self.writer.write_bit_long(
+                    e.source_break_flow_direction
+                        .filter(|raw| {
+                            crate::entities::BreakFlowDirection::from(*raw as u8)
+                                == e.break_flow_direction
+                        })
+                        .unwrap_or(e.break_flow_direction as i32),
+                );
                 self.writer.write_bit_double(e.break_spacing);
                 self.writer.write_bit_long(0);
                 self.writer.write_bit_long(0);

@@ -3970,6 +3970,12 @@ impl DwgDocumentBuilder {
                     let mut e = crate::entities::Table::default();
                     e.common = entity_common;
                     e.insertion_point = data.insert.insert_point;
+                    e.insert_scale = crate::types::Vector3::new(
+                        data.insert.x_scale,
+                        data.insert.y_scale,
+                        data.insert.z_scale,
+                    );
+                    e.insert_rotation = data.insert.rotation;
                     e.normal = data.insert.normal;
                     e.horizontal_direction = data.horizontal_direction;
                     if data.insert.block_handle != 0 {
@@ -3985,11 +3991,14 @@ impl DwgDocumentBuilder {
                     e.description = data.description;
                     e.field_handles = data.field_handles;
                     e.base_style = data.base_style;
+                    e.base_style_type = data.base_style_type;
                     e.merged_ranges = data.merged_ranges;
                     e.sync_cells_from_merged_ranges();
                     e.break_options = BreakOptionFlags::from_bits_retain(data.break_options as u32);
+                    e.has_break_data = data.has_break_data;
                     e.break_flow_direction =
                         BreakFlowDirection::from(data.break_flow_direction as u8);
+                    e.source_break_flow_direction = data.source_break_flow_direction;
                     e.break_spacing = data.break_spacing;
                     e.break_data = data.break_data;
                     e.break_ranges = data.break_ranges;
@@ -6346,6 +6355,7 @@ impl DwgDocumentBuilder {
                         rows,
                         field_handles,
                         base_style,
+                        base_style_type,
                         merged_ranges,
                         style_handle,
                     ) = entities::read_table_content(
@@ -6374,6 +6384,7 @@ impl DwgDocumentBuilder {
                     obj.rows = rows;
                     obj.field_handles = field_handles;
                     obj.base_style = base_style;
+                    obj.base_style_type = base_style_type;
                     obj.merged_ranges = merged_ranges;
                     obj.sync_cells_from_merged_ranges();
                     obj.table_style_handle = (style_handle != 0)

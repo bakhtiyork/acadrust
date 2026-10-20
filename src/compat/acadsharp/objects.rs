@@ -162,7 +162,7 @@ fn dump_object(
         ObjectType::BlockVisibilityParameter(value) => dump_visibility_parameter(_doc, reader, map_handle, value),
         ObjectType::DynamicBlock(value) => dump_dynamic_block(_doc, reader, map_handle, value),
         ObjectType::ObjectContextData(value) => dump_object_context_data(map_handle, value),
-        ObjectType::TableContent(value) => dump_table_content(map_handle, value),
+        ObjectType::TableContent(value) => dump_table_content(_doc, map_handle, value),
         ObjectType::ProxyObject(value) => dump_proxy_object(map_handle, value),
         ObjectType::UnderlayDefinition(value) => dump_underlay_definition(map_handle, value),
         ObjectType::Associative(value) => match &value.data {
@@ -3265,6 +3265,31 @@ fn default_cell_style(name: &str, style_class: i32) -> Value {
     )
 }
 
+/// Table components have the same stored style shape as named table styles,
+/// but their constructor leaves the name null and HasData false.
+pub(super) fn table_component_default() -> Value {
+    let mut value = default_cell_style("", 0);
+    value["Name"] = Value::Null;
+    value["HasData"] = bool_value(false);
+    value
+}
+
+pub(super) fn table_component_styles(
+    doc: &crate::CadDocument,
+    table: &crate::entities::Table,
+) -> Option<Value> {
+    let h = table.table_style_handle?;
+    let ObjectType::TableStyle(style) = doc.objects.get(&h)? else {
+        return None;
+    };
+    let reader = if doc.dwg_source_version.is_some() { "dwg" } else { "dxf" };
+    Some(dump_table_style(doc, reader, h, style)["props"].take())
+}
+
+pub(super) fn table_content_color(value: Color) -> Value {
+    style_color(value)
+}
+
 fn default_border(edge_flags: i32) -> Value {
     props(
         "TableStyle.CellBorder",
@@ -3435,358 +3460,21 @@ fn named_cell_style(value: &crate::objects::NamedTableCellStyle) -> Value {
     result
 }
 
-fn table_cell(value: &crate::entities::TableCell) -> Value {
-    props(
-        "TableEntity.Cell",
-        [
-            ("AutoFit", bool_value(value.auto_fit)),
-            ("BlockScale", number(value.block_scale)),
-            ("BorderHeight", int(value.merge_height as i64)),
-            ("BorderWidth", int(value.merge_width as i64)),
-            (
-                "Contents",
-                Value::Array(value.contents.iter().map(table_cell_content).collect()),
-            ),
-            ("CustomData", int(value.custom_data as i64)),
-            (
-                "CustomDataCollection",
-                Value::Array(
-                    value
-                        .custom_data_items
-                        .iter()
-                        .map(|item| {
-                            props(
-                                "TableEntity.CustomDataEntry",
-                                [
-                                    ("Name", text(&item.name)),
-                                    ("Value", cell_value(&item.value)),
-                                ],
-                            )
-                        })
-                        .collect(),
-                ),
-            ),
-            ("EdgeFlags", int(value.edge_flags as i64)),
-            (
-                "Geometry",
-                value
-                    .geometry
-                    .as_ref()
-                    .map(table_geometry)
-                    .unwrap_or(Value::Null),
-            ),
-            ("HasLinkedData", bool_value(value.has_linked_data)),
-            ("MergedValue", int(value.merged as i64)),
-            ("Rotation", number(value.rotation)),
-            ("StateFlags", int(value.state.bits() as i64)),
-            // `CellStyle` is the inherited style in ACadSharp.  The Rust
-            // model stores its per-cell style in the override slot.
-            (
-                "StyleOverride",
-                value
-                    .style
-                    .as_ref()
-                    .map(entity_cell_style)
-                    .unwrap_or(Value::Null),
-            ),
-            ("ToolTip", text(&value.tooltip)),
-            ("Type", int(value.cell_type as i64)),
-            ("VirtualEdgeFlag", int(value.virtual_edge as i64)),
-        ],
-    )
-}
-
-fn table_cell_content(value: &crate::entities::CellContent) -> Value {
-    props(
-        "TableEntity.CellContent",
-        [
-            ("CadValue", cell_value(&value.value)),
-            ("ContentType", int(value.content_type as i64)),
-            (
-                "Format",
-                props(
-                    "TableStyle.ContentFormat",
-                    [
-                        ("Alignment", int(value.alignment as i64)),
-                        ("Color", color(value.color)),
-                        ("HasData", bool_value(!value.value.is_empty())),
-                        ("PropertyFlags", int(value.format_property_flags as i64)),
-                        (
-                            "PropertyOverrideFlags",
-                            int(value.format_override_flags as i64),
-                        ),
-                        ("Rotation", number(value.rotation)),
-                        ("Scale", number(value.scale)),
-                        ("TextHeight", number(value.text_height)),
-                        ("TextStyle", optional_handle(value.text_style_handle)),
-                        ("ValueDataType", int(value.format_value_data_type as i64)),
-                        ("ValueFormatString", text(&value.value_format)),
-                        ("ValueUnitType", int(value.format_value_unit_type as i64)),
-                    ],
-                ),
-            ),
-        ],
-    )
-}
-
-fn table_geometry(value: &crate::entities::CellContentGeometry) -> Value {
-    props(
-        "TableEntity.CellContentGeometry",
-        [
-            ("ContentHeight", number(value.outer_height)),
-            ("ContentWidth", number(value.outer_width)),
-            ("DistanceCenter", vec3(value.distance_to_center)),
-            ("DistanceTopLeft", vec3(value.distance_to_top_left)),
-            ("Flags", int(value.flags as i64)),
-            ("Height", number(value.height)),
-            ("Width", number(value.width)),
-        ],
-    )
-}
-
-fn entity_cell_border(value: &crate::entities::CellBorder) -> Value {
-    props(
-        "TableStyle.CellBorder",
-        [
-            ("ApplyBorder", bool_value(!value.invisible)),
-            ("Color", color(value.color)),
-            ("DoubleLineSpacing", number(value.double_spacing)),
-            ("EdgeFlags", int(0)),
-            ("IsInvisible", bool_value(value.invisible)),
-            ("LineWeight", int(value.line_weight.value() as i64)),
-            (
-                "PropertyOverrideFlags",
-                int(value.override_flags.bits() as i64),
-            ),
-            ("Type", int(value.border_type as i64)),
-        ],
-    )
-}
-
-fn entity_cell_style(value: &crate::entities::CellStyle) -> Value {
-    let border = |mask: u32, border: &crate::entities::CellBorder| {
-        if !value.applied_border_edges.contains(
-            crate::entities::table::CellEdgeFlags::from_bits_retain(mask),
-        ) {
-            return None;
-        }
-        let mut value = entity_cell_border(border);
-        if let Value::Object(properties) = &mut value {
-            properties.insert("EdgeFlags".into(), int(mask as i64));
-        }
-        Some(value)
-    };
-    let additional_border = |mask: u32| {
-        value
-            .additional_borders
-            .iter()
-            .find(|(edge, _)| *edge == mask)
-            .map(|(_, border)| {
-                let mut value = entity_cell_border(border);
-                if let Value::Object(properties) = &mut value {
-                    properties.insert("EdgeFlags".into(), int(mask as i64));
-                }
-                value
-            })
-            .map(Some)
-            .unwrap_or(None)
-    };
-    let mut fields = vec![
-        ("Alignment", int(value.alignment as i64)),
-        ("BackgroundColor", color(value.background_color)),
-        ("BottomMargin", number(value.margin_bottom)),
-        ("CellAlignment", int(value.alignment as i64)),
-        ("Color", color(value.content_color)),
-        ("ContentColor", color(value.content_color)),
-        ("ContentLayoutFlags", int(value.layout_flags.bits() as i64)),
-        ("HorizontalMargin", number(value.margin_left)),
-        ("IsFillColorOn", bool_value(value.fill_enabled)),
-        ("MarginHorizontalSpacing", number(value.horizontal_spacing)),
-        (
-            "MarginOverrideFlags",
-            int(value.margin_override_flags as i64),
-        ),
-        ("MarginVerticalSpacing", number(value.vertical_spacing)),
-        ("PropertyFlags", int(value.content_property_flags as i64)),
-        (
-            "PropertyOverrideFlags",
-            int(value.content_format_override_flags as i64),
-        ),
-        ("RightMargin", number(value.margin_right)),
-        ("Rotation", number(value.rotation)),
-        ("Scale", number(value.scale)),
-        (
-            "TableCellStylePropertyFlags",
-            int(value.property_flags.bits() as i64),
-        ),
-        ("TextColor", color(value.content_color)),
-        ("TextHeight", number(value.text_height)),
-        ("TextStyle", optional_handle(value.text_style_handle)),
-        ("Type", int(value.style_type as i64)),
-        ("ValueDataType", int(value.value_data_type as i64)),
-        ("ValueFormatString", text(&value.value_format)),
-        ("ValueUnitType", int(value.value_unit_type as i64)),
-        ("VerticalMargin", number(value.margin_top)),
-    ];
-    for (name, mask, cell_border) in [
-        ("BottomBorder", 4, &value.bottom_border),
-        ("LeftBorder", 8, &value.left_border),
-        ("RightBorder", 2, &value.right_border),
-        ("TopBorder", 1, &value.top_border),
-    ] {
-        if let Some(border) = border(mask, cell_border) {
-            fields.push((name, border));
-        }
-    }
-    for (name, mask) in [("HorizontalInsideBorder", 32), ("VerticalInsideBorder", 16)] {
-        if let Some(border) = additional_border(mask) {
-            fields.push((name, border));
-        }
-    }
-    props("TableStyle.CellStyle", fields)
-}
-
-fn dump_table_content(handle_value: Handle, value: &crate::entities::Table) -> Value {
+fn dump_table_content(
+    doc: &crate::CadDocument,
+    handle_value: Handle,
+    value: &crate::entities::Table,
+) -> Value {
     let mut p = common(
-        "TABLECONTENT",
-        UNLISTED,
-        "AcDbTableContent",
-        Some(&value.name),
-        Some(&value.common.reactors),
-        value.common.xdictionary_handle,
+        "TABLECONTENT", UNLISTED, "AcDbTableContent", Some(&value.name),
+        Some(&value.common.reactors), value.common.xdictionary_handle,
     );
+    p.extend(super::entities::table::content_fields(doc, value));
     p.extend([
-        (
-            "CellStyleOverride",
-            value
-                .base_style
-                .as_ref()
-                .map(entity_cell_style)
-                .unwrap_or(Value::Null),
-        ),
-        (
-            "Columns",
-            Value::Array(
-                value
-                    .columns
-                    .iter()
-                    .map(|column| {
-                        props(
-                            "TableEntity.Column",
-                            [
-                                (
-                                    "CellStyleOverride",
-                                    column
-                                        .style
-                                        .as_ref()
-                                        .map(entity_cell_style)
-                                        .unwrap_or(Value::Null),
-                                ),
-                                ("CustomData", int(column.custom_data as i64)),
-                                (
-                                    "CustomDataCollection",
-                                    Value::Array(
-                                        column
-                                            .custom_data_items
-                                            .iter()
-                                            .map(|item| {
-                                                props(
-                                                    "TableEntity.CustomDataEntry",
-                                                    [
-                                                        ("Name", text(&item.name)),
-                                                        ("Value", cell_value(&item.value)),
-                                                    ],
-                                                )
-                                            })
-                                            .collect(),
-                                    ),
-                                ),
-                                ("Name", text(&column.name)),
-                                ("Width", number(column.width)),
-                            ],
-                        )
-                    })
-                    .collect(),
-            ),
-        ),
         ("Description", text(&value.description)),
-        (
-            "MergedCellRanges",
-            Value::Array(
-                value
-                    .merged_ranges
-                    .iter()
-                    .map(|range| {
-                        props(
-                            "TableEntity.CellRange",
-                            [
-                                ("BottomRowIndex", int(range.bottom_row as i64)),
-                                ("LeftColumnIndex", int(range.left_col as i64)),
-                                ("RightColumnIndex", int(range.right_col as i64)),
-                                ("TopRowIndex", int(range.top_row as i64)),
-                            ],
-                        )
-                    })
-                    .collect(),
-            ),
-        ),
-        ("Name", text(&value.name)),
-        ("ObjectName", text("TABLECONTENT")),
-        (
-            "Rows",
-            Value::Array(
-                value
-                    .rows
-                    .iter()
-                    .map(|row| {
-                        props(
-                            "TableEntity.Row",
-                            [
-                                (
-                                    "CellStyleOverride",
-                                    row.style
-                                        .as_ref()
-                                        .map(entity_cell_style)
-                                        .unwrap_or(Value::Null),
-                                ),
-                                (
-                                    "Cells",
-                                    Value::Array(row.cells.iter().map(table_cell).collect()),
-                                ),
-                                ("CustomData", int(row.custom_data as i64)),
-                                (
-                                    "CustomDataCollection",
-                                    Value::Array(
-                                        row.custom_data_items
-                                            .iter()
-                                            .map(|item| {
-                                                props(
-                                                    "TableEntity.CustomDataEntry",
-                                                    [
-                                                        ("Name", text(&item.name)),
-                                                        ("Value", cell_value(&item.value)),
-                                                    ],
-                                                )
-                                            })
-                                            .collect(),
-                                    ),
-                                ),
-                                ("Height", number(row.height)),
-                            ],
-                        )
-                    })
-                    .collect(),
-            ),
-        ),
-        ("Style", optional_handle(value.table_style_handle)),
         ("StyleOverride", Value::Null),
     ]);
-    record(
-        handle_value,
-        "TableContent",
-        value.common.owner_handle,
-        props("TableContent", p),
-    )
+    record(handle_value, "TableContent", value.common.owner_handle, props("TableContent", p))
 }
 
 fn dump_proxy_object(handle_value: Handle, value: &crate::objects::ProxyObject) -> Value {

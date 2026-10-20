@@ -14,6 +14,7 @@ use super::{color, handle, number, optional_handle, props, record, transparency,
 mod modeler;
 mod multileader;
 mod blocks;
+pub(super) mod table;
 pub(super) use blocks::block_record_marker;
 
 const UNMAPPED: &str = "!unmapped";
@@ -1465,17 +1466,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
         ),
         EntityType::MultiLeader(value) => collect_multileader(doc, value, out),
         EntityType::MLine(value) => collect_mline(doc, value, out),
-        EntityType::Table(value) => field_common(
-            doc,
-            &value.common,
-            "TableEntity",
-            "TABLE",
-            -999,
-            "AcDbTable",
-            false,
-            Vec::new(),
-            out,
-        ),
+        EntityType::Table(value) => table::collect(doc, value, out),
         EntityType::Helix(value) => field_common(
             doc,
             &value.common,
