@@ -191,7 +191,8 @@ fn dump_object(
         ObjectType::DgnLineStyle(value) => dump_dgn_line_style(map_handle, value),
         ObjectType::Unknown {
             type_name, owner, ..
-        } => dump_unknown(map_handle, *owner, type_name),
+        } => super::aec::object(_doc, map_handle, object)
+            .unwrap_or_else(|| dump_unknown(map_handle, *owner, type_name)),
     })
 }
 
@@ -3746,6 +3747,10 @@ fn enrich_object_record(
         value["owner"] = handle(Handle::NULL);
     }
     let owned_name = dictionary_name(doc, object_handle, &value["owner"]);
+    let unnamed_aec = matches!(
+        value["type"].as_str(),
+        Some("AecCleanupGroup" | "AecWallStyle")
+    );
 
     let Some(props_value) = value.get_mut("props").and_then(Value::as_object_mut) else {
         return value;
@@ -3758,7 +3763,7 @@ fn enrich_object_record(
     } else if is_unmapped(props_value.get("Name")) {
         if let Some(name) = owned_name {
             props_value.insert("Name".to_string(), text(name));
-        } else if matches!(
+        } else if unnamed_aec || matches!(
             object,
             Some(ObjectType::Dictionary(_) | ObjectType::DictionaryWithDefault(_))
         ) {

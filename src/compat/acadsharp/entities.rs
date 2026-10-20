@@ -1611,17 +1611,23 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             out,
         ),
         EntityType::Extended(value) => collect_extended(doc, value, out),
-        EntityType::Unknown(value) => field_common(
-            doc,
-            &value.common,
-            super::type_names::canonical(&value.dxf_name).unwrap_or("UnknownEntity"),
-            &value.dxf_name,
-            value.dwg_type_code as i64,
-            "AcDbEntity",
-            false,
-            vec![("DxfClass", dxf_class(&value.dxf_name))],
-            out,
-        ),
+        EntityType::Unknown(value) => {
+            if let Some(wall) = super::aec::wall(doc, value) {
+                out.push(wall);
+            } else {
+                field_common(
+                    doc,
+                    &value.common,
+                    super::type_names::canonical(&value.dxf_name).unwrap_or("UnknownEntity"),
+                    &value.dxf_name,
+                    value.dwg_type_code as i64,
+                    "AcDbEntity",
+                    false,
+                    vec![("DxfClass", dxf_class(&value.dxf_name))],
+                    out,
+                );
+            }
+        }
         EntityType::Block(value) => blocks::block(doc, value, out),
         EntityType::BlockEnd(value) => field_common(
             doc,
