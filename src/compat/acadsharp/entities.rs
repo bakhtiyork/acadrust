@@ -1375,7 +1375,22 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
                 ),
                 ("InsertionPoint", vec3(value.insertion_point)),
                 ("Normal", vec3(value.normal)),
-                ("Style", optional_handle(value.dimension_style_handle)),
+                (
+                    "Style",
+                    optional_handle(
+                        // CadToleranceTemplate resolves the DWG handle first,
+                        // then the DXF name. An unresolved reference keeps the
+                        // Standard style attached by Tolerance.AssignDocument.
+                        value
+                            .dimension_style_handle
+                            .and_then(|handle| {
+                                doc.dim_styles.iter().find(|style| style.handle == handle)
+                            })
+                            .or_else(|| doc.dim_styles.get(&value.dimension_style_name))
+                            .or_else(|| doc.dim_styles.get("Standard"))
+                            .map(|style| style.handle),
+                    ),
+                ),
                 (
                     "Text",
                     Value::String(

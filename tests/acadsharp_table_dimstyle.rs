@@ -3,7 +3,7 @@
 
 use acadrust::compat::acadsharp::dump_document;
 use acadrust::tables::DimStyle;
-use acadrust::types::{DxfVersion, Handle};
+use acadrust::types::{Color, DxfVersion, Handle};
 use acadrust::{CadDocument, DxfReader};
 use serde_json::Value;
 use std::io::Cursor;
@@ -26,6 +26,72 @@ fn props(doc: &CadDocument, name: &str) -> Value {
         .find(|object| object["type"] == "DimensionStyle" && object["props"]["Name"] == name)
         .unwrap()["props"]
         .clone()
+}
+
+#[test]
+fn dimension_style_true_colors_use_acadsharp_packing_without_changing_native_rgb() {
+    let mut doc = CadDocument::new();
+    let mut style = DimStyle::new("RGB");
+    style.handle = Handle::new(0x501);
+    style.dimclrd_true_color = Some(Color::from_rgb(44, 136, 27));
+    style.dimclre_true_color = Some(Color::from_rgb(128, 61, 194));
+    style.dimclrt_true_color = Some(Color::from_rgb(80, 179, 255));
+    style.dimtfillclr_true_color = Some(Color::from_rgb(54, 117, 66));
+    doc.dim_styles.add(style).unwrap();
+
+    let value = props(&doc, "RGB");
+    for (property, (r, g, b), packed) in [
+        ("DimensionLineColor", (44, 136, 27), 0x1B882C),
+        ("ExtensionLineColor", (128, 61, 194), 0xC23D80),
+        ("TextColor", (80, 179, 255), 0xFFB350),
+        ("TextBackgroundColor", (54, 117, 66), 0x427536),
+    ] {
+        let color = &value[property];
+        assert_eq!(color["R"], r);
+        assert_eq!(color["G"], g);
+        assert_eq!(color["B"], b);
+        assert_eq!(color["Index"], -1);
+        assert_eq!(color["IsTrueColor"], true);
+        assert_eq!(color["IsByBlock"], false);
+        assert_eq!(color["IsByLayer"], false);
+        assert_eq!(color["TrueColor"], packed, "{property}");
+    }
+    let native = doc.dim_styles.get("RGB").unwrap();
+    for (color, packed) in [
+        (native.dimclrd_true_color, 0x2C881B),
+        (native.dimclre_true_color, 0x803DC2),
+        (native.dimclrt_true_color, 0x50B3FF),
+        (native.dimtfillclr_true_color, 0x367542),
+    ] {
+        assert_eq!(color.unwrap().to_true_color_value(), Some(packed));
+    }
+}
+
+#[test]
+fn dimension_style_indexed_colors_keep_index_and_no_true_color() {
+    let mut doc = CadDocument::new();
+    let mut style = DimStyle::new("Indexed");
+    style.handle = Handle::new(0x501);
+    style.dimclrd = 1;
+    style.dimclre = 256;
+    style.dimclrt = 0;
+    style.dimtfillclr = 3;
+    doc.dim_styles.add(style).unwrap();
+
+    let value = props(&doc, "Indexed");
+    for (property, index, by_layer, by_block) in [
+        ("DimensionLineColor", 1, false, false),
+        ("ExtensionLineColor", 256, true, false),
+        ("TextColor", 0, false, true),
+        ("TextBackgroundColor", 3, false, false),
+    ] {
+        let color = &value[property];
+        assert_eq!(color["Index"], index);
+        assert_eq!(color["TrueColor"], -1);
+        assert_eq!(color["IsTrueColor"], false);
+        assert_eq!(color["IsByLayer"], by_layer);
+        assert_eq!(color["IsByBlock"], by_block);
+    }
 }
 
 #[test]
