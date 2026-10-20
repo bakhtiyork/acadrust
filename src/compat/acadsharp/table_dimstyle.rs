@@ -7,7 +7,8 @@
 //! group-code quirks.  Keep those compatibility decisions here so they do not
 //! change the native drawing model.
 
-use super::{character, color, number, optional_handle};
+use super::common::appearance_color;
+use super::{character, number, optional_handle};
 use crate::tables::DimStyle;
 use crate::types::{Color, DxfVersion, Handle};
 use crate::CadDocument;
@@ -250,14 +251,14 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
             optional_handle(block(Some(value.dimblk2), &value.dimblk2_name)),
         ),
         ("DimensionFit", json!(dimension_fit)),
-        ("DimensionLineColor", json!(color(dim_line_color))),
+        ("DimensionLineColor", appearance_color(dim_line_color)),
         ("DimensionLineExtension", number(field!(dimdle, 46))),
         ("DimensionLineGap", number(field!(dimgap, 147))),
         ("DimensionLineIncrement", number(field!(dimdli, 43))),
         ("DimensionLineWeight", json!(dimension_line_weight)),
         ("DimensionTextArrowFit", json!(text_arrow_fit)),
         ("DimensionUnit", json!(dimension_unit)),
-        ("ExtensionLineColor", json!(color(extension_line_color))),
+        ("ExtensionLineColor", appearance_color(extension_line_color)),
         ("ExtensionLineExtension", number(field!(dimexe, 44))),
         ("ExtensionLineOffset", number(field!(dimexo, 42))),
         ("ExtensionLineWeight", json!(extension_line_weight)),
@@ -312,9 +313,9 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
             "SuppressSecondExtensionLine",
             json!(suppress_second_extension),
         ),
-        ("TextBackgroundColor", json!(color(text_background_color))),
+        ("TextBackgroundColor", appearance_color(text_background_color)),
         ("TextBackgroundFillMode", json!(field!(dimtfill, 69))),
-        ("TextColor", json!(color(text_color))),
+        ("TextColor", appearance_color(text_color)),
         ("TextDirection", json!(field!(dimtxtdirection, 295) as i16)),
         ("TextHeight", number(text_height)),
         ("TextHorizontalAlignment", json!(field!(dimjust, 280))),

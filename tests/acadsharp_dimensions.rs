@@ -6,7 +6,8 @@ use acadrust::entities::{
     Dimension, DimensionArc, DimensionDiameter, DimensionLinear, DimensionOrdinate,
     DimensionRadius, EntityType, Tolerance,
 };
-use acadrust::types::{DxfVersion, Vector3};
+use acadrust::tables::DimStyle;
+use acadrust::types::{DxfVersion, Handle, Vector3};
 use acadrust::xdata::{ExtendedDataRecord, XDataValue};
 use acadrust::{CadDocument, DxfReader};
 use serde_json::{json, Value};
@@ -248,6 +249,63 @@ fn programmatic_tolerance_keeps_native_direction_and_text_in_compatibility_view(
     let p = properties(&doc, "Tolerance");
     assert_eq!(p["Direction"], json!([1.0, 0.0, 0.0]));
     assert_eq!(p["Text"], "line1\nline2");
+}
+
+#[test]
+fn tolerance_dxf_style_resolves_name_case_insensitively() {
+    let text = "0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1032\n0\nENDSEC\n\
+        0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nDIMSTYLE\n70\n1\n\
+        0\nDIMSTYLE\n105\n501\n100\nAcDbSymbolTableRecord\n100\nAcDbDimStyleTableRecord\n2\nFrame\n\
+        0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n\
+        0\nTOLERANCE\n5\n2A\n100\nAcDbEntity\n8\n0\n100\nAcDbFcf\n3\nfRaMe\n\
+        0\nENDSEC\n0\nEOF\n";
+    let doc = DxfReader::from_reader(Cursor::new(text.as_bytes()))
+        .unwrap()
+        .read()
+        .unwrap();
+    let tolerance = doc
+        .entities()
+        .find_map(|entity| match entity {
+            EntityType::Tolerance(value) => Some(value),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(tolerance.dimension_style_name, "fRaMe");
+    assert_eq!(tolerance.dimension_style_handle, None);
+    assert_eq!(properties(&doc, "Tolerance")["Style"], "#501");
+}
+
+#[test]
+fn tolerance_missing_or_unknown_dxf_style_uses_standard() {
+    for codes in ["", "3\nMissing\n"] {
+        let doc = tolerance_dxf(codes);
+        let standard = doc.dim_styles.get("Standard").unwrap().handle;
+        assert_eq!(
+            properties(&doc, "Tolerance")["Style"],
+            format!("#{:X}", standard.value()),
+        );
+    }
+}
+
+#[test]
+fn tolerance_style_resolves_handle_before_name_and_falls_back_when_unresolved() {
+    for (handle, name, expected) in [
+        (0x501, "Named", "#501"),
+        (0xBAD, "Named", "#502"),
+        (0, "Named", "#502"),
+    ] {
+        let mut doc = CadDocument::new();
+        for (name, handle) in [("Handled", 0x501), ("Named", 0x502)] {
+            let mut style = DimStyle::new(name);
+            style.handle = Handle::new(handle);
+            doc.dim_styles.add(style).unwrap();
+        }
+        let mut tolerance = Tolerance::new();
+        tolerance.dimension_style_handle = Some(Handle::new(handle));
+        tolerance.dimension_style_name = name.into();
+        doc.add_entity(EntityType::Tolerance(tolerance)).unwrap();
+        assert_eq!(properties(&doc, "Tolerance")["Style"], expected);
+    }
 }
 
 #[test]
