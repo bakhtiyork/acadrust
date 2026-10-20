@@ -193,6 +193,8 @@ pub struct TextEntityData {
     pub height: f64,
     pub width_factor: f64,
     pub value: String,
+    pub source_value: Option<String>,
+    pub has_alignment_point: bool,
     pub generation: i16,
     pub horizontal_alignment: i16,
     pub vertical_alignment: i16,
@@ -1426,7 +1428,7 @@ pub fn read_text_entity_data(reader: &mut DwgMergedReader, version: DwgVersion) 
         let rotation = reader.read_bit_double();
         let height = reader.read_bit_double();
         let width_factor = reader.read_bit_double();
-        let value = reader.read_variable_text();
+        let (value, source_value) = reader.read_mtext_value();
         let generation = reader.read_bit_short();
         let horizontal_alignment = reader.read_bit_short();
         let vertical_alignment = reader.read_bit_short();
@@ -1441,6 +1443,8 @@ pub fn read_text_entity_data(reader: &mut DwgMergedReader, version: DwgVersion) 
             height,
             width_factor,
             value,
+            source_value,
+            has_alignment_point: true,
             generation,
             horizontal_alignment,
             vertical_alignment,
@@ -1481,7 +1485,7 @@ pub fn read_text_entity_data(reader: &mut DwgMergedReader, version: DwgVersion) 
         } else {
             1.0
         };
-        let value = reader.read_variable_text();
+        let (value, source_value) = reader.read_mtext_value();
         let generation = if (data_flags & 0x20) == 0 {
             reader.read_bit_short()
         } else {
@@ -1508,6 +1512,8 @@ pub fn read_text_entity_data(reader: &mut DwgMergedReader, version: DwgVersion) 
             height,
             width_factor,
             value,
+            source_value,
+            has_alignment_point: data_flags & 2 == 0,
             generation,
             horizontal_alignment,
             vertical_alignment,
@@ -4369,7 +4375,7 @@ pub fn read_attribute_definition(
     // Common TEXT includes its style before any embedded MTEXT handles.
     text_data.style_handle = reader.read_handle();
 
-    let att_version = if version.r2010_plus() {
+    let mut att_version = if version.r2010_plus() {
         reader.read_byte()
     } else {
         0
@@ -4391,6 +4397,9 @@ pub fn read_attribute_definition(
             let _application = reader.read_handle();
             let _unknown = reader.read_bit_short();
         }
+        if text_data.source_value.is_none() {
+            text_data.source_value = Some(text_data.value.clone());
+        }
         text_data.value = mtext.value.clone();
         Some(mtext)
     } else {
@@ -4408,7 +4417,7 @@ pub fn read_attribute_definition(
 
     // AttDef-specific: second version byte + prompt
     if version.r2010_plus() {
-        let _version2 = reader.read_byte();
+        att_version = reader.read_byte();
     }
     let prompt = reader.read_variable_text();
 
@@ -4455,6 +4464,9 @@ pub fn read_attribute_entity(
             let _ = reader.read_bytes(annotative_data_size as usize);
             let _application = reader.read_handle();
             let _unknown = reader.read_bit_short();
+        }
+        if text_data.source_value.is_none() {
+            text_data.source_value = Some(text_data.value.clone());
         }
         text_data.value = mtext.value.clone();
         Some(mtext)

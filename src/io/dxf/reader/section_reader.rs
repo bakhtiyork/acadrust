@@ -13672,6 +13672,7 @@ impl<'a> SectionReader<'a> {
 
     /// Read a TEXT entity
     fn read_text(&mut self) -> Result<Option<Text>> {
+        let mut source = crate::entities::text::TextSource { dxf: true, ..Default::default() };
         use crate::entities::text::{TextHorizontalAlignment, TextVerticalAlignment};
 
         let mut text = Text::new();
@@ -13705,8 +13706,13 @@ impl<'a> SectionReader<'a> {
                     alignment.add_coordinate(&pair);
                     has_alignment_point = true;
                 }
-                1 => text.value = pair.value_string.clone(),
+                1 => {
+                    source.value = pair.raw_value_string.clone();
+                    source.undecoded_bytes = pair.undecoded_text_bytes.clone();
+                    text.value = pair.value_string.clone();
+                },
                 40 => {
+                    source.has_height = true;
                     if let Some(height) = pair.as_double() {
                         text.height = height;
                     }
@@ -13778,6 +13784,10 @@ impl<'a> SectionReader<'a> {
             text.normal = n;
         }
 
+        if source.value.is_some() || source.undecoded_bytes.is_some() {
+            source.decoded_value = Some(text.value.clone());
+            text.source = Some(Box::new(source));
+        }
         Ok(Some(text))
     }
 
@@ -15649,6 +15659,7 @@ impl<'a> SectionReader<'a> {
         let mut has_leader = false;
         let mut first_value = 0.0;
         let mut second_value = 0.0;
+        let mut dxf_source = DimensionDxfSource::default();
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
@@ -15659,7 +15670,10 @@ impl<'a> SectionReader<'a> {
             match pair.code {
                 100 => current_subclass = pair.value_string.clone(),
                 8 => common.layer = pair.value_string.clone(),
-                1 if current_subclass == "AcDbDimension" => base.text = pair.value_string.clone(),
+                1 if current_subclass == "AcDbDimension" => {
+                    dxf_source.text_present = true;
+                    base.text = pair.value_string.clone();
+                }
                 2 => base.block_name = pair.value_string.clone(),
                 3 => base.style_name = pair.value_string.clone(),
                 10 | 20 | 30 => {
@@ -15695,7 +15709,9 @@ impl<'a> SectionReader<'a> {
                     base.actual_measurement = pair.as_double().unwrap_or(0.0)
                 }
                 44 if current_subclass == "AcDbDimension" => {
-                    base.line_spacing_factor = pair.as_double().unwrap_or(1.0)
+                    let value = pair.as_double().unwrap_or(1.0);
+                    dxf_source.line_spacing_factor = Some(value);
+                    base.line_spacing_factor = value
                 }
                 53 if current_subclass == "AcDbDimension" => {
                     base.text_rotation = pair.as_double().unwrap_or(0.0).to_radians()
@@ -15713,7 +15729,9 @@ impl<'a> SectionReader<'a> {
                     has_leader = pair.as_i16().unwrap_or(0) != 0
                 }
                 71 if current_subclass == "AcDbDimension" => {
-                    base.attachment_point = match pair.as_i16().unwrap_or(5) {
+                    let value = pair.as_i16().unwrap_or(5);
+                    dxf_source.attachment_point = Some(value);
+                    base.attachment_point = match value {
                         1 => AttachmentPointType::TopLeft,
                         2 => AttachmentPointType::TopCenter,
                         3 => AttachmentPointType::TopRight,
@@ -15726,7 +15744,9 @@ impl<'a> SectionReader<'a> {
                     };
                 }
                 72 if current_subclass == "AcDbDimension" => {
-                    base.line_spacing_style = pair.as_i16().unwrap_or(1)
+                    let value = pair.as_i16().unwrap_or(1);
+                    dxf_source.line_spacing_style = Some(value);
+                    base.line_spacing_style = value
                 }
                 210 | 220 | 230 => {
                     let mut normal = PointReader::new();
@@ -15745,6 +15765,7 @@ impl<'a> SectionReader<'a> {
         }
 
         base.common = common;
+        base.dxf_source = Some(dxf_source);
         if let Some(point) = definition_point.get_point() {
             base.definition_point = point;
         }
@@ -15812,6 +15833,7 @@ impl<'a> SectionReader<'a> {
         let mut line_spacing_factor = 1.0f64;
         let mut line_spacing_style = 1i16;
         let mut attachment_point = AttachmentPointType::MiddleCenter;
+        let mut dxf_source = DimensionDxfSource::default();
         let mut normal = PointReader::new();
         let mut common = EntityCommon::new();
 
@@ -15835,6 +15857,7 @@ impl<'a> SectionReader<'a> {
                 }
                 70 => {
                     if let Some(type_val) = pair.as_i16() {
+                        dxf_source.raw_flags = Some(type_val);
                         dim_type = match type_val & 0x0F {
                             0 => DimensionType::Linear,
                             1 => DimensionType::Aligned,
@@ -15853,7 +15876,10 @@ impl<'a> SectionReader<'a> {
                         ordinate_is_x = (type_val & 0x40) != 0;
                     }
                 }
-                1 => text = pair.value_string.clone(),
+                1 => {
+                    dxf_source.text_present = true;
+                    text = pair.value_string.clone();
+                }
                 2 => block_name = pair.value_string.clone(),
                 3 => style_name = pair.value_string.clone(),
                 10 | 20 | 30 => {
@@ -15903,11 +15929,14 @@ impl<'a> SectionReader<'a> {
                 }
                 41 => {
                     if let Some(lsf) = pair.as_double() {
+                        dxf_source.line_spacing_factor = Some(lsf);
                         line_spacing_factor = lsf;
                     }
                 }
                 71 => {
-                    attachment_point = match pair.as_i16().unwrap_or(5) {
+                    let value = pair.as_i16().unwrap_or(5);
+                    dxf_source.attachment_point = Some(value);
+                    attachment_point = match value {
                         1 => AttachmentPointType::TopLeft,
                         2 => AttachmentPointType::TopCenter,
                         3 => AttachmentPointType::TopRight,
@@ -15919,7 +15948,11 @@ impl<'a> SectionReader<'a> {
                         _ => AttachmentPointType::MiddleCenter,
                     };
                 }
-                72 => line_spacing_style = pair.as_i16().unwrap_or(1),
+                72 => {
+                    let value = pair.as_i16().unwrap_or(1);
+                    dxf_source.line_spacing_style = Some(value);
+                    line_spacing_style = value;
+                }
                 42 => {
                     if let Some(measurement) = pair.as_double() {
                         actual_measurement = Some(measurement);
@@ -16077,6 +16110,7 @@ impl<'a> SectionReader<'a> {
             common.color = dc.common.color;
             common.line_weight = dc.common.line_weight;
             dc.common = common;
+            dc.dxf_source = Some(dxf_source);
             dc.block_name = block_name;
             if let Some(pt) = text_middle_point.get_point() {
                 dc.text_middle_point = pt;
@@ -17193,6 +17227,9 @@ impl<'a> SectionReader<'a> {
 
     /// Read an ATTDEF entity
     fn read_attdef(&mut self) -> Result<Option<AttributeDefinition>> {
+        let mut source = crate::entities::text::TextSource { dxf: true, ..Default::default() };
+        let mut thickness = 0.0;
+        let mut version = 0;
         let mut tag = String::new();
         let mut prompt = String::new();
         let mut default_value = String::new();
@@ -17240,7 +17277,11 @@ impl<'a> SectionReader<'a> {
                         color = Color::from_index(color_index);
                     }
                 }
-                1 => default_value = pair.value_string.clone(),
+                1 => {
+                    source.value = pair.raw_value_string.clone();
+                    source.undecoded_bytes = pair.undecoded_text_bytes.clone();
+                    default_value = pair.value_string.clone();
+                },
                 2 => {
                     tag = pair.value_string.clone();
                     seen_tag = true;
@@ -17282,6 +17323,7 @@ impl<'a> SectionReader<'a> {
                 71 => {
                     if let Some(v) = pair.as_i16() {
                         if in_attribute_subclass {
+                            source.attribute_type = Some(v);
                             mtext_flag = Some(
                                 crate::entities::attribute_definition::MTextFlag::from_value(v),
                             );
@@ -17311,7 +17353,9 @@ impl<'a> SectionReader<'a> {
                         );
                     }
                 }
+                39 => thickness = pair.as_double().unwrap_or(0.0),
                 40 => {
+                    source.has_height = true;
                     if let Some(h) = pair.as_double() {
                         height = h;
                     }
@@ -17322,6 +17366,10 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 280 => {
+                    source.last_280 = pair.as_i16().map(|v| v as u8);
+                    if !seen_tag {
+                        version = pair.as_i16().unwrap_or(0) as u8;
+                    }
                     if seen_tag {
                         if let Some(v) = pair.as_i16() {
                             lock_position = v != 0;
@@ -17333,6 +17381,9 @@ impl<'a> SectionReader<'a> {
                 101 => {
                     let mtext = self.read_attrib_embedded_mtext()?;
                     if !mtext.value.is_empty() {
+                        if source.value.is_none() && mtext.value != default_value {
+                            source.value = Some(default_value.clone());
+                        }
                         default_value = mtext.value.clone();
                     }
                     embedded_mtext = Some(Box::new(mtext));
@@ -17346,6 +17397,8 @@ impl<'a> SectionReader<'a> {
         let mut attdef = AttributeDefinition::new(tag, prompt, default_value);
         attdef.insertion_point = insertion_point.get_point().unwrap_or(Vector3::zero());
         attdef.height = height;
+        attdef.thickness = thickness;
+        attdef.version = version;
         attdef.rotation = rotation;
         attdef.lock_position = lock_position;
         if let Some(p) = alignment_point.get_point() {
@@ -17393,6 +17446,10 @@ impl<'a> SectionReader<'a> {
         common.color = color;
         attdef.common = common;
 
+        if source.value.is_some() || source.undecoded_bytes.is_some() {
+            source.decoded_value = Some(attdef.default_value.clone());
+        }
+        attdef.source = Some(Box::new(source));
         Ok(Some(attdef))
     }
 
@@ -18125,6 +18182,7 @@ impl<'a> SectionReader<'a> {
 
     /// Read an ATTRIB entity
     fn read_attrib(&mut self) -> Result<Option<AttributeEntity>> {
+        let mut source = crate::entities::text::TextSource { dxf: true, ..Default::default() };
         let mut attrib = AttributeEntity::new(String::new(), String::new());
         let mut insertion_point = PointReader::new();
         let mut alignment_point = PointReader::new();
@@ -18158,7 +18216,11 @@ impl<'a> SectionReader<'a> {
                         attrib.common.line_weight = LineWeight::from_value(v);
                     }
                 }
-                1 => attrib.value = pair.value_string.clone(),
+                1 => {
+                    source.value = pair.raw_value_string.clone();
+                    source.undecoded_bytes = pair.undecoded_text_bytes.clone();
+                    attrib.value = pair.value_string.clone();
+                },
                 2 => {
                     attrib.tag = pair.value_string.clone();
                     seen_tag = true;
@@ -18173,7 +18235,12 @@ impl<'a> SectionReader<'a> {
                 11 | 21 | 31 => {
                     alignment_point.add_coordinate(&pair);
                 }
+                39 => attrib.thickness = pair.as_double().unwrap_or(0.0),
+                210 => attrib.normal.x = pair.as_double().unwrap_or(0.0),
+                220 => attrib.normal.y = pair.as_double().unwrap_or(0.0),
+                230 => attrib.normal.z = pair.as_double().unwrap_or(0.0),
                 40 => {
+                    source.has_height = true;
                     if let Some(v) = pair.as_double() {
                         attrib.height = v;
                     }
@@ -18207,6 +18274,7 @@ impl<'a> SectionReader<'a> {
                 71 => {
                     if let Some(v) = pair.as_i16() {
                         if in_attribute_subclass {
+                            source.attribute_type = Some(v);
                             // AcDbAttribute: MTEXT flag, not generation flags.
                             use crate::entities::attribute_definition::MTextFlag;
                             attrib.mtext_flag = match v {
@@ -18236,6 +18304,10 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 280 => {
+                    source.last_280 = pair.as_i16().map(|v| v as u8);
+                    if !seen_tag {
+                        attrib.version = pair.as_i16().unwrap_or(0) as u8;
+                    }
                     if seen_tag {
                         if let Some(v) = pair.as_i16() {
                             attrib.lock_position = v != 0;
@@ -18247,6 +18319,9 @@ impl<'a> SectionReader<'a> {
                 101 => {
                     let mtext = self.read_attrib_embedded_mtext()?;
                     if !mtext.value.is_empty() {
+                        if source.value.is_none() && mtext.value != attrib.value {
+                            source.value = Some(attrib.value.clone());
+                        }
                         attrib.value = mtext.value.clone();
                     }
                     attrib.is_multiline = true;
@@ -18262,6 +18337,10 @@ impl<'a> SectionReader<'a> {
         attrib.alignment_point = alignment_point.get_point().unwrap_or(Vector3::zero());
         attrib.line_count = attrib.value.matches("\\P").count() as i16 + 1;
 
+        if source.value.is_some() || source.undecoded_bytes.is_some() {
+            source.decoded_value = Some(attrib.value.clone());
+        }
+        attrib.source = Some(Box::new(source));
         Ok(Some(attrib))
     }
 

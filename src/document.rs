@@ -4500,10 +4500,20 @@ impl CadDocument {
             for entity in self.entities_mut_keep_raw() {
                 match entity {
                     EntityType::AttributeDefinition(a) => {
-                        if let Some(tag) = multiline_tags.get(&a.common.handle) { a.tag = tag.clone(); }
+                        if let Some(tag) = multiline_tags.get(&a.common.handle) {
+                            if a.tag != *tag {
+                                a.source.get_or_insert_with(Default::default).tag = Some((a.tag.clone(), tag.clone()));
+                                a.tag = tag.clone();
+                            }
+                        }
                     }
                     EntityType::Insert(i) => for a in &mut i.attributes {
-                        if let Some(tag) = multiline_tags.get(&a.common.handle) { a.tag = tag.clone(); }
+                        if let Some(tag) = multiline_tags.get(&a.common.handle) {
+                            if a.tag != *tag {
+                                a.source.get_or_insert_with(Default::default).tag = Some((a.tag.clone(), tag.clone()));
+                                a.tag = tag.clone();
+                            }
+                        }
                     },
                     _ => {},
                 }

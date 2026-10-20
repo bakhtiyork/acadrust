@@ -143,8 +143,11 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
 
         let pair = match value_type {
             GroupCodeValueType::String
-                if (matches!(code, 1 | 3)
-                    && self.context.record_type.as_deref() == Some("MTEXT"))
+                if (matches!(code, 1 | 2 | 3)
+                    && matches!(
+                        self.context.record_type.as_deref(),
+                        Some("MTEXT" | "TEXT" | "ATTRIB" | "ATTDEF")
+                    ))
                     || self.context.record_type.as_deref() == Some("XRECORD") =>
             {
                 let raw = self.read_null_terminated_string_raw()?;

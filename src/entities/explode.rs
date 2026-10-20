@@ -516,6 +516,7 @@ fn explode_mtext(mtext: &MText) -> Vec<EntityType> {
                 mtext.insertion_point.z,
             );
             EntityType::Text(Text {
+                source: None,
                 common: inherit_common(&mtext.common),
                 value: line,
                 insertion_point: point,
@@ -922,6 +923,7 @@ fn explode_dimension(dim: &Dimension) -> Vec<EntityType> {
 
     // Add the dimension text.
     let text = Text {
+        source: None,
         common: inherit_common(common),
         value: text_value,
         insertion_point: base.text_middle_point,

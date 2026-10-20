@@ -148,12 +148,12 @@ impl<R: Read + Seek> DxfTextReader<R> {
                     crate::io::dxf::GroupCodeValueType::from_raw_code(code),
                     crate::io::dxf::GroupCodeValueType::String
                 );
-            let preserve_modeler_or_mtext = matches!(code, 1 | 3)
+            let preserve_lexical = matches!(code, 1 | 2 | 3)
                 && matches!(
                     self.context.record_type.as_deref(),
-                    Some("3DSOLID" | "REGION" | "BODY" | "MTEXT")
+                    Some("3DSOLID" | "REGION" | "BODY" | "MTEXT" | "TEXT" | "ATTRIB" | "ATTDEF")
                 );
-            if decoded != value_line && (preserve_xrecord || preserve_modeler_or_mtext) {
+            if decoded != value_line && (preserve_xrecord || preserve_lexical) {
                 source_raw = Some(value_line);
             }
             decoded
@@ -170,6 +170,13 @@ impl<R: Read + Seek> DxfTextReader<R> {
             pair.raw_value_string = source_raw;
         } else if changed {
             pair.raw_value_string = Some(value_line);
+        }
+        if self.encoding.is_none()
+            && matches!(code, 1 | 2 | 3)
+            && matches!(self.context.record_type.as_deref(), Some("TEXT" | "ATTRIB" | "ATTDEF"))
+            && std::str::from_utf8(&self.line_buf).is_err()
+        {
+            pair.undecoded_text_bytes = Some(self.line_buf.clone());
         }
         self.observe_pair(&pair, pair_offset);
         Ok(Some(pair))

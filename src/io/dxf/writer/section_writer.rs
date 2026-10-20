@@ -5328,6 +5328,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_entity_type("ATTDEF")?;
         self.write_common_entity_data(&attdef.common, owner)?;
         self.writer.write_subclass("AcDbText")?;
+        if attdef.thickness != 0.0 {
+            self.writer.write_double(39, attdef.thickness)?;
+        }
 
         // Insertion point
         self.writer.write_point3d(10, attdef.insertion_point)?;
@@ -5373,7 +5376,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // R2010+ version byte; the prompt precedes the tag.
         if self.dxf_version >= DxfVersion::AC1024 {
-            self.writer.write_byte(280, 0)?;
+            self.writer.write_byte(280, attdef.version)?;
         }
 
         // Prompt
@@ -5504,6 +5507,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_entity_type("ATTRIB")?;
         self.write_common_entity_data(&attrib.common, owner)?;
         self.writer.write_subclass("AcDbText")?;
+        if attrib.thickness != 0.0 {
+            self.writer.write_double(39, attrib.thickness)?;
+        }
 
         // Insertion point
         self.writer.write_point3d(10, attrib.insertion_point)?;
@@ -5549,7 +5555,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // R2010+ version byte
         if self.dxf_version >= DxfVersion::AC1024 {
-            self.writer.write_byte(280, 0)?;
+            self.writer.write_byte(280, attrib.version)?;
         }
 
         // Tag

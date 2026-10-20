@@ -42,11 +42,40 @@ pub enum AttachmentPointType {
     BottomRight = 9,
 }
 
+/// DXF field presence retained for the ACadSharp compatibility projection.
+///
+/// The native dimension constructors use useful drawing defaults (for
+/// example, middle-center attachment and one-times line spacing), while
+/// ACadSharp leaves several optional DXF properties at their CLR defaults
+/// when the corresponding group is absent.  Keeping the source values here
+/// lets the compatibility view reproduce that distinction without changing
+/// native construction or round-trip state.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct DimensionDxfSource {
+    /// Raw DXF group 70 word, including block, ordinate and text bits.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub raw_flags: Option<i16>,
+    /// Raw DXF group 71 attachment value.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub attachment_point: Option<i16>,
+    /// Raw DXF group 41 line-spacing factor.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub line_spacing_factor: Option<f64>,
+    /// Raw DXF group 72 line-spacing style.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub line_spacing_style: Option<i16>,
+    /// Whether DXF group 1 text was present, including an explicitly empty
+    /// string.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub text_present: bool,
+}
+
 /// Base dimension entity
 ///
 /// All dimension types share common properties and behavior.
 /// Specific dimension types extend this base with additional properties.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimensionBase {
     pub common: EntityCommon,
@@ -101,6 +130,39 @@ pub struct DimensionBase {
     /// follows the dimension style (DIMTAD etc.); when true `text_middle_point`
     /// is an explicit override.
     pub text_user_positioned: bool,
+    /// DXF field presence used only by the ACadSharp compatibility view.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_source: Option<DimensionDxfSource>,
+}
+
+// Source presence is compatibility metadata, not native logical state.
+impl PartialEq for DimensionBase {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.definition_point == other.definition_point
+            && self.text_middle_point == other.text_middle_point
+            && self.insertion_point == other.insertion_point
+            && self.dimension_type == other.dimension_type
+            && self.attachment_point == other.attachment_point
+            && self.text == other.text
+            && self.user_text == other.user_text
+            && self.normal == other.normal
+            && self.text_rotation == other.text_rotation
+            && self.horizontal_direction == other.horizontal_direction
+            && self.style_name == other.style_name
+            && self.actual_measurement == other.actual_measurement
+            && self.version == other.version
+            && self.block_name == other.block_name
+            && self.line_spacing_factor == other.line_spacing_factor
+            && self.line_spacing_style == other.line_spacing_style
+            && self.insertion_scale == other.insertion_scale
+            && self.insertion_rotation == other.insertion_rotation
+            && self.dwg_unknown_bit == other.dwg_unknown_bit
+            && self.flip_arrow1 == other.flip_arrow1
+            && self.flip_arrow2 == other.flip_arrow2
+            && self.dwg_flags_byte == other.dwg_flags_byte
+            && self.text_user_positioned == other.text_user_positioned
+    }
 }
 
 impl DimensionBase {
@@ -132,6 +194,7 @@ impl DimensionBase {
             // Bit 0 set: the text sits at its default place.
             dwg_flags_byte: 0x01,
             text_user_positioned: false,
+            dxf_source: None,
         }
     }
 

@@ -28,9 +28,12 @@ use std::f64::consts::PI;
 /// attrib.insertion_point = Vector3::new(10.0, 20.0, 0.0);
 /// attrib.height = 2.5;
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct AttributeEntity {
+    /// Source spelling and field presence; excluded from native equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source: Option<Box<super::text::TextSource>>,
     /// Common entity properties
     pub common: EntityCommon,
     /// Attribute tag (must match ATTDEF tag)
@@ -78,12 +81,49 @@ pub struct AttributeEntity {
     pub attdef_handle: Handle,
     /// Lock position in block
     pub lock_position: bool,
+    /// Extrusion depth retained from common text data (DXF 39).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub thickness: f64,
+    /// Attribute version, independent of the lock flag.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub version: u8,
+}
+
+// Source metadata does not change native drawing-state equality.
+impl PartialEq for AttributeEntity {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.tag == other.tag
+            && self.value == other.value
+            && self.insertion_point == other.insertion_point
+            && self.alignment_point == other.alignment_point
+            && self.height == other.height
+            && self.rotation == other.rotation
+            && self.width_factor == other.width_factor
+            && self.oblique_angle == other.oblique_angle
+            && self.text_style == other.text_style
+            && self.text_generation_flags == other.text_generation_flags
+            && self.horizontal_alignment == other.horizontal_alignment
+            && self.vertical_alignment == other.vertical_alignment
+            && self.flags == other.flags
+            && self.field_length == other.field_length
+            && self.normal == other.normal
+            && self.mtext_flag == other.mtext_flag
+            && self.is_multiline == other.is_multiline
+            && self.line_count == other.line_count
+            && self.embedded_mtext == other.embedded_mtext
+            && self.attdef_handle == other.attdef_handle
+            && self.lock_position == other.lock_position
+            && self.thickness == other.thickness
+            && self.version == other.version
+    }
 }
 
 impl AttributeEntity {
     /// Create a new attribute with tag and value
     pub fn new(tag: String, value: String) -> Self {
         Self {
+            source: None,
             common: EntityCommon::default(),
             tag,
             value,
@@ -106,6 +146,8 @@ impl AttributeEntity {
             embedded_mtext: None,
             attdef_handle: Handle::NULL,
             lock_position: false,
+            thickness: 0.0,
+            version: 0,
         }
     }
 
@@ -120,6 +162,7 @@ impl AttributeEntity {
         value: Option<String>,
     ) -> Self {
         Self {
+            source: None,
             common: EntityCommon {
                 properties: std::sync::Arc::new(super::EntityProperties {
                     layer: attdef.common.layer.clone(),
@@ -151,6 +194,8 @@ impl AttributeEntity {
             embedded_mtext: attdef.embedded_mtext.clone(),
             attdef_handle: attdef.common.handle,
             lock_position: attdef.lock_position,
+            thickness: attdef.thickness,
+            version: attdef.version,
         }
     }
 

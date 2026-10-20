@@ -18,6 +18,29 @@ pub(crate) fn estimated_width_in_heights(s: &str) -> f64 {
         .sum()
 }
 
+/// Lexical and omitted-field provenance for TEXT and attributes.
+/// Kept separately from native text so edits and legacy decoding remain useful.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TextSource {
+    /// Original text before decoding or embedded multiline recovery.
+    pub value: Option<String>,
+    /// Native value corresponding to `value`; an edit supersedes provenance.
+    pub decoded_value: Option<String>,
+    /// Undeclared-encoding ASCII DXF bytes, only when they are invalid UTF-8.
+    pub undecoded_bytes: Option<Vec<u8>>,
+    /// Original tag and its recovered native value.
+    pub tag: Option<(String, String)>,
+    /// This entity came from DXF.
+    pub dxf: bool,
+    /// Whether DXF supplied a height.
+    pub has_height: bool,
+    /// Raw attribute type, when supplied by DXF.
+    pub attribute_type: Option<i16>,
+    /// Last DXF 280 assignment (distinct from the native version/lock split).
+    pub last_280: Option<u8>,
+}
+
 /// Text horizontal alignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -51,9 +74,12 @@ pub enum TextVerticalAlignment {
 }
 
 /// A single-line text entity
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Text {
+    /// Source spelling and field presence; excluded from native equality.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source: Option<Box<super::text::TextSource>>,
     /// Common entity data
     pub common: EntityCommon,
     /// Text content
@@ -85,10 +111,31 @@ pub struct Text {
     pub generation_flags: i16,
 }
 
+// Source metadata does not change native drawing-state equality.
+impl PartialEq for Text {
+    fn eq(&self, other: &Self) -> bool {
+        self.common == other.common
+            && self.value == other.value
+            && self.insertion_point == other.insertion_point
+            && self.alignment_point == other.alignment_point
+            && self.height == other.height
+            && self.rotation == other.rotation
+            && self.width_factor == other.width_factor
+            && self.oblique_angle == other.oblique_angle
+            && self.style == other.style
+            && self.horizontal_alignment == other.horizontal_alignment
+            && self.vertical_alignment == other.vertical_alignment
+            && self.normal == other.normal
+            && self.thickness == other.thickness
+            && self.generation_flags == other.generation_flags
+    }
+}
+
 impl Text {
     /// Create a new text entity
     pub fn new() -> Self {
         Text {
+            source: None,
             common: EntityCommon::new(),
             value: String::new(),
             insertion_point: Vector3::ZERO,

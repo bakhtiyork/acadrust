@@ -412,14 +412,161 @@ fn lw_vertex_inline(vertex: &crate::entities::LwVertex) -> Value {
         "LwPolyline.Vertex",
         vec![
             ("Bulge", number(vertex.bulge)),
-            ("CurveTangent", unmapped()),
+            // acadrust's lightweight vertex model does not expose the two
+            // optional Vertex fields.  ACadSharp initializes both to zero;
+            // keep that default in the compatibility view while leaving the
+            // native model untouched.
+            ("CurveTangent", number(0.0)),
             ("EndWidth", number(vertex.end_width)),
-            ("Flags", unmapped()),
+            ("Flags", enum_value(0)),
             ("Id", integer(vertex.vertex_id as i64)),
             ("Location", vec2(vertex.location)),
             ("StartWidth", number(vertex.start_width)),
         ],
     )
+}
+
+fn dimension_flags(
+    base: &crate::entities::DimensionBase,
+    dimension_type: crate::entities::DimensionType,
+    ordinate_type_x: bool,
+) -> i64 {
+    const TYPE_MASK: i64 = 0x0F;
+    const ORDINATE_TYPE_X: i64 = 0x40;
+    const TEXT_USER_DEFINED: i64 = 0x80;
+    const KNOWN_MASK: i64 = TYPE_MASK | ORDINATE_TYPE_X | TEXT_USER_DEFINED;
+
+    let current = (dimension_type as i64 & TYPE_MASK)
+        | if ordinate_type_x { ORDINATE_TYPE_X } else { 0 }
+        | if base.text_user_positioned {
+            TEXT_USER_DEFINED
+        } else {
+            0
+        };
+
+    if let Some(source) = base.dxf_source.as_ref() {
+        if let Some(raw) = source.raw_flags.map(i64::from) {
+            // Keep unknown DXF bits and the exact source word while the
+            // represented type/ordinate/text state is unchanged. If a caller
+            // edits one of those modeled bits, update only that bit group.
+            let source_known = raw & KNOWN_MASK;
+            if source_known == current {
+                return raw;
+            }
+            return (raw & !KNOWN_MASK) | current;
+        }
+    }
+
+    // ACadSharp constructors add the anonymous dimension-block reference bit
+    // to every regular dimension type. DWG's common stream carries the same
+    // effective flag through its type-specific object code.
+    current | 0x20
+}
+
+fn dimension_is_angular(flags: i64) -> bool {
+    // ACadSharp uses Enum.HasFlag for both values. This intentionally keeps
+    // its bitwise false positives for Diameter and Ordinate.
+    flags & 2 != 0 || flags & 5 == 5
+}
+
+fn dimension_attachment_point(
+    doc: &CadDocument,
+    base: &crate::entities::DimensionBase,
+) -> i64 {
+    // ACadSharp's DWG reader only reads these fields for R2000 and newer
+    // files. CLR defaults remain visible for pre-R2000 DWG dimensions.
+    if doc
+        .dwg_source_version
+        .is_some_and(|version| version < crate::types::DxfVersion::AC1015)
+    {
+        return 0;
+    }
+    let current = base.attachment_point as i16;
+    let Some(source) = base.dxf_source.as_ref() else {
+        return i64::from(current);
+    };
+
+    match source.attachment_point {
+        Some(raw)
+            if raw == current
+                || (current == crate::entities::AttachmentPointType::MiddleCenter as i16
+                    && !(1..=9).contains(&raw)) =>
+        {
+            i64::from(raw)
+        }
+        Some(_) => i64::from(current),
+        None if current == crate::entities::AttachmentPointType::MiddleCenter as i16 => 0,
+        None => i64::from(current),
+    }
+}
+
+fn dimension_line_spacing_factor(
+    doc: &CadDocument,
+    base: &crate::entities::DimensionBase,
+) -> f64 {
+    // ACadSharp leaves the optional R2000 dimension fields at CLR defaults
+    // when reading pre-R2000 DWG files.
+    if doc
+        .dwg_source_version
+        .is_some_and(|version| version < crate::types::DxfVersion::AC1015)
+    {
+        return 0.0;
+    }
+    let Some(source) = base.dxf_source.as_ref() else {
+        return base.line_spacing_factor;
+    };
+    match source.line_spacing_factor {
+        Some(value) if value.to_bits() == base.line_spacing_factor.to_bits() => value,
+        Some(_) => base.line_spacing_factor,
+        None if base.line_spacing_factor.to_bits() == 1.0f64.to_bits() => 0.0,
+        None => base.line_spacing_factor,
+    }
+}
+
+fn dimension_line_spacing_style(
+    doc: &CadDocument,
+    base: &crate::entities::DimensionBase,
+) -> i64 {
+    if doc
+        .dwg_source_version
+        .is_some_and(|version| version < crate::types::DxfVersion::AC1015)
+    {
+        return 0;
+    }
+    let Some(source) = base.dxf_source.as_ref() else {
+        return i64::from(base.line_spacing_style);
+    };
+    match source.line_spacing_style {
+        Some(value) if value == base.line_spacing_style => i64::from(value),
+        Some(_) => i64::from(base.line_spacing_style),
+        None if base.line_spacing_style == 1 => 0,
+        None => i64::from(base.line_spacing_style),
+    }
+}
+
+fn dimension_text(base: &crate::entities::DimensionBase) -> Value {
+    if let Some(source) = base.dxf_source.as_ref() {
+        if !source.text_present && base.text.is_empty() {
+            return Value::Null;
+        }
+    }
+    Value::String(base.text.clone())
+}
+
+fn dimension_has_style_override(doc: &CadDocument, base: &crate::entities::DimensionBase) -> bool {
+    base.common.extended_data.records().iter()
+        .find(|record| record.application_name.eq_ignore_ascii_case("ACAD"))
+        .and_then(|record| record.values.first())
+        .is_some_and(|value| match value {
+            crate::xdata::XDataValue::String(value) => {
+                // Match the same DWG NUL trimming used by the XData view.
+                let value = if doc.dwg_source_version.is_some() {
+                    value.trim_end_matches('\0')
+                } else { value.as_str() };
+                value == "DSTYLE"
+            }
+            _ => false,
+        })
 }
 
 fn dimension_common(
@@ -446,30 +593,49 @@ fn dimension_common(
     );
     let mut values = common(doc, &base.common, "DIMENSION", object_type, subclass, false);
     values.extend([
-        ("AttachmentPoint", enum_value(base.attachment_point as i64)),
+        (
+            "AttachmentPoint",
+            enum_value(dimension_attachment_point(doc, base)),
+        ),
         ("Block", block),
         ("DefinitionPoint", vec3(base.definition_point)),
-        ("Flags", enum_value(base.dimension_type as i64)),
+        (
+            "Flags",
+            enum_value(dimension_flags(base, base.dimension_type, false)),
+        ),
         ("FlipArrow1", bool_value(base.flip_arrow1)),
         ("FlipArrow2", bool_value(base.flip_arrow2)),
-        ("HasStyleOverride", unmapped()),
+        (
+            "HasStyleOverride",
+            bool_value(dimension_has_style_override(doc, base)),
+        ),
         ("HorizontalDirection", number(base.horizontal_direction)),
         ("InsertionPoint", vec3(base.insertion_point)),
-        ("IsAngular", bool_value(base.is_angular())),
+        (
+            "IsAngular",
+            bool_value(dimension_is_angular(dimension_flags(
+                base,
+                base.dimension_type,
+                false,
+            ))),
+        ),
         (
             "IsTextUserDefinedLocation",
             bool_value(base.text_user_positioned),
         ),
-        ("LineSpacingFactor", number(base.line_spacing_factor)),
+        (
+            "LineSpacingFactor",
+            number(dimension_line_spacing_factor(doc, base)),
+        ),
         (
             "LineSpacingStyle",
-            enum_value(base.line_spacing_style as i64),
+            enum_value(dimension_line_spacing_style(doc, base)),
         ),
         ("Measurement", number(base.actual_measurement)),
         ("Normal", vec3(base.normal)),
         ("Offset", unmapped()),
         ("Style", style),
-        ("Text", Value::String(base.text.clone())),
+        ("Text", dimension_text(base)),
         ("TextMiddlePoint", vec3(base.text_middle_point)),
         ("TextRotation", number(base.text_rotation)),
         ("Version", integer(base.version as i64)),
@@ -888,7 +1054,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             vec![
                 (
                     "AlignmentPoint",
-                    value.alignment_point.map(vec3).unwrap_or_else(unmapped),
+                    vec3(value.alignment_point.unwrap_or(Vector3::ZERO)),
                 ),
                 ("Height", number(value.height)),
                 (
@@ -896,12 +1062,16 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
                     enum_value(text_horizontal(value.horizontal_alignment)),
                 ),
                 ("InsertPoint", vec3(value.insertion_point)),
-                ("Mirror", enum_value((value.generation_flags & 6) as i64)),
+                ("Mirror", enum_value(value.generation_flags as i64)),
                 ("Normal", vec3(value.normal)),
                 ("ObliqueAngle", number(value.oblique_angle)),
                 ("Rotation", number(value.rotation)),
                 ("Thickness", number(value.thickness)),
-                ("Value", Value::String(value.value.clone())),
+                ("Style", text_style(doc, &value.style)),
+                (
+                    "Value",
+                    text_source_value(&value.value, value.source.as_deref()),
+                ),
                 (
                     "VerticalAlignment",
                     enum_value(text_vertical(value.vertical_alignment)),
@@ -929,7 +1099,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             3,
             "AcDbAttributeDefinition",
             false,
-            attribute_definition_props(value),
+            attribute_definition_props(doc, value),
             out,
         ),
         EntityType::AttributeEntity(value) => field_common(
@@ -940,7 +1110,7 @@ fn collect_entity(doc: &CadDocument, entity: &EntityType, legacy: bool, out: &mu
             2,
             "AcDbAttribute",
             false,
-            attribute_entity_props(value),
+            attribute_entity_props(doc, value),
             out,
         ),
         EntityType::Insert(value) => {
@@ -1544,36 +1714,127 @@ fn text_vertical(value: crate::entities::TextVerticalAlignment) -> i64 {
     }
 }
 
+fn text_style(doc: &CadDocument, name: &str) -> Value {
+    doc.text_styles
+        .get(name)
+        .or_else(|| doc.text_styles.get("Standard"))
+        .map(|style| handle(style.handle))
+        .unwrap_or_else(|| handle(Handle::NULL))
+}
+
+fn text_source_tag<'a>(
+    tag: &'a str,
+    source: Option<&'a crate::entities::text::TextSource>,
+) -> &'a str {
+    source
+        .and_then(|s| s.tag.as_ref())
+        .filter(|(_, recovered)| recovered == tag)
+        .map(|(raw, _)| raw.as_str())
+        .unwrap_or(tag)
+}
+
+fn text_source_value(value: &str, source: Option<&crate::entities::text::TextSource>) -> Value {
+    if let Some(source) = source.filter(|s| s.decoded_value.as_deref() == Some(value)) {
+        // .NET's default encoding is UTF-8; preserve native legacy fallback and
+        // reproduce replacement decoding only with original undeclared bytes.
+        let raw = source
+            .undecoded_bytes
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .or_else(|| source.value.clone());
+        if let Some(raw) = raw {
+            return Value::String(if source.dxf {
+                raw.replace("^J", "\n")
+                    .replace("^M", "\r")
+                    .replace("^I", "\t")
+                    .replace("^ ", "^")
+            } else {
+                raw
+            });
+        }
+    }
+    Value::String(value.into())
+}
+
 fn attribute_definition_props(
+    doc: &CadDocument,
     value: &crate::entities::AttributeDefinition,
 ) -> Vec<(&'static str, Value)> {
     vec![
         ("AlignmentPoint", vec3(value.alignment_point)),
         (
             "AttributeType",
-            enum_value(value.mtext_flag.to_value() as i64),
+            enum_value(
+                value
+                    .source
+                    .as_deref()
+                    .and_then(|s| s.attribute_type)
+                    .unwrap_or_else(|| {
+                        if value.mtext_flag.to_value() == 0 {
+                            1
+                        } else {
+                            value.mtext_flag.to_value()
+                        }
+                    }) as i64,
+            ),
         ),
         ("Flags", enum_value(value.flags.to_bits() as i64)),
-        ("Height", number(value.height)),
+        (
+            "Height",
+            number(
+                if value
+                    .source
+                    .as_deref()
+                    .is_some_and(|s| s.dxf && !s.has_height)
+                {
+                    1.0
+                } else {
+                    value.height
+                },
+            ),
+        ),
         (
             "HorizontalAlignment",
             enum_value(value.horizontal_alignment.to_value() as i64),
         ),
         ("InsertPoint", vec3(value.insertion_point)),
-        ("IsLocked", bool_value(value.lock_position)),
+        (
+            "IsLocked",
+            bool_value(value.lock_position && !value.source.as_deref().is_some_and(|s| s.dxf)),
+        ),
         (
             "MText",
-            optional_handle(value.embedded_mtext.as_ref().map(|m| m.common.handle)),
+            value
+                .embedded_mtext
+                .as_ref()
+                .map(|m| handle(m.common.handle))
+                .unwrap_or(Value::Null),
         ),
         ("Normal", vec3(value.normal)),
+        ("Mirror", enum_value(value.text_generation_flags as i64)),
         ("ObliqueAngle", number(value.oblique_angle)),
         ("Prompt", Value::String(value.prompt.clone())),
         ("Rotation", number(value.rotation)),
-        ("Style", unmapped()),
-        ("Tag", Value::String(value.tag.clone())),
-        ("Thickness", unmapped()),
-        ("Value", Value::String(value.default_value.clone())),
-        ("Version", unmapped()),
+        ("Style", text_style(doc, &value.text_style)),
+        (
+            "Tag",
+            Value::String(text_source_tag(&value.tag, value.source.as_deref()).into()),
+        ),
+        ("Thickness", number(value.thickness)),
+        (
+            "Value",
+            text_source_value(&value.default_value, value.source.as_deref()),
+        ),
+        (
+            "Version",
+            integer(
+                value
+                    .source
+                    .as_deref()
+                    .and_then(|s| s.last_280)
+                    .unwrap_or(value.version) as i64,
+            ),
+        ),
         (
             "VerticalAlignment",
             enum_value(value.vertical_alignment.to_value() as i64),
@@ -1582,33 +1843,84 @@ fn attribute_definition_props(
     ]
 }
 
-fn attribute_entity_props(value: &crate::entities::AttributeEntity) -> Vec<(&'static str, Value)> {
+fn attribute_entity_props(
+    doc: &CadDocument,
+    value: &crate::entities::AttributeEntity,
+) -> Vec<(&'static str, Value)> {
     vec![
         ("AlignmentPoint", vec3(value.alignment_point)),
         (
             "AttributeType",
-            enum_value(value.mtext_flag.to_value() as i64),
+            enum_value(
+                value
+                    .source
+                    .as_deref()
+                    .and_then(|s| s.attribute_type)
+                    .unwrap_or_else(|| {
+                        if value.mtext_flag.to_value() == 0 {
+                            1
+                        } else {
+                            value.mtext_flag.to_value()
+                        }
+                    }) as i64,
+            ),
         ),
         ("Flags", enum_value(value.flags.to_bits() as i64)),
-        ("Height", number(value.height)),
+        (
+            "Height",
+            number(
+                if value
+                    .source
+                    .as_deref()
+                    .is_some_and(|s| s.dxf && !s.has_height)
+                {
+                    1.0
+                } else {
+                    value.height
+                },
+            ),
+        ),
         (
             "HorizontalAlignment",
             enum_value(value.horizontal_alignment.to_value() as i64),
         ),
         ("InsertPoint", vec3(value.insertion_point)),
-        ("IsLocked", bool_value(value.lock_position)),
+        (
+            "IsLocked",
+            bool_value(value.lock_position && !value.source.as_deref().is_some_and(|s| s.dxf)),
+        ),
         (
             "MText",
-            optional_handle(value.embedded_mtext.as_ref().map(|m| m.common.handle)),
+            value
+                .embedded_mtext
+                .as_ref()
+                .map(|m| handle(m.common.handle))
+                .unwrap_or(Value::Null),
         ),
         ("Normal", vec3(value.normal)),
+        ("Mirror", enum_value(value.text_generation_flags as i64)),
         ("ObliqueAngle", number(value.oblique_angle)),
         ("Rotation", number(value.rotation)),
-        ("Style", unmapped()),
-        ("Tag", Value::String(value.tag.clone())),
-        ("Thickness", unmapped()),
-        ("Value", Value::String(value.value.clone())),
-        ("Version", unmapped()),
+        ("Style", text_style(doc, &value.text_style)),
+        (
+            "Tag",
+            Value::String(text_source_tag(&value.tag, value.source.as_deref()).into()),
+        ),
+        ("Thickness", number(value.thickness)),
+        (
+            "Value",
+            text_source_value(&value.value, value.source.as_deref()),
+        ),
+        (
+            "Version",
+            integer(
+                value
+                    .source
+                    .as_deref()
+                    .and_then(|s| s.last_280)
+                    .unwrap_or(value.version) as i64,
+            ),
+        ),
         (
             "VerticalAlignment",
             enum_value(value.vertical_alignment.to_value() as i64),
@@ -1633,7 +1945,7 @@ fn collect_attribute_inline(
         2,
         "AcDbAttribute",
         false,
-        attribute_entity_props(value),
+        attribute_entity_props(doc, value),
     ));
 }
 
@@ -1752,6 +2064,14 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
                 // Ordinate (6) also contains the Angular flag bit in
                 // ACadSharp's DimensionType enum.
                 ("IsAngular", bool_value(true)),
+                (
+                    "Flags",
+                    enum_value(dimension_flags(
+                        &value.base,
+                        value.base.dimension_type,
+                        value.is_ordinate_type_x,
+                    )),
+                ),
                 ("FeatureLocation", vec3(value.feature_location)),
                 ("LeaderEndpoint", vec3(value.leader_endpoint)),
                 ("DefinitionPoint", vec3(value.definition_point)),
@@ -1769,7 +2089,14 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
                 -999,
                 "AcDbArcDimension",
                 vec![
-                    ("Flags", enum_value(DimensionType::Angular3Point as i64)),
+                    (
+                        "Flags",
+                        enum_value(dimension_flags(
+                            &value.base,
+                            DimensionType::Angular3Point,
+                            false,
+                        )),
+                    ),
                     ("IsAngular", bool_value(true)),
                     ("Center", vec3(value.center_point)),
                     ("DefinitionPoint", vec3(value.definition_point)),
@@ -1781,7 +2108,10 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
                     ("LeaderPoint2", vec3(value.second_leader_point)),
                     ("StartAngle", number(value.arc_start_parameter)),
                     ("EndAngle", number(value.arc_end_parameter)),
-                    ("Measurement", super::dimension_geometry::arc_measurement(value)),
+                    (
+                        "Measurement",
+                        super::dimension_geometry::arc_measurement(value),
+                    ),
                 ],
             )
         }
@@ -2835,6 +3165,24 @@ fn collect_multileader(
 }
 
 fn collect_mline(doc: &CadDocument, value: &crate::entities::MLine, out: &mut Vec<Value>) {
+    // ACadSharp's DWG reader only consumes the open/closed word and maps any
+    // value other than 3 to HasVertices.  Rust retains the raw DWG bits,
+    // including cap-suppression flags, so apply that reader-specific view at
+    // the compatibility boundary.  DXF stores the full enum directly.
+    let flags = if doc.dwg_source_version.is_some() {
+        // The DWG word is tested as an exact value by ACadSharp, so a
+        // nonstandard value carrying cap bits is still reported as open.
+        if value.flags.bits()
+            == (crate::entities::MLineFlags::HAS_VERTICES | crate::entities::MLineFlags::CLOSED)
+                .bits()
+        {
+            crate::entities::MLineFlags::CLOSED.bits()
+        } else {
+            crate::entities::MLineFlags::HAS_VERTICES.bits()
+        }
+    } else {
+        value.flags.bits()
+    };
     field_common(
         doc,
         &value.common,
@@ -2844,7 +3192,7 @@ fn collect_mline(doc: &CadDocument, value: &crate::entities::MLine, out: &mut Ve
         "AcDbMline",
         false,
         vec![
-            ("Flags", enum_value(value.flags.bits() as i64)),
+            ("Flags", enum_value(flags as i64)),
             ("Justification", enum_value(value.justification as i64)),
             ("Normal", vec3(value.normal)),
             ("ScaleFactor", number(value.scale_factor)),
@@ -2859,7 +3207,32 @@ fn collect_mline(doc: &CadDocument, value: &crate::entities::MLine, out: &mut Ve
                             ("Direction", vec3(vertex.direction)),
                             ("Miter", vec3(vertex.miter)),
                             ("Position", vec3(vertex.position)),
-                            ("Segments", unmapped()),
+                            (
+                                "Segments",
+                                array(vertex.segments.iter().map(|segment| {
+                                    inline(
+                                        "MLine.Vertex.Segment",
+                                        vec![
+                                            (
+                                                "AreaFillParameters",
+                                                array(
+                                                    segment
+                                                        .area_fill_parameters
+                                                        .iter()
+                                                        .copied()
+                                                        .map(number),
+                                                ),
+                                            ),
+                                            (
+                                                "Parameters",
+                                                array(
+                                                    segment.parameters.iter().copied().map(number),
+                                                ),
+                                            ),
+                                        ],
+                                    )
+                                })),
+                            ),
                         ],
                     )
                 })),

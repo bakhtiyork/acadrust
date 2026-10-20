@@ -38,6 +38,10 @@ pub struct DxfCodePair {
     #[cfg_attr(feature = "serde", serde(default))]
     pub raw_value_string: Option<String>,
 
+    /// Undeclared-encoding TEXT/attribute bytes when invalid UTF-8.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub undecoded_text_bytes: Option<Vec<u8>>,
+
     /// Typed value (integer, double, or boolean)
     typed_value: CodePairValue,
 }
@@ -84,6 +88,7 @@ impl DxfCodePair {
             dxf_code,
             value_string,
             raw_value_string: None,
+            undecoded_text_bytes: None,
             typed_value,
         }
     }
@@ -97,6 +102,7 @@ impl DxfCodePair {
             dxf_code,
             value_string,
             raw_value_string: None,
+            undecoded_text_bytes: None,
             typed_value,
         }
     }
