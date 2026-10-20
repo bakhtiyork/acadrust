@@ -21368,6 +21368,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 _ => {
+                    let entry_index = xr.entries.len();
                     let value = match XRecordValueType::from_code(pair.code) {
                         XRecordValueType::String => XRecordValue::String(pair.value_string.clone()),
                         XRecordValueType::Point3D => {
@@ -21481,6 +21482,9 @@ impl<'a> SectionReader<'a> {
                         code: pair.code,
                         value,
                     });
+                    if let Some(source) = pair.raw_value_string {
+                        xr.set_source_value(entry_index, source);
+                    }
                 }
             }
         }

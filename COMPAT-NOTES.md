@@ -17,6 +17,9 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 
 | Area | Change | Reason |
 |---|---|---|
+| ACadSharp dictionary names and legacy flags | Emit the inherited empty name for unnamed extension dictionaries, retaining dictionary-assigned names and entry order. For pre-R2000 DWG reads, project both dictionary flags as zero/false. | `NonGraphicalObject.Name` defaults empty; `DwgObjectReader.readCommonDictionary` consumes the R14 byte without assigning it and only assigns cloning/hard-owner flags in R2000+. Native dictionary flags and entries remain intact. |
+| XRecord source text | Retain sparse original string spellings when DXF caret/legacy escapes or pre-R2007 DWG legacy escapes change the native decoded text. Expose them to compat only while the entry index, code and decoded value still match; exclude provenance from native equality and serialization. | Additive reader provenance preserves source lexical information otherwise lost (upstream-PR candidate). Native decoded entries and writer semantics remain unchanged; no document scans or unchanged-string copies are added. |
+| ACadSharp XRecord strings | Project retained lexical strings, including literal caret and Unicode escape sequences, without changing typed handle resolution or coercing literal handle-looking strings. | The reference XRecord readers store raw reader values while native acadrust decodes text. Edited entries fall back to their current native values. |
 | DXF structural block state | Retain BLOCK/ENDBLK common metadata on BlockRecord, including appearance, scoped references and XData; retain all BLOCK flag bits and the unloaded flag. Use the existing common parser without adding marker entities to drawable block contents. | Genuine discarded-data fixes; upstream-PR candidates. Optional boxed common state avoids enlarging every entity or introducing document scans. |
 | DXF existing space records | Copy parsed explodability, scaling and preview data when a source BLOCK_RECORD updates an initialized model/paper-space record. | Genuine data-loss bug: the merge previously retained only units, flags and references. Upstream-PR candidate; ordinary named block behavior is unchanged. |
 | Block source provenance | Retain DXF field presence and last-preview-chunk bounds, the original DWG anonymous bit, and marker names replaced by native hydration. Native preview bytes, block naming, flags, scaling and unit recovery remain unchanged. | Additive source retention permits the reference's nullable defaults, final-chunk preview setter, raw BLOCK names and non-recovered flags without degrading native data. |
@@ -151,3 +154,58 @@ The projection uses document-wide registration order and preserves the native
 source record. Legacy DXF
 INSERT terminators without an owner are registered as block entities by
 `DxfEntitiesSectionReader`, another difference from native compound ownership.
+
+## R3-DX remaining reference differences
+
+The 42ffa8f baseline has 73 extra objects and 17 dictionaries with different
+entry lists. Investigation against the committed dumps and the local ACadSharp
+reader diagnostics establishes the following; no fixture-specific filter is used.
+
+* `sample_AC1015_ascii.dxf`, `sample_AC1015_binary.dxf`,
+  `sample_AC1018_ascii.dxf`, and `sample_AC1018_binary.dxf` each retain 18 extra
+  objects: eight dictionaries, eight XRecords and two BlockRepresentationData.
+  Their source owner/key paths are identical:
+  * `#758 / AcDbContextDataManager -> #759 / ACDB_ANNOTATIONSCALES -> #75A`;
+    `#75E / AcDbContextDataManager -> #75F / ACDB_ANNOTATIONSCALES -> #760`.
+  * `#ABB / AcDbBlockRepresentation -> #ABC` contains `AcDbRepData -> #ABD`
+    and `AppDataCache -> #ABE`. `#ABE` contains `ACAD_ENHANCEDBLOCKDATA -> #ABF`
+    (keys `1`, `10`, `23` point to XRecords `#AC0`, `#AC1`, `#AC2`),
+    `ACAD_ENHANCEDBLOCKHDATA -> #AC3`, and `ACAD_ENHANCEDBLOCKHISTORY -> #AC4`.
+  * `#AC6 / AcDbBlockRepresentation -> #AC7` contains `AcDbRepData -> #AC8`
+    and `AppDataCache -> #AC9`. `#AC9` contains `ACAD_ENHANCEDBLOCKDATA -> #ACA`
+    (keys `1`, `10`, `23` point to XRecords `#ACB`, `#ACC`, `#ACD`),
+    `ACAD_ENHANCEDBLOCKHDATA -> #ACE`, and `ACAD_ENHANCEDBLOCKHISTORY -> #ACF`.
+  * The reference registers `#759`, `#75F`, `#ABC`, `#AC7` with empty entry lists
+    in each file (16 dictionary instances). Its TABLECONTENT reader consumes
+    subsequent object records as table data: diagnostics report group-5 handles
+    `#75A` and `#ABD` in `readCell`, `#760` and `#ABE` in `readLinkedTableRow`,
+    `#AC8` in `readTableRow`, and `#AC9` in `readLinkedTableDataSubclass`.
+    The relevant routines in `IO/DXF/DxfStreamReader/DxfObjectsSectionReader.cs`
+    advance into nested readers and continue row/cell loops across record
+    boundaries. The outer `Read` never receives templates for those records;
+    `CadDictionaryTemplate.build` then reports `Entry not found`.
+  * The same cursor loss consumes TABLECONTENT targets `#149C`, `#24AC`,
+    `#13EF`, `#23FF`, respectively, in `readTableRow`. XRecord `#149F`, `#24AF`,
+    `#13F2`, `#2402` code 360 remains numeric in C#, while the native reader
+    retains each known orphan template and the view resolves it. These are the
+    four remaining `XRecord.Entries` mismatches. Registered-object absence alone
+    is not a resolution rule: `CadXRecordTemplate.build` uses the builder's
+    broader template map (`CadDocumentBuilder.TryGetCadObject`).
+  * This is source-stream parser desynchronization, not an ownership/key policy.
+    The decoded graph does not retain the reference's cursor and nested table
+    parse state. Reproducing that state belongs to TABLECONTENT compatibility;
+    filtering these valid keys, versions, or orphan types would discard valid
+    records in other documents. For example, the reference retains these same
+    `#759` and `#ABC` entries in `sample_AC1015.dwg` and
+    `sample_AC1021_ascii.dxf`. Native readers and the registration graph are
+    therefore preserved.
+* `sample_AC1014.dwg`: dictionary-with-default `#E`, owned by root `#C` under
+  `ACAD_PLOTSTYLENAME`, has native entry `Normal -> #F` and `DefaultEntry=#F`.
+  The reference keeps `DefaultEntry=#F` but has no entries and does not register
+  `#F AcdbPlaceHolder`. `readDictionaryWithDefault` shares
+  `readCommonDictionary`'s R14 framing (which differs from native decoding);
+  that common reader silently drops an empty decoded name or zero handle.
+  No entry-build warning occurs, and the default handle resolves, so a blanket
+  unsupported-placeholder policy is incorrect. The exact discarded name/handle
+  has not been instrumented; no general graph-only rule was established. This
+  one extra object and one dictionary's entry-list difference remain known.

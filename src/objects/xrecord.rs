@@ -374,6 +374,21 @@ pub struct XRecordSection {
     pub entries: Vec<XRecordEntry>,
 }
 
+/// One source spelling retained for an XRecord string entry.
+///
+/// The native entry remains the decoded value. `code` and `decoded` are
+/// snapshots so a compatibility projection can reject the source spelling
+/// after the public `entries` vector has been edited.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct XRecordSourceValue {
+    /// Group code captured with the source spelling.
+    pub code: i32,
+    /// Native decoded string captured with the source spelling.
+    pub decoded: String,
+    /// Original source spelling before reader escape decoding.
+    pub source: String,
+}
+
 /// XRecord object - stores arbitrary extended data
 ///
 /// XRecords can store any DXF group code/value pairs and are commonly
@@ -388,7 +403,7 @@ pub struct XRecordSection {
 /// xrecord.add_double(40, 3.14159);
 /// xrecord.add_int32(90, 42);
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct XRecord {
     /// Unique handle
@@ -432,6 +447,33 @@ pub struct XRecord {
     /// DWG version that produced `raw_dwg_data`.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub raw_dwg_version: Option<crate::types::DxfVersion>,
+    /// Sparse source spellings for strings whose reader decoding changed them.
+    /// This is reader provenance only and is intentionally omitted from native
+    /// equality and serialized model data. [`XRecord::source_value`] validates
+    /// the current entry against the captured code and decoded string.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub source_values: Vec<(usize, XRecordSourceValue)>,
+}
+
+// Source lexical spelling is compatibility provenance and must not affect
+// native object equality.
+impl PartialEq for XRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+            && self.owner == other.owner
+            && self.reactors == other.reactors
+            && self.xdictionary_handle == other.xdictionary_handle
+            && self.name == other.name
+            && self.cloning_flags == other.cloning_flags
+            && self.entries == other.entries
+            && self.object_references == other.object_references
+            && self.preserve_object_reference_stream == other.preserve_object_reference_stream
+            && self.entries_complete == other.entries_complete
+            && self.raw_data == other.raw_data
+            && self.raw_dwg_data == other.raw_dwg_data
+            && self.raw_dwg_handle_bits == other.raw_dwg_handle_bits
+            && self.raw_dwg_version == other.raw_dwg_version
+    }
 }
 
 impl XRecord {
@@ -455,6 +497,7 @@ impl XRecord {
             raw_dwg_data: None,
             raw_dwg_handle_bits: 0,
             raw_dwg_version: None,
+            source_values: Vec::new(),
         }
     }
 
@@ -468,6 +511,7 @@ impl XRecord {
 
     /// Add an entry to the record
     pub fn add_entry(&mut self, entry: XRecordEntry) {
+        self.source_values.clear();
         let is_object_id = (330..=369).contains(&entry.code);
         self.entries.push(entry);
         if is_object_id {
@@ -478,30 +522,35 @@ impl XRecord {
 
     /// Create and add a string entry
     pub fn add_string(&mut self, code: i32, value: impl Into<String>) {
+        self.source_values.clear();
         self.entries.push(XRecordEntry::string(code, value));
         self.entries_complete = true;
     }
 
     /// Create and add a double entry
     pub fn add_double(&mut self, code: i32, value: f64) {
+        self.source_values.clear();
         self.entries.push(XRecordEntry::double(code, value));
         self.entries_complete = true;
     }
 
     /// Create and add an i16 entry
     pub fn add_int16(&mut self, code: i32, value: i16) {
+        self.source_values.clear();
         self.entries.push(XRecordEntry::int16(code, value));
         self.entries_complete = true;
     }
 
     /// Create and add an i32 entry
     pub fn add_int32(&mut self, code: i32, value: i32) {
+        self.source_values.clear();
         self.entries.push(XRecordEntry::int32(code, value));
         self.entries_complete = true;
     }
 
     /// Create and add a handle entry
     pub fn add_handle(&mut self, code: i32, value: Handle) {
+        self.source_values.clear();
         self.entries.push(XRecordEntry::handle(code, value));
         if (330..=369).contains(&code) {
             self.synchronize_object_references();
@@ -511,12 +560,14 @@ impl XRecord {
 
     /// Create and add a bool entry
     pub fn add_bool(&mut self, code: i32, value: bool) {
+        self.source_values.clear();
         self.entries.push(XRecordEntry::bool(code, value));
         self.entries_complete = true;
     }
 
     /// Create and add a point entry
     pub fn add_point3d(&mut self, x_code: i32, x: f64, y: f64, z: f64) {
+        self.source_values.clear();
         self.entries.push(XRecordEntry::point3d(x_code, x, y, z));
         self.entries_complete = true;
     }
@@ -534,6 +585,47 @@ impl XRecord {
     /// Get an entry by index
     pub fn get(&self, index: usize) -> Option<&XRecordEntry> {
         self.entries.get(index)
+    }
+
+    /// Return the source spelling for an entry whose code and decoded string
+    /// still match the reader snapshot.
+    ///
+    /// The returned string is only a compatibility hint. Native callers
+    /// should continue to use [`XRecord::entries`] for the decoded value.
+    pub fn source_value(&self, index: usize) -> Option<&str> {
+        let (_, source) = self
+            .source_values
+            .iter()
+            .find(|(entry_index, _)| *entry_index == index)?;
+        let entry = self.entries.get(index)?;
+        (entry.code == source.code && entry.value.as_string() == Some(source.decoded.as_str()))
+            .then_some(source.source.as_str())
+    }
+
+    /// Retain one source spelling captured by a reader. The source is kept
+    /// only for a decoded string that actually differs from it.
+    pub(crate) fn set_source_value(&mut self, index: usize, source: String) {
+        let Some((code, decoded)) = self.entries.get(index).and_then(|entry| {
+            entry
+                .value
+                .as_string()
+                .map(|decoded| (entry.code, decoded))
+        }) else {
+            return;
+        };
+        if decoded == source {
+            return;
+        }
+        self.source_values
+            .retain(|(entry_index, _)| *entry_index != index);
+        self.source_values.push((
+            index,
+            XRecordSourceValue {
+                code,
+                decoded: decoded.to_string(),
+                source,
+            },
+        ));
     }
 
     /// Get all entries with a specific code
@@ -572,6 +664,7 @@ impl XRecord {
 
     /// Remove all entries with a specific code
     pub fn remove_by_code(&mut self, code: i32) {
+        self.source_values.clear();
         self.entries.retain(|e| e.code != code);
         if (330..=369).contains(&code) {
             self.synchronize_object_references();
@@ -582,6 +675,7 @@ impl XRecord {
     /// Clear all entries
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.source_values.clear();
         self.object_references.clear();
         self.preserve_object_reference_stream = false;
         self.entries_complete = true;
@@ -658,6 +752,7 @@ impl XRecord {
 
     /// Replace or append a balanced code-102 section.
     pub fn set_section(&mut self, name: &str, entries: Vec<XRecordEntry>) {
+        self.source_values.clear();
         let start_text = format!("{{{name}");
         let mut start = None;
         let mut depth = 0usize;
@@ -728,6 +823,7 @@ impl XRecord {
 
     /// Replace Autodesk mesh UVW triples without disturbing unrelated entries.
     pub fn set_mesh_texture_coordinates(&mut self, coordinates: &[Vector3]) {
+        self.source_values.clear();
         self.entries.retain(|entry| !matches!(entry.code, 43..=45));
         for coordinate in coordinates {
             self.entries.push(XRecordEntry::double(43, coordinate.x));
@@ -748,6 +844,7 @@ impl XRecord {
     /// Set the viewport annotation-scale reference while retaining all other
     /// application data.
     pub fn set_annotation_scale_handle(&mut self, handle: Handle) {
+        self.source_values.clear();
         if let Some(entry) = self.entries.iter_mut().find(|entry| entry.code == 340) {
             entry.value = XRecordValue::Handle(handle);
         } else {
@@ -783,6 +880,7 @@ impl XRecord {
         viewport: Handle,
         value: XRecordValue,
     ) {
+        self.source_values.clear();
         let mut updated = false;
         let mut index = 0usize;
         while index < self.entries.len() {
@@ -892,6 +990,21 @@ mod tests {
         assert_eq!(xrecord.get_double(40), Some(2.5));
         assert_eq!(xrecord.get_i32(90), Some(100));
         assert_eq!(xrecord.get_string(999), None);
+    }
+
+    #[test]
+    fn source_provenance_is_ignored_by_native_equality() {
+        let mut with_source = XRecord::new();
+        with_source.entries.push(XRecordEntry::string(1, "decoded"));
+        with_source.set_source_value(0, "source".to_string());
+
+        let mut without_source = XRecord::new();
+        without_source
+            .entries
+            .push(XRecordEntry::string(1, "decoded"));
+
+        assert_eq!(with_source, without_source);
+        assert_eq!(with_source.source_value(0), Some("source"));
     }
 
     #[test]

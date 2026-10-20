@@ -226,3 +226,62 @@ fn an_explicit_extension_pointer_wins_over_an_unlinked_owner_pointer() {
     assert_eq!(object(&result, 0x100)["type"], "CadDictionary");
     assert!(!result.iter().any(|o| o["handle"] == "#101"));
 }
+
+#[test]
+fn anonymous_extension_dictionaries_have_empty_names_and_named_children_keep_order() {
+    let mut doc = CadDocument::new();
+    doc.header.source_handle_seed = Some(0x1000);
+    let table = doc.layers.handle();
+    dict(&mut doc, 0x100, &[("second", 0x102), ("first", 0x101)]);
+    dict(&mut doc, 0x101, &[]);
+    dict(&mut doc, 0x102, &[]);
+    doc.xdic_by_handle.insert(table, Handle::new(0x100));
+    let result = objects(&doc, "dwg");
+    assert_eq!(object(&result, 0x100)["props"]["Name"], "");
+    assert_eq!(object(&result, 0x101)["props"]["Name"], "first");
+    assert_eq!(object(&result, 0x102)["props"]["Name"], "second");
+    assert_eq!(
+        object(&result, 0x100)["props"]["EntryNames"],
+        json!(["second", "first"])
+    );
+    assert_eq!(
+        object(&result, 0x100)["props"]["EntryHandles"],
+        json!([0x102, 0x101])
+    );
+}
+
+#[test]
+fn pre_r2000_dwg_dictionary_flags_are_reference_defaults_only() {
+    use crate::objects::DictionaryWithDefault;
+    use crate::types::DxfVersion;
+
+    let mut doc = CadDocument::new();
+    doc.header.source_handle_seed = Some(0x1000);
+    doc.header.named_objects_dict_handle = Handle::new(0x100);
+    dict(&mut doc, 0x100, &[("default", 0x101)]);
+    if let ObjectType::Dictionary(d) = doc.objects.get_mut(&Handle::new(0x100)).unwrap() {
+        d.hard_owner = true;
+        d.duplicate_cloning = 2;
+    }
+    let mut default = DictionaryWithDefault::new();
+    default.handle = Handle::new(0x101);
+    default.hard_owner = true;
+    default.duplicate_cloning = 1;
+    doc.objects
+        .insert(default.handle, ObjectType::DictionaryWithDefault(default));
+    let native = doc.objects.clone();
+    for (version, reader, projected) in [
+        (DxfVersion::AC1014, "dwg", true),
+        (DxfVersion::AC1015, "dwg", false),
+        (DxfVersion::AC1014, "dxf", false),
+    ] {
+        doc.version = version;
+        let result = objects(&doc, reader);
+        for (h, cloning) in [(0x100, 2), (0x101, 1)] {
+            let props = &object(&result, h)["props"];
+            assert_eq!(props["HardOwnerFlag"], !projected);
+            assert_eq!(props["ClonningFlags"], if projected { 0 } else { cloning });
+        }
+        assert_eq!(doc.objects, native);
+    }
+}

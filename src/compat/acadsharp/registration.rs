@@ -280,6 +280,13 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) {
             }
         }
         if let Some(entries) = dictionaries.get(&h) {
+            // readCommonDictionary consumes the R14 byte without assigning
+            // HardOwnerFlag. Both flags remain constructor defaults before
+            // R2000, including dictionaries with a default entry.
+            if reader == "dwg" && doc.version < DxfVersion::AC1015 {
+                record["props"]["HardOwnerFlag"] = json!(false);
+                record["props"]["ClonningFlags"] = json!(0);
+            }
             record["props"]["EntryHandles"] = json!(entries
                 .iter()
                 .filter(|(_, h)| registered.contains(h))

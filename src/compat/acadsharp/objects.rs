@@ -428,7 +428,16 @@ fn dump_xrecord(doc: &crate::CadDocument, handle_value: Handle, value: &XRecord)
             value
                 .entries
                 .iter()
-                .map(|entry| xrecord_entry(doc, entry))
+                .enumerate()
+                .map(|(index, entry)| {
+                    let mut projected = xrecord_entry(doc, entry);
+                    if let Some(source) = value.source_value(index) {
+                        // The reference's XRecord reader exposes lexical
+                        // strings; native decoded text remains editable.
+                        projected["Value"] = text(source);
+                    }
+                    projected
+                })
                 .collect(),
         ),
     ));
@@ -3771,6 +3780,13 @@ fn enrich_object_record(
     } else if is_unmapped(props_value.get("Name")) {
         if let Some(name) = owned_name {
             props_value.insert("Name".to_string(), text(name));
+        } else if matches!(
+            object,
+            Some(ObjectType::Dictionary(_) | ObjectType::DictionaryWithDefault(_))
+        ) {
+            // NonGraphicalObject.Name starts empty. An extension dictionary
+            // has no dictionary key to assign it a name.
+            props_value.insert("Name".to_string(), text(""));
         }
     }
 
