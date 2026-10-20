@@ -3,6 +3,7 @@
 //! Objects are non-graphical elements in a DXF file, such as dictionaries,
 //! layouts, groups, and other organizational structures.
 
+mod aec;
 mod associative;
 mod block_visibility;
 mod class_object;
@@ -24,6 +25,10 @@ mod stub_objects;
 mod table_style;
 mod xrecord;
 
+pub use aec::{
+    AecBinRecord, AecCleanupGroup, AecData, AecEntityCommon, AecObjectCommon, AecWall,
+    AecWallStyle,
+};
 pub use associative::*;
 pub use block_visibility::{
     BlockEvalValue, BlockParameterConnection, BlockParameterPropertyInfo, BlockVisibilityParameter,

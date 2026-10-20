@@ -251,6 +251,20 @@ impl DwgObjectReader {
         }
         let merged_data: Arc<[u8]> = Arc::from(&self.data[pos..pos + size]);
 
+        self.read_merged_record(merged_data, handle_bits)
+    }
+
+    /// Build the merged stream readers for an already extracted object payload.
+    ///
+    /// This is the stream-boundary logic used by [`read_record_at`], without
+    /// ModularShort/ModularChar framing.  Lazy readers use it to decode
+    /// retained opaque records without reconstructing an object-section offset.
+    pub(crate) fn read_merged_record(
+        &self,
+        merged_data: Arc<[u8]>,
+        handle_bits: i64,
+    ) -> Result<(i16, DwgMergedReader)> {
+        let size = merged_data.len();
         // 4. For R2007+ (ThreeStream): read type_code from a temp reader,
         //    then manually construct the three sub-readers with correct
         //    stream positions.

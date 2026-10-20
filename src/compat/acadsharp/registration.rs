@@ -275,7 +275,9 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) {
             record["owner"] = handle(Handle::new(owner));
         }
         if let Some(name) = names.get(&h) {
-            if record["props"].get("Name").is_some() {
+            // BinRecord hides the base Name property that dictionary
+            // registration assigns; its public dumped Name remains null.
+            if record["type"] != "AecBinRecord" && record["props"].get("Name").is_some() {
                 record["props"]["Name"] = json!(name);
             }
         }

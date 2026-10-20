@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
+mod aec;
 mod common;
 mod dimension_geometry;
 mod entities;
