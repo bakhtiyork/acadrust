@@ -51,45 +51,78 @@ pub(super) fn entity_transparency(common: &EntityCommon) -> Value {
 }
 
 /// Resolve template references once, before registration changes handles.
-pub(super) fn resolve(doc: &CadDocument, reader: &str, records: &mut [Value]) {
-    if !registration::source_document(doc) {
-        return;
-    }
-    let mut types = HashMap::with_capacity(records.len());
-    for record in records
-        .iter()
-        .filter(|r| registration::supported(r, reader))
-    {
-        if let Some(h) = id(&record["handle"]).filter(|&h| h != 0) {
-            types
-                .entry(h)
-                .or_insert_with(|| record["type"].as_str().unwrap_or("").to_owned());
+pub(super) struct Resolution {
+    enabled: bool,
+    types: HashMap<u64, String>,
+    groups: HashMap<u64, Vec<u64>>,
+}
+
+impl Resolution {
+    /// Build the document-wide lookup tables needed to project one record.
+    ///
+    /// The context owns only handle/type and group-membership metadata; the
+    /// record's other properties are read when [`Self::apply`] is called.
+    pub(super) fn new(doc: &CadDocument, reader: &str, records: &[Value]) -> Self {
+        if !registration::source_document(doc) {
+            return Self {
+                enabled: false,
+                types: HashMap::new(),
+                groups: HashMap::new(),
+            };
         }
+
+        Self::from_records(records, reader)
     }
-    let mut groups = HashMap::<u64, Vec<u64>>::new();
-    for record in records.iter().filter(|r| r["type"] == "Group") {
-        let Some(group) = id(&record["handle"]) else {
-            continue;
-        };
-        let mut seen = HashSet::new();
-        if let Some(members) = record["props"]["Entities"].as_array() {
-            for h in members.iter().filter_map(id).filter(|h| seen.insert(*h)) {
-                groups.entry(h).or_default().push(group);
+
+    fn from_records(records: &[Value], reader: &str) -> Self {
+        let mut types = HashMap::with_capacity(records.len());
+        for record in records
+            .iter()
+            .filter(|r| registration::supported(r, reader))
+        {
+            if let Some(h) = id(&record["handle"]).filter(|&h| h != 0) {
+                types
+                    .entry(h)
+                    .or_insert_with(|| record["type"].as_str().unwrap_or("").to_owned());
             }
         }
+        let mut groups = HashMap::<u64, Vec<u64>>::new();
+        for record in records.iter().filter(|r| r["type"] == "Group") {
+            let Some(group) = id(&record["handle"]) else {
+                continue;
+            };
+            let mut seen = HashSet::new();
+            if let Some(members) = record["props"]["Entities"].as_array() {
+                for h in members.iter().filter_map(id).filter(|h| seen.insert(*h)) {
+                    groups.entry(h).or_default().push(group);
+                }
+            }
+        }
+        Self {
+            enabled: true,
+            types,
+            groups,
+        }
     }
-    for record in records {
+
+    /// Apply the source-aware projection to one canonical record.
+    pub(super) fn apply(&self, record: &mut Value) {
+        if !self.enabled {
+            return;
+        }
+
         let h = id(&record["handle"]).unwrap_or(0);
         let layer = record["type"] == "Layer";
         let entity = record["props"].get("ProxyGeometries").is_some();
         let Some(props) = record["props"].as_object_mut() else {
-            continue;
+            return;
         };
         if let Some(reactors) = props.get_mut("Reactors").and_then(Value::as_array_mut) {
             let mut seen = HashSet::new();
-            reactors.retain(|r| id(r).is_some_and(|h| types.contains_key(&h) && seen.insert(h)));
+            reactors
+                .retain(|r| id(r).is_some_and(|h| self.types.contains_key(&h) && seen.insert(h)));
             if entity {
-                if let Some(attachments) = groups.get(&h) {
+                if let Some(attachments) = self.groups.get(&h) {
                     // CadGroupTemplate builds the entity first. Group.Add then
                     // appends its reactor, even when the source already had it.
                     reactors.extend(attachments.iter().map(|&h| handle(Handle::new(h))));
@@ -103,7 +136,7 @@ pub(super) fn resolve(doc: &CadDocument, reader: &str, records: &mut [Value]) {
         ] {
             if let Some(reference) = props.get_mut(property) {
                 if id(reference).is_some_and(|h| {
-                    !types.get(&h).is_some_and(|ty| {
+                    !self.types.get(&h).is_some_and(|ty| {
                         ty == expected
                             || (expected == "CadDictionary" && ty == "CadDictionaryWithDefault")
                     })
@@ -128,43 +161,74 @@ pub(super) fn resolve(doc: &CadDocument, reader: &str, records: &mut [Value]) {
     }
 }
 
+pub(super) fn resolve(doc: &CadDocument, reader: &str, records: &mut [Value]) {
+    let resolution = Resolution::new(doc, reader, records);
+    for record in records {
+        resolution.apply(record);
+    }
+}
+
 /// Assignment to a document resolves table defaults after legacy registration.
-pub(super) fn table_defaults(records: &mut [Value]) {
-    let mut types = HashMap::with_capacity(records.len());
-    let mut zero = Value::Null;
-    let mut bylayer = Value::Null;
-    for record in records.iter() {
-        if let Some(h) = id(&record["handle"]) {
-            types
-                .entry(h)
-                .or_insert_with(|| record["type"].as_str().unwrap_or("").to_owned());
+pub(super) struct TableDefaults {
+    types: HashMap<u64, String>,
+    zero: Value,
+    bylayer: Value,
+}
+
+impl TableDefaults {
+    /// Build the handle/type and default-table lookup tables used per record.
+    pub(super) fn new(records: &[Value]) -> Self {
+        let mut types = HashMap::with_capacity(records.len());
+        let mut zero = Value::Null;
+        let mut bylayer = Value::Null;
+        for record in records.iter() {
+            if let Some(h) = id(&record["handle"]) {
+                types
+                    .entry(h)
+                    .or_insert_with(|| record["type"].as_str().unwrap_or("").to_owned());
+            }
+            if record["type"] == "Layer" && record["props"]["Name"] == "0" {
+                zero = record["handle"].clone();
+            }
+            if record["type"] == "LineType"
+                && record["props"]["Name"]
+                    .as_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case("ByLayer"))
+            {
+                bylayer = record["handle"].clone();
+            }
         }
-        if record["type"] == "Layer" && record["props"]["Name"] == "0" {
-            zero = record["handle"].clone();
-        }
-        if record["type"] == "LineType"
-            && record["props"]["Name"]
-                .as_str()
-                .is_some_and(|n| n.eq_ignore_ascii_case("ByLayer"))
-        {
-            bylayer = record["handle"].clone();
+        Self {
+            types,
+            zero,
+            bylayer,
         }
     }
-    for record in records {
+
+    /// Apply table defaults to one canonical record.
+    pub(super) fn apply(&self, record: &mut Value) {
         if record["props"].get("ProxyGeometries").is_none() {
-            continue;
+            return;
         }
         for (property, expected, fallback) in [
-            ("Layer", "Layer", &zero),
-            ("LineType", "LineType", &bylayer),
+            ("Layer", "Layer", &self.zero),
+            ("LineType", "LineType", &self.bylayer),
         ] {
             let reference = &mut record["props"][property];
             if reference.as_str() != Some(UNMAPPED)
-                && !id(reference).is_some_and(|h| types.get(&h).is_some_and(|ty| ty == expected))
+                && !id(reference)
+                    .is_some_and(|h| self.types.get(&h).is_some_and(|ty| ty == expected))
             {
                 *reference = fallback.clone();
             }
         }
+    }
+}
+
+pub(super) fn table_defaults(records: &mut [Value]) {
+    let defaults = TableDefaults::new(records);
+    for record in records {
+        defaults.apply(record);
     }
 }
 

@@ -1,4 +1,5 @@
-use acadrust::compat::acadsharp::{dump_document, dump_file, new_document};
+use acadrust::compat::acadsharp::{new_document, write_document, write_file};
+use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
 fn run() -> Result<(), String> {
@@ -7,9 +8,7 @@ fn run() -> Result<(), String> {
         return Err("usage: acad-dump dump <file.dwg|file.dxf|--new-document> <out.json>".into());
     }
     let input = Path::new(&args[2]);
-    let value = if args[2] == "--new-document" {
-        dump_document(&new_document(), "", "new")
-    } else {
+    if args[2] != "--new-document" {
         let extension = input
             .extension()
             .unwrap_or_default()
@@ -20,10 +19,28 @@ fn run() -> Result<(), String> {
         }
         // Input filesystem errors are command errors, not CAD reader failures.
         std::fs::File::open(input).map_err(|e| e.to_string())?;
-        dump_file(input)
-    };
-    let data = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
-    std::fs::write(&args[3], &data).map_err(|e| e.to_string())?;
+    }
+    // The old dumper finished reading before replacing its output. Defer
+    // truncation so an output path aliasing the input still has that behavior.
+    let output = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&args[3])
+        .map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::with_capacity(256 * 1024, output);
+    if args[2] == "--new-document" {
+        write_document(&new_document(), "", "new", &mut writer)
+    } else {
+        write_file(input, &mut writer)
+    }
+    .map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
+    let length = writer.stream_position().map_err(|e| e.to_string())?;
+    writer
+        .get_ref()
+        .set_len(length)
+        .map_err(|e| e.to_string())?;
     let name = if args[2] == "--new-document" {
         String::new()
     } else {
@@ -33,7 +50,7 @@ fn run() -> Result<(), String> {
             .to_string_lossy()
             .into_owned()
     };
-    println!("{name}\t{} bytes", data.len());
+    println!("{name}\t{length} bytes");
     Ok(())
 }
 fn main() {
