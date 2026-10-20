@@ -82,6 +82,7 @@ impl<'a> SectionReader<'a> {
 
     fn read_table_content_format_dxf(&mut self) -> Result<CellContent> {
         let mut content = CellContent::new();
+        content.format_has_data = true;
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
                 self.reader.push_back(pair);
@@ -200,7 +201,9 @@ impl<'a> SectionReader<'a> {
         Ok(())
     }
 
-    fn read_table_cell_style_override_dxf(&mut self) -> Result<Option<CellStyle>> {
+    fn read_table_cell_style_override_dxf(
+        &mut self,
+    ) -> Result<(Option<CellStyle>, Option<i32>)> {
         let mut style = CellStyle::new();
         let mut has_data = false;
         let mut current_edge = 0u32;
@@ -256,7 +259,8 @@ impl<'a> SectionReader<'a> {
                 _ => {}
             }
         }
-        Ok(has_data.then_some(style))
+        let source_style_type = Some(style.style_type as i32);
+        Ok((has_data.then_some(style), source_style_type))
     }
 
     fn read_table_modern_content_dxf(&mut self) -> Result<CellContent> {
@@ -330,6 +334,7 @@ impl<'a> SectionReader<'a> {
             } else if in_format {
                 if pair.code == 300 && pair.value_string == "CONTENTFORMAT" {
                     let format = self.read_table_content_format_dxf()?;
+                    content.format_has_data = format.format_has_data;
                     content.format_override_flags = format.format_override_flags;
                     content.format_property_flags = format.format_property_flags;
                     content.format_value_data_type = format.format_value_data_type;
@@ -368,7 +373,9 @@ impl<'a> SectionReader<'a> {
                     continue;
                 }
                 (1, "TABLEFORMAT_BEGIN") => {
-                    cell.style = self.read_table_cell_style_override_dxf()?;
+                    let (style, source_style_type) = self.read_table_cell_style_override_dxf()?;
+                    cell.style = style;
+                    cell.source_style_type = source_style_type;
                     continue;
                 }
                 (1, "TABLECELL_BEGIN") => {
@@ -535,7 +542,9 @@ impl<'a> SectionReader<'a> {
                     continue;
                 }
                 (1, "TABLEFORMAT_BEGIN") => {
-                    column.style = self.read_table_cell_style_override_dxf()?;
+                    let (style, source_style_type) = self.read_table_cell_style_override_dxf()?;
+                    column.style = style;
+                    column.source_style_type = source_style_type;
                     continue;
                 }
                 (1, "TABLECOLUMN_BEGIN") => {
@@ -584,7 +593,9 @@ impl<'a> SectionReader<'a> {
                     continue;
                 }
                 (1, "TABLEFORMAT_BEGIN") => {
-                    row.style = self.read_table_cell_style_override_dxf()?;
+                    let (style, source_style_type) = self.read_table_cell_style_override_dxf()?;
+                    row.style = style;
+                    row.source_style_type = source_style_type;
                     continue;
                 }
                 (1, "TABLEROW_BEGIN") => {
@@ -681,7 +692,10 @@ impl<'a> SectionReader<'a> {
                 "AcDbFormattedTableData" => match pair.code {
                     300 if pair.value_string == "TABLEFORMAT" => {}
                     1 if pair.value_string == "TABLEFORMAT_BEGIN" => {
-                        table.base_style = self.read_table_cell_style_override_dxf()?;
+                        let (style, source_style_type) =
+                            self.read_table_cell_style_override_dxf()?;
+                        table.base_style = style;
+                        table.base_style_type = source_style_type;
                     }
                     90 => {
                         merged_ranges_remaining = pair.as_i32().unwrap_or(0).max(0) as usize;

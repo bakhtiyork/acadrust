@@ -632,6 +632,10 @@ pub struct CellContent {
     pub field_handle: Option<Handle>,
     /// Block attribute values attached to block content.
     pub attributes: Vec<TableAttribute>,
+    /// Whether the source record carried a content-format payload.  This is
+    /// distinct from the payload's property flags, which may all be zero.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub format_has_data: bool,
     /// Content-format override flags.
     pub format_override_flags: i32,
     pub format_property_flags: i32,
@@ -663,6 +667,7 @@ impl CellContent {
             text_height: 0.18,
             field_handle: None,
             attributes: Vec::new(),
+            format_has_data: false,
             format_override_flags: 0,
             format_property_flags: 0,
             format_value_data_type: 0,
@@ -687,6 +692,7 @@ impl CellContent {
             text_height: 0.18,
             field_handle: None,
             attributes: Vec::new(),
+            format_has_data: false,
             format_override_flags: 0,
             format_property_flags: 0,
             format_value_data_type: 0,
@@ -711,6 +717,7 @@ impl CellContent {
             text_height: 0.18,
             field_handle: None,
             attributes: Vec::new(),
+            format_has_data: false,
             format_override_flags: 0,
             format_property_flags: 0,
             format_value_data_type: 0,
@@ -920,6 +927,9 @@ pub struct TableCell {
     pub contents: Vec<CellContent>,
     /// Cell style override.
     pub style: Option<CellStyle>,
+    /// Source cell-style type, retained when the source had no style data.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_style_type: Option<i32>,
     /// Cell tooltip.
     pub tooltip: String,
     /// Rotation angle.
@@ -980,6 +990,7 @@ impl TableCell {
             state: CellStateFlags::NONE,
             contents: Vec::new(),
             style: None,
+            source_style_type: None,
             tooltip: String::new(),
             rotation: 0.0,
             geometry_scale: 1.0,
@@ -1160,6 +1171,9 @@ pub struct TableRow {
     pub cells: Vec<TableCell>,
     /// Row style override.
     pub style: Option<CellStyle>,
+    /// Source row-style type, retained when the source had no style data.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_style_type: Option<i32>,
     /// Custom data value.
     pub custom_data: i32,
     pub custom_data_items: Vec<TableCustomData>,
@@ -1174,6 +1188,7 @@ impl TableRow {
             height: 0.25,
             cells,
             style: None,
+            source_style_type: None,
             custom_data: 0,
             custom_data_items: Vec::new(),
             style_id: 0,
@@ -1187,6 +1202,7 @@ impl TableRow {
             height: 0.25,
             cells,
             style: None,
+            source_style_type: None,
             custom_data: 0,
             custom_data_items: Vec::new(),
             style_id: 0,
@@ -1229,6 +1245,9 @@ pub struct TableColumn {
     pub width: f64,
     /// Column style override.
     pub style: Option<CellStyle>,
+    /// Source column-style type, retained when the source had no style data.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_style_type: Option<i32>,
     /// Custom data value.
     pub custom_data: i32,
     pub custom_data_items: Vec<TableCustomData>,
@@ -1242,6 +1261,7 @@ impl TableColumn {
             name: String::new(),
             width: 2.5,
             style: None,
+            source_style_type: None,
             custom_data: 0,
             custom_data_items: Vec::new(),
             style_id: 0,
@@ -1254,6 +1274,7 @@ impl TableColumn {
             name: String::new(),
             width,
             style: None,
+            source_style_type: None,
             custom_data: 0,
             custom_data_items: Vec::new(),
             style_id: 0,
@@ -1266,6 +1287,7 @@ impl TableColumn {
             name: name.to_string(),
             width,
             style: None,
+            source_style_type: None,
             custom_data: 0,
             custom_data_items: Vec::new(),
             style_id: 0,
@@ -1410,6 +1432,11 @@ impl<T> Default for LegacyBorderOverrides<T> {
 // Table Entity
 // ============================================================================
 
+#[cfg(feature = "serde")]
+fn default_table_scale() -> Vector3 {
+    Vector3::new(1.0, 1.0, 1.0)
+}
+
 /// Table entity.
 ///
 /// A table is a grid of cells containing text, blocks, or formulas,
@@ -1442,6 +1469,22 @@ pub struct Table {
     pub common: EntityCommon,
     /// Insertion point.
     pub insertion_point: Vector3,
+    /// INSERT base scale factors.
+    #[cfg_attr(feature = "serde", serde(default = "default_table_scale"))]
+    pub insert_scale: Vector3,
+    /// INSERT base rotation angle in radians.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub insert_rotation: f64,
+    /// Last outer DXF INSERT scale codes, including overlapping table codes.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_insert_scale: Option<Vector3>,
+    /// Last outer DXF INSERT rotation code, including later subclasses.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_insert_rotation: Option<f64>,
+    /// Raw INSERT array dimensions and spacings retained from DXF group codes
+    /// 70/71/44/45. Table grid dimensions use separate native fields.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_insert_array: Option<(u16, u16, f64, f64)>,
     /// Horizontal direction vector.
     pub horizontal_direction: Vector3,
     /// Normal vector.
@@ -1473,8 +1516,15 @@ pub struct Table {
     pub columns: Vec<TableColumn>,
     /// Break options.
     pub break_options: BreakOptionFlags,
+    /// Whether the source DWG carried the optional break-data section.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub has_break_data: bool,
     /// Break flow direction.
     pub break_flow_direction: BreakFlowDirection,
+    /// Raw break-flow direction value from the source DWG, including zero or
+    /// unknown values that the typed enum maps to its default.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_break_flow_direction: Option<i32>,
     /// Break spacing.
     pub break_spacing: f64,
     /// Linked table-data name and description.
@@ -1484,6 +1534,9 @@ pub struct Table {
     pub field_handles: Vec<Handle>,
     /// Base style applied to the table.
     pub base_style: Option<CellStyle>,
+    /// Source base-style type, retained when the source had no style data.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub base_style_type: Option<i32>,
     /// Merged cell ranges.
     pub merged_ranges: Vec<CellRange>,
     /// Manual break positions and cached break ranges.
@@ -1735,6 +1788,11 @@ impl Table {
         Self {
             common: EntityCommon::default(),
             insertion_point,
+            insert_scale: Vector3::new(1.0, 1.0, 1.0),
+            insert_rotation: 0.0,
+            dxf_insert_scale: None,
+            dxf_insert_rotation: None,
+            dxf_insert_array: None,
             horizontal_direction: Vector3::new(1.0, 0.0, 0.0),
             normal: Vector3::new(0.0, 0.0, 1.0),
             table_style_handle: None,
@@ -1753,12 +1811,15 @@ impl Table {
             rows,
             columns,
             break_options: BreakOptionFlags::NONE,
+            has_break_data: false,
             break_flow_direction: BreakFlowDirection::Right,
+            source_break_flow_direction: None,
             break_spacing: 0.0,
             name: String::new(),
             description: String::new(),
             field_handles: Vec::new(),
             base_style: None,
+            base_style_type: None,
             merged_ranges: Vec::new(),
             break_data: Vec::new(),
             break_ranges: Vec::new(),
