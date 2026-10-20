@@ -5820,6 +5820,9 @@ impl DwgDocumentBuilder {
                     obj.cloning_flags =
                         crate::objects::DictionaryCloningFlags::from_value(data.cloning_flags);
                     obj.entries = data.entries;
+                    for (index, source) in data.source_values {
+                        obj.set_source_value(index, source);
+                    }
                     obj.object_references = data.object_references;
                     obj.preserve_object_reference_stream = true;
                     obj.entries_complete = data.entries_complete;

@@ -761,6 +761,9 @@ pub struct XRecordData {
     pub data_size: i32,
     pub raw_data: Vec<u8>,
     pub entries: Vec<XRecordEntry>,
+    /// Sparse source spellings for legacy-escaped string entries.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_values: Vec<(usize, String)>,
     pub object_references: Vec<ProxyObjectReference>,
     pub entries_complete: bool,
 }
@@ -1437,9 +1440,13 @@ pub fn read_sort_entities_table(reader: &mut DwgMergedReader) -> SortEntitiesTab
     }
 }
 
-fn decode_xrecord_entries(raw: &[u8], unicode: bool) -> (Vec<XRecordEntry>, bool) {
+fn decode_xrecord_entries(
+    raw: &[u8],
+    unicode: bool,
+) -> (Vec<XRecordEntry>, bool, Vec<(usize, String)>) {
     let read_u16 = |p: usize| u16::from_le_bytes([raw[p], raw[p + 1]]);
     let mut entries = Vec::new();
+    let mut source_values = Vec::new();
     let mut position = 0usize;
     let mut complete = true;
     'entries: while position + 2 <= raw.len() {
@@ -1481,14 +1488,14 @@ fn decode_xrecord_entries(raw: &[u8], unicode: bool) -> (Vec<XRecordEntry>, bool
                 require!(2);
                 let length = read_u16(position) as usize;
                 position += 2;
-                let text = if unicode {
+                let (text, source) = if unicode {
                     require!(length.saturating_mul(2));
                     let mut units = Vec::with_capacity(length);
                     for _ in 0..length {
                         units.push(read_u16(position));
                         position += 2;
                     }
-                    String::from_utf16_lossy(&units)
+                    (String::from_utf16_lossy(&units), None)
                 } else {
                     require!(1usize.saturating_add(length));
                     let code_page = raw[position] as u16;
@@ -1498,8 +1505,13 @@ fn decode_xrecord_entries(raw: &[u8], unicode: bool) -> (Vec<XRecordEntry>, bool
                         .0
                         .into_owned();
                     position += length;
-                    crate::io::dxf::code_page::decode_legacy_escapes(&value)
+                    let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&value);
+                    let source = (decoded != value).then_some(value);
+                    (decoded, source)
                 };
+                if let Some(source) = source {
+                    source_values.push((entries.len(), source));
+                }
                 XRecordValue::String(text)
             }
             10..=37 | 110..=139 | 210..=269 | 1010..=1039 | 1043..=1069 => {
@@ -1566,7 +1578,7 @@ fn decode_xrecord_entries(raw: &[u8], unicode: bool) -> (Vec<XRecordEntry>, bool
     if position != raw.len() {
         complete = false;
     }
-    (entries, complete)
+    (entries, complete, source_values)
 }
 
 pub fn read_xrecord(reader: &mut DwgMergedReader) -> XRecordData {
@@ -1582,7 +1594,7 @@ pub fn read_xrecord(reader: &mut DwgMergedReader) -> XRecordData {
     } else {
         0
     };
-    let (mut entries, entries_complete) =
+    let (mut entries, entries_complete, source_values) =
         decode_xrecord_entries(&raw_data, reader.dxf_version() >= DxfVersion::AC1021);
     let mut object_references = Vec::new();
     while reader.handle_remaining_bits() >= 8 {
@@ -1624,6 +1636,7 @@ pub fn read_xrecord(reader: &mut DwgMergedReader) -> XRecordData {
         data_size: data_size.min(i32::MAX as usize) as i32,
         raw_data,
         entries,
+        source_values,
         object_references,
         entries_complete,
     }
@@ -2062,6 +2075,36 @@ mod tests {
         let xr = read_xrecord(&mut r);
         assert_eq!(xr.cloning_flags, 0);
         assert_eq!(xr.data_size, 0);
+    }
+
+    #[test]
+    fn test_xrecord_legacy_string_source_is_sparse_and_validated() {
+        let source = br"legacy\U+00E9";
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1i16.to_le_bytes());
+        raw.extend_from_slice(&(source.len() as u16).to_le_bytes());
+        raw.push(1); // ASCII DWG code page
+        raw.extend_from_slice(source);
+
+        let (entries, complete, source_values) = decode_xrecord_entries(&raw, false);
+        assert!(complete);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value.as_string(), Some("legacyé"));
+        assert_eq!(source_values, vec![(0, "legacy\\U+00E9".to_string())]);
+
+        let mut record = crate::objects::XRecord::new();
+        record.entries = entries;
+        for (index, source) in source_values {
+            record.set_source_value(index, source);
+        }
+        assert_eq!(record.source_value(0), Some("legacy\\U+00E9"));
+
+        record.entries[0].code = 2;
+        assert_eq!(record.source_value(0), None);
+        record.entries[0].code = 1;
+        assert_eq!(record.source_value(0), Some("legacy\\U+00E9"));
+        record.entries[0].value = crate::objects::XRecordValue::String("edited".to_string());
+        assert_eq!(record.source_value(0), None);
     }
 
     #[test]

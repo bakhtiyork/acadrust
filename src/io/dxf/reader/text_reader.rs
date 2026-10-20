@@ -137,19 +137,24 @@ impl<R: Read + Seek> DxfTextReader<R> {
             }
         };
 
-        // Preserve modeler and MTEXT lexical text before legacy decoding as
-        // well as caret decoding. Other entities keep their existing semantics.
-        let mut modeler_raw = None;
+        // Preserve modeler, MTEXT, and XRecord lexical text before legacy
+        // decoding as well as caret decoding. Other entities keep their
+        // existing semantics.
+        let mut source_raw = None;
         let value_line = if crate::io::dxf::code_page::has_legacy_escape(&value_line) {
             let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&value_line);
-            if decoded != value_line
-                && matches!(code, 1 | 3)
+            let preserve_xrecord = self.context.record_type.as_deref() == Some("XRECORD")
+                && matches!(
+                    crate::io::dxf::GroupCodeValueType::from_raw_code(code),
+                    crate::io::dxf::GroupCodeValueType::String
+                );
+            let preserve_modeler_or_mtext = matches!(code, 1 | 3)
                 && matches!(
                     self.context.record_type.as_deref(),
                     Some("3DSOLID" | "REGION" | "BODY" | "MTEXT")
-                )
-            {
-                modeler_raw = Some(value_line);
+                );
+            if decoded != value_line && (preserve_xrecord || preserve_modeler_or_mtext) {
+                source_raw = Some(value_line);
             }
             decoded
         } else {
@@ -161,8 +166,8 @@ impl<R: Read + Seek> DxfTextReader<R> {
 
         let changed = value != value_line;
         let mut pair = DxfCodePair::new(code, value);
-        if modeler_raw.is_some() {
-            pair.raw_value_string = modeler_raw;
+        if source_raw.is_some() {
+            pair.raw_value_string = source_raw;
         } else if changed {
             pair.raw_value_string = Some(value_line);
         }
