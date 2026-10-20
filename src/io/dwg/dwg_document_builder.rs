@@ -4300,6 +4300,10 @@ impl DwgDocumentBuilder {
                     );
                     let mut e = Viewport::new();
                     e.common = entity_common;
+                    e.source = Some(Box::new(crate::entities::viewport::ViewportSource {
+                        dxf_codes: None,
+                        status_flags: Some(data.status_flags),
+                    }));
                     e.center = data.center;
                     e.width = data.width;
                     e.height = data.height;

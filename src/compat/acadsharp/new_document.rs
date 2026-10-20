@@ -321,6 +321,16 @@ fn add_layout(doc: &mut CadDocument, name: &str, block_name: &str, paper: bool) 
 
     let viewport = if paper {
         let mut viewport = Viewport::new();
+        // ACadSharp's default paper viewport uses its constructor defaults.
+        viewport.circle_sides = 0;
+        viewport.grid_spacing = Vector3::ZERO;
+        viewport.snap_spacing = Vector3::ZERO;
+        viewport.lens_length = 0.0;
+        viewport.view_height = 0.0;
+        viewport.grid_major = 0;
+        viewport.default_lighting = false;
+        viewport.default_lighting_type = 0;
+        viewport.status = Default::default();
         viewport.id = 1;
         viewport.common.owner_handle = owner;
         viewport.common.entity_mode = Some(1);

@@ -17865,27 +17865,71 @@ impl<'a> SectionReader<'a> {
     /// Read a VIEWPORT entity
     fn read_viewport(&mut self) -> Result<Option<Viewport>> {
         let mut vp = Viewport::new();
-        let mut center = PointReader::new();
-        let mut view_center = PointReader::new();
-        let mut view_direction = PointReader::new();
-        let mut view_target = PointReader::new();
+        let mut source = crate::entities::viewport::ViewportSource {
+            dxf_codes: Some([0; 7]),
+            status_flags: None,
+        };
         let mut snap_base_x: Option<f64> = None;
         let mut snap_base_y: Option<f64> = None;
         let mut snap_spacing_x: Option<f64> = None;
         let mut snap_spacing_y: Option<f64> = None;
         let mut grid_spacing_x: Option<f64> = None;
         let mut grid_spacing_y: Option<f64> = None;
-        let mut ucs_origin = PointReader::new();
-        let mut ucs_x_axis = PointReader::new();
-        let mut ucs_y_axis = PointReader::new();
         let mut status_field: Option<i16> = None;
+        // Each coordinate is independently optional in DXF. Preserve a lone
+        // axis and keep constructor defaults for the omitted components.
+        let coordinate = |point: &mut Vector3, pair: &super::stream_reader::DxfCodePair| {
+            if let Some(value) = pair.as_double() {
+                match (pair.code / 10) % 10 {
+                    1 => point.x = value,
+                    2 => point.y = value,
+                    3 => point.z = value,
+                    _ => {}
+                }
+            }
+        };
 
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
                 self.reader.push_back(pair);
                 break;
             }
+            source.insert(pair.code);
             match pair.code {
+                1 => vp.style_sheet = pair.value_string.clone(),
+                74 => vp.ucs_at_origin = pair.as_i16().is_some_and(|v| v != 0),
+                79 => vp.ucs_ortho_type = pair.as_i16().unwrap_or(0),
+                63 => {
+                    if let Some(index) = pair.as_i16() {
+                        if !vp.ambient_color.is_true_color() {
+                            vp.ambient_color = Color::from_index(index);
+                        }
+                    }
+                }
+                421 => {
+                    if let Some(rgb) = pair.as_i32() {
+                        vp.ambient_color = Color::from_rgb(
+                            ((rgb >> 16) & 255) as u8,
+                            ((rgb >> 8) & 255) as u8,
+                            (rgb & 255) as u8,
+                        );
+                    }
+                }
+                345 => vp.ucs_handle = pair.as_handle().map(Handle::new).unwrap_or(Handle::NULL),
+                346 => {
+                    vp.base_ucs_handle = pair.as_handle().map(Handle::new).unwrap_or(Handle::NULL)
+                }
+                348 => {
+                    vp.visual_style_handle =
+                        pair.as_handle().map(Handle::new).unwrap_or(Handle::NULL)
+                }
+                332 => {
+                    vp.background_handle = pair.as_handle().map(Handle::new).unwrap_or(Handle::NULL)
+                }
+                333 => {
+                    vp.shade_plot_handle = pair.as_handle().map(Handle::new).unwrap_or(Handle::NULL)
+                }
+                361 => vp.sun_handle = pair.as_handle().map(Handle::new).unwrap_or(Handle::NULL),
                 8 => vp.common.layer = pair.value_string.clone(),
                 62 => {
                     if let Some(v) = pair.as_i16() {
@@ -17893,7 +17937,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 10 | 20 | 30 => {
-                    center.add_coordinate(&pair);
+                    coordinate(&mut vp.center, &pair);
                 }
                 40 => {
                     if let Some(v) = pair.as_double() {
@@ -17907,6 +17951,7 @@ impl<'a> SectionReader<'a> {
                 }
                 90 => {
                     if let Some(v) = pair.as_i32() {
+                        source.status_flags = Some(v);
                         vp.status = crate::entities::viewport::ViewportStatusFlags::from_bits(v);
                         // VIEWPORT grid behavior uses group-90 bits 18..21.
                         vp.grid_flags =
@@ -17927,15 +17972,7 @@ impl<'a> SectionReader<'a> {
                         vp.id = v;
                     }
                 }
-                12 => {
-                    if let Some(v) = pair.as_double() {
-                        view_center.add_coordinate(&pair);
-                        let _ = v;
-                    }
-                }
-                22 => {
-                    view_center.add_coordinate(&pair);
-                }
+                12 | 22 => coordinate(&mut vp.view_center, &pair),
                 13 => {
                     snap_base_x = pair.as_double();
                 }
@@ -17955,10 +17992,10 @@ impl<'a> SectionReader<'a> {
                     grid_spacing_y = pair.as_double();
                 }
                 16 | 26 | 36 => {
-                    view_direction.add_coordinate(&pair);
+                    coordinate(&mut vp.view_direction, &pair);
                 }
                 17 | 27 | 37 => {
-                    view_target.add_coordinate(&pair);
+                    coordinate(&mut vp.view_target, &pair);
                 }
                 42 => {
                     if let Some(v) = pair.as_double() {
@@ -18016,13 +18053,13 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 110 | 120 | 130 => {
-                    ucs_origin.add_coordinate(&pair);
+                    coordinate(&mut vp.ucs_origin, &pair);
                 }
                 111 | 121 | 131 => {
-                    ucs_x_axis.add_coordinate(&pair);
+                    coordinate(&mut vp.ucs_x_axis, &pair);
                 }
                 112 | 122 | 132 => {
-                    ucs_y_axis.add_coordinate(&pair);
+                    coordinate(&mut vp.ucs_y_axis, &pair);
                 }
                 146 => {
                     if let Some(v) = pair.as_double() {
@@ -18060,31 +18097,6 @@ impl<'a> SectionReader<'a> {
             }
         }
 
-        if let Some(pt) = center.get_point() {
-            vp.center = pt;
-        }
-        if let Some(pt) = view_direction.get_point() {
-            vp.view_direction = pt;
-        }
-        if let Some(pt) = view_target.get_point() {
-            vp.view_target = pt;
-        }
-        if let Some(pt) = ucs_origin.get_point() {
-            vp.ucs_origin = pt;
-        }
-        if let Some(pt) = ucs_x_axis.get_point() {
-            vp.ucs_x_axis = pt;
-        }
-        if let Some(pt) = ucs_y_axis.get_point() {
-            vp.ucs_y_axis = pt;
-        }
-        // For 2D points, assemble manually
-        if let (Some(x), Some(y)) = (
-            view_center.get_point().map(|p| p.x),
-            view_center.get_point().map(|p| p.y),
-        ) {
-            vp.view_center = Vector3::new(x, y, 0.0);
-        }
         vp.snap_base = Vector3::new(snap_base_x.unwrap_or(0.0), snap_base_y.unwrap_or(0.0), 0.0);
         vp.snap_spacing = Vector3::new(
             snap_spacing_x.unwrap_or(10.0),
@@ -18107,6 +18119,7 @@ impl<'a> SectionReader<'a> {
         }
         vp.dxf_status = status_field.filter(|value| *value != vp.id);
 
+        vp.source = Some(Box::new(source));
         Ok(Some(vp))
     }
 
@@ -21973,6 +21986,7 @@ impl<'a> SectionReader<'a> {
     /// Read a PLOTSETTINGS object
     fn read_plot_settings(&mut self) -> Result<Option<PlotSettings>> {
         let mut ps = PlotSettings::new("");
+        ps.dxf_present_codes = Some([0; 6]);
         let mut group = String::new();
         let mut owner_seen = false;
 
@@ -21981,6 +21995,7 @@ impl<'a> SectionReader<'a> {
                 self.reader.push_back(pair);
                 break;
             }
+            ps.record_dxf_code(pair.code);
             match pair.code {
                 5 => {
                     if let Ok(h) = u64::from_str_radix(&pair.value_string, 16) {
