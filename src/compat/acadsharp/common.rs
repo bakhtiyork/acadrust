@@ -105,6 +105,10 @@ impl Resolution {
         }
     }
 
+    fn is_field(&self, handle: u64) -> bool {
+        self.types.get(&handle).is_some_and(|ty| ty == "Field")
+    }
+
     /// Apply the source-aware projection to one canonical record.
     pub(super) fn apply(&self, record: &mut Value) {
         if !self.enabled {
@@ -113,6 +117,8 @@ impl Resolution {
 
         let h = id(&record["handle"]).unwrap_or(0);
         let layer = record["type"] == "Layer";
+        let field = record["type"] == "Field";
+        let field_list = record["type"] == "FieldList";
         let entity = record["props"].get("ProxyGeometries").is_some();
         let Some(props) = record["props"].as_object_mut() else {
             return;
@@ -127,6 +133,22 @@ impl Resolution {
                     // appends its reactor, even when the source already had it.
                     reactors.extend(attachments.iter().map(|&h| handle(Handle::new(h))));
                 }
+            }
+        }
+        // `CadFieldTemplate` / `CadFieldListTemplate` keep only the handles
+        // that resolve (to any object, respectively to a field); the field
+        // list also collects them in a set.
+        if field {
+            if let Some(list) = props.get_mut("CadObjects").and_then(Value::as_array_mut) {
+                list.retain(|r| id(r).is_some_and(|h| self.types.contains_key(&h)));
+            }
+            if let Some(list) = props.get_mut("Children").and_then(Value::as_array_mut) {
+                list.retain(|r| id(r).is_some_and(|h| self.is_field(h)));
+            }
+        } else if field_list {
+            if let Some(list) = props.get_mut("Fields").and_then(Value::as_array_mut) {
+                let mut seen = HashSet::new();
+                list.retain(|r| id(r).is_some_and(|h| self.is_field(h) && seen.insert(h)));
             }
         }
         for (property, expected) in [

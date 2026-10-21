@@ -3731,11 +3731,6 @@ fn collect_extended(
     let class_name = value.class_name();
     match &value.data {
         crate::entities::ExtendedEntityData::Proxy(data) => {
-            let dxf_name = if data.dxf_subclass.is_empty() {
-                class_name
-            } else {
-                data.dxf_subclass.as_str()
-            };
             field_common(
                 doc,
                 &value.common,
@@ -3744,16 +3739,19 @@ fn collect_extended(
                 0x1f2,
                 "AcDbProxyEntity",
                 false,
-                vec![
-                    ("ClassId", integer(data.class_id)),
-                    ("Data", bytes(&data.payload.data())),
-                    ("DxfClass", dxf_class(dxf_name)),
-                    ("DrawingFormat", integer(data.dwg_version)),
-                    ("MaintenanceVersion", integer(data.maintenance_version)),
-                    ("OriginalDataFormatDxf", bool_value(data.from_dxf)),
-                    ("ProxyClassId", integer(data.proxy_id)),
-                    ("Version", integer(data.version)),
-                ],
+                {
+                    let mut members = super::proxy::members(
+                        doc,
+                        data.class_id,
+                        data.dwg_version,
+                        data.maintenance_version,
+                        data.from_dxf,
+                        // The DXF reader has no handler for the entity data.
+                        false,
+                    );
+                    members.push(("ProxyClassId", integer(data.proxy_id)));
+                    members
+                },
                 out,
             );
         }

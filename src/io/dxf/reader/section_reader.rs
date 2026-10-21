@@ -9675,7 +9675,13 @@ impl<'a> SectionReader<'a> {
                 }
                 // Numeric values are right-aligned ("        1"); keep string
                 // codes verbatim.
-                1..=9 | 300..=309 => entries.push((pair.code, pair.value_string.clone())),
+                1..=9 | 300..=309 => {
+                    if pair.code == 301 {
+                        value.value_string_source =
+                            crate::objects::SourceText(pair.raw_value_string.clone());
+                    }
+                    entries.push((pair.code, pair.value_string.clone()));
+                }
                 _ => entries.push((pair.code, pair.value_string.trim().to_string())),
             }
         }

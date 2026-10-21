@@ -57,7 +57,8 @@ impl<'a> Sources<'a> {
 }
 
 /// These are the only properties read by the registration/replay passes.
-/// ProxyGeometries is a presence marker; Nodes needs only Expression edges.
+/// ProxyGeometries is a presence marker; Nodes needs only Expression edges;
+/// Children is the registered child fields of a Field.
 fn retain_metadata(value: &mut Value) {
     let p = value["props"].as_object_mut().expect("record properties");
     p.retain(|key, _| {
@@ -75,6 +76,7 @@ fn retain_metadata(value: &mut Value) {
                 | "BlockEnd"
                 | "Style"
                 | "Layout"
+                | "Children"
         )
     });
     if let Some(proxy) = p.get_mut("ProxyGeometries") {

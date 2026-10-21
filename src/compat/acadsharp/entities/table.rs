@@ -487,7 +487,7 @@ fn cad_value(v: &CellValue, metadata: bool, dxf: bool) -> Value {
     )
 }
 
-fn date_value(bytes: &[u8]) -> Value {
+pub(in crate::compat::acadsharp) fn date_value(bytes: &[u8]) -> Value {
     if !matches!(bytes.len(), 14 | 16) {
         return Value::Null;
     }

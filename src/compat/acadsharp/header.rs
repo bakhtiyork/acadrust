@@ -643,29 +643,61 @@ pub(super) fn header(doc: &CadDocument) -> Value {
     value
 }
 
-pub(super) fn classes(doc: &CadDocument) -> Value {
-    fn class_value(c: &crate::classes::DxfClass, source: bool) -> Value {
-        props(
-            "DxfClass",
-            [
-                ("ApplicationName", json!(c.application_name)),
-                // ACadSharp's DXF DxfClass starts at 500 and the DXF reader
-                // leaves that value unchanged. Native DWG/DXF registries keep
-                // their actual positional numbers.
-                (
-                    "ClassNumber",
-                    json!(if source { 500 } else { c.class_number }),
-                ),
-                ("CppClassName", json!(c.cpp_class_name)),
-                ("DwgVersion", json!(c.dwg_version)),
-                ("DxfName", json!(c.dxf_name)),
-                ("InstanceCount", json!(c.instance_count)),
-                ("ProxyFlags", json!(c.proxy_flags.0)),
-                ("WasZombie", json!(c.was_zombie)),
-            ],
-        )
-    }
+fn class_value(c: &crate::classes::DxfClass, source: bool) -> Value {
+    props(
+        "DxfClass",
+        [
+            ("ApplicationName", json!(c.application_name)),
+            // ACadSharp's DXF DxfClass starts at 500 and the DXF reader
+            // leaves that value unchanged. Native DWG/DXF registries keep
+            // their actual positional numbers.
+            (
+                "ClassNumber",
+                json!(if source { 500 } else { c.class_number }),
+            ),
+            ("CppClassName", json!(c.cpp_class_name)),
+            ("DwgVersion", json!(c.dwg_version)),
+            ("DxfName", json!(c.dxf_name)),
+            ("InstanceCount", json!(c.instance_count)),
+            ("ProxyFlags", json!(c.proxy_flags.0)),
+            ("WasZombie", json!(c.was_zombie)),
+        ],
+    )
+}
 
+/// The class `DxfClassCollection.TryGetByClassNumber` finds: the first class
+/// of the name-deduplicated collection with this number (DXF classes are all
+/// numbered 500).
+pub(super) fn class_by_number(doc: &CadDocument, number: i64) -> Option<Value> {
+    fn find<'a>(
+        classes: impl Iterator<Item = &'a crate::classes::DxfClass> + Clone,
+        source: bool,
+        number: i64,
+    ) -> Option<Value> {
+        let shown = |c: &crate::classes::DxfClass| {
+            if source {
+                500
+            } else {
+                i64::from(c.class_number)
+            }
+        };
+        let (index, class) = classes.clone().enumerate().find(|(_, c)| shown(c) == number)?;
+        // A class whose name repeats an earlier one is not in the collection.
+        if classes
+            .take(index)
+            .any(|c| c.dxf_name.eq_ignore_ascii_case(&class.dxf_name))
+        {
+            return None;
+        }
+        Some(class_value(class, source))
+    }
+    match doc.classes.source_classes() {
+        Some(source) => find(source.iter(), true, number),
+        None => find(doc.classes.iter().collect::<Vec<_>>().into_iter(), false, number),
+    }
+}
+
+pub(super) fn classes(doc: &CadDocument) -> Value {
     // ACadSharp uses a case-insensitive, name-keyed collection for both
     // formats. Keep the first entry without altering native positional data.
     let mut seen = std::collections::HashSet::new();

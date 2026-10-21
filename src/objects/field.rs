@@ -28,6 +28,10 @@ pub struct Field {
     pub evaluation_error_message: String,
     pub value: CellValue,
     pub value_string: String,
+    /// DXF group 301 before caret-escape decoding, when decoding changed it.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[doc(hidden)]
+    pub value_string_source: super::SourceText,
     pub value_string_length: i32,
     pub child_values: Vec<FieldChildValue>,
     pub xdata: crate::xdata::ExtendedData,
