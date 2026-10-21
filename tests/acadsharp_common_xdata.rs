@@ -129,13 +129,13 @@ fn raw_layer_handle_patch_matches_record_position() {
 }
 
 #[test]
-fn wide_eed_nul_is_native_but_trimmed_in_compat_dump() {
+fn wide_eed_terminator_is_not_part_of_the_native_string_nor_of_the_compat_dump() {
     let payload = [
         0, 7, 0, b'D', 0, b'S', 0, b'T', 0, b'Y', 0, b'L', 0, b'E', 0, 0, 0,
     ];
     assert_eq!(
         decode_values(&payload, true, |_| None),
-        Some(vec![XDataValue::String("DSTYLE\0".to_owned())])
+        Some(vec![XDataValue::String("DSTYLE".to_owned())])
     );
 
     let application = 0x702_u64;

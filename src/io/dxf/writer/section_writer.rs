@@ -22,6 +22,7 @@ use crate::types::{Color, DxfVersion, Handle, LineWeight, Vector3};
 use crate::xdata::{ExtendedData, ExtendedDataRecord, XDataValue};
 
 use super::stream_writer::{DxfStreamWriter, DxfStreamWriterExt};
+use super::ToDxfDegrees;
 use std::collections::{HashMap, HashSet};
 
 /// Sanitize a symbol table record name: strip control characters and
@@ -178,6 +179,24 @@ fn source_tag<'a>(source: &'a crate::entities::text::TextSource, tag: &'a str) -
     match &source.tag {
         Some((original, recovered)) if recovered == tag => original,
         _ => tag,
+    }
+}
+
+/// Group 1 of a multiline ATTRIB/ATTDEF. The DXF reader takes the text of such an attribute from its embedded MTEXT
+/// and keeps the record's own group 1 (which AutoCAD writes empty) as the source value; while the value is that
+/// unedited MTEXT text, the record's own group 1 is written back. Otherwise (or when no embedded MTEXT is written,
+/// before R2018) the value is.
+fn attribute_own_value<'a>(
+    value: &'a str,
+    embedded: Option<&MText>,
+    source: Option<&'a crate::entities::text::TextSource>,
+) -> &'a str {
+    let from_embedded = embedded.is_some_and(|mtext| mtext.value == value);
+    match source {
+        Some(source) if from_embedded && source.decoded_value.as_deref() == Some(value) => {
+            source.value.as_deref().unwrap_or(value)
+        }
+        _ => value,
     }
 }
 
@@ -776,7 +795,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$LUPREC", |w| w.write_i16(70, hdr.linear_unit_precision))?;
         self.write_header_variable("$AUNITS", |w| w.write_i16(70, hdr.angular_unit_format))?;
         self.write_header_variable("$AUPREC", |w| w.write_i16(70, hdr.angular_unit_precision))?;
-        self.write_header_variable("$ANGBASE", |w| w.write_double(50, hdr.angle_base.to_degrees()))?;
+        self.write_header_variable("$ANGBASE", |w| w.write_double(50, hdr.angle_base.to_dxf_degrees()))?;
         self.write_header_variable("$ANGDIR", |w| w.write_i16(70, hdr.angle_direction))?;
         self.write_header_variable("$MEASUREMENT", |w| w.write_i16(70, hdr.measurement))?;
         self.write_header_variable("$INSUNITS", |w| w.write_i16(70, hdr.insertion_units))?;
@@ -1029,6 +1048,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.write_header_variable("$TILEMODELIGHTSYNCH", |w| {
                 w.write_byte(280, hdr.tile_model_light_synch.min(1))
             })?;
+            // The current material (a hard pointer, R2007+); null is the default and stays out.
+            if !hdr.current_material_handle.is_null() {
+                self.write_header_variable("$CMATERIAL", |w| {
+                    w.write_handle(347, hdr.current_material_handle)
+                })?;
+            }
             self.write_header_variable("$REALWORLDSCALE", |w| {
                 w.write_bool(290, hdr.real_world_scale)
             })?;
@@ -1561,11 +1586,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Snap rotation
         self.writer
-            .write_double(50, vport.snap_rotation.to_degrees())?;
+            .write_double(50, vport.snap_rotation.to_dxf_degrees())?;
 
         // View twist angle
         self.writer
-            .write_double(51, vport.view_twist.to_degrees())?;
+            .write_double(51, vport.view_twist.to_dxf_degrees())?;
 
         let mut view_mode = 0;
         if vport.perspective {
@@ -1738,7 +1763,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_handle(340, style_handle)?;
                 self.writer.write_double(46, c.scale)?;
                 // `rotation` is stored in radians; DXF code 50 is in degrees.
-                self.writer.write_double(50, c.rotation.to_degrees())?;
+                self.writer.write_double(50, c.rotation.to_dxf_degrees())?;
                 self.writer.write_double(44, c.offset[0])?;
                 self.writer.write_double(45, c.offset[1])?;
                 if let Some(t) = c.text() {
@@ -1862,6 +1887,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Plot flag (code 290 is Bool type - single byte in binary)
         self.writer.write_bool(290, layer.is_plottable)?;
+        // R2007+ layer material (hard pointer).
+        if self.dxf_version >= DxfVersion::AC1021 && !layer.material.is_null() {
+            self.writer.write_handle(347, layer.material)?;
+        }
 
         let mut generated = Vec::new();
         // AutoCAD stores layer transparency as AcCmTransparency XDATA.
@@ -1980,7 +2009,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(40, style.height)?;
         self.writer.write_double(41, style.width_factor)?;
         // Group 50 is in degrees; the entity stores radians.
-        self.writer.write_double(50, style.oblique_angle.to_degrees())?;
+        self.writer.write_double(50, style.oblique_angle.to_dxf_degrees())?;
         // Text generation flags: 2 = backward, 4 = upside down.
         let mut generation: i16 = 0;
         if style.flags.backward {
@@ -2064,7 +2093,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(43, view.front_clip)?;
         self.writer.write_double(44, view.back_clip)?;
         self.writer
-            .write_double(50, view.twist_angle.to_degrees())?;
+            .write_double(50, view.twist_angle.to_dxf_degrees())?;
         let mut view_mode = 0;
         if view.perspective {
             view_mode |= 1;
@@ -2316,7 +2345,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
 
         // Postfix / suffix
-        if !dimstyle.dimpost.is_empty() && dimstyle.dimpost != "<>" {
+        // An empty DIMPOST is stated (AutoCAD writes it so); the native default "<>" is what an absent group reads as.
+        if dimstyle.dimpost != "<>" {
             self.writer.write_string(3, &dimstyle.dimpost)?;
         }
         if !dimstyle.dimapost.is_empty() {
@@ -2354,7 +2384,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if has_r2007_dim_vars && dimstyle.dimjogang != std::f64::consts::FRAC_PI_4 {
             // Clamp to valid range [5°..90°]
             put! { 50, dimjogang, self.writer
-                .write_double(50, dimstyle.dimjogang.to_degrees().clamp(5.0, 90.0))? }
+                .write_double(50, dimstyle.dimjogang.to_dxf_degrees().clamp(5.0, 90.0))? }
         }
 
         // Floats 140-148
@@ -3091,8 +3121,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_double(45, data.right_offset)?;
                 self.writer.write_double(46, data.left_offset)?;
                 self.writer
-                    .write_double(50, data.start_angle.to_degrees())?;
-                self.writer.write_double(51, data.end_angle.to_degrees())?;
+                    .write_double(50, data.start_angle.to_dxf_degrees())?;
+                self.writer.write_double(51, data.end_angle.to_dxf_degrees())?;
                 self.writer.write_i16(70, data.reverse as i16)?;
                 self.writer.write_i16(71, data.text_direction)?;
                 self.writer.write_i16(72, data.alignment)?;
@@ -3544,7 +3574,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Groups 50..55 are angle codes: the reference application stores
         // those matrix elements in degrees.
         for (index, item) in crate::entities::surface::transpose_matrix(value.transform).iter().enumerate() {
-            let item = if index >= 10 { item.to_degrees() } else { *item };
+            let item = if index >= 10 { item.to_dxf_degrees() } else { *item };
             self.writer.write_double(40 + index as i32, item)?;
         }
         self.writer.write_color(62, value.color)?;
@@ -4545,8 +4575,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
         self.write_normal(arc.normal)?;
         self.writer.write_subclass("AcDbArc")?;
-        self.writer.write_double(50, arc.start_angle.to_degrees())?;
-        self.writer.write_double(51, arc.end_angle.to_degrees())?;
+        self.writer.write_double(50, arc.start_angle.to_dxf_degrees())?;
+        self.writer.write_double(51, arc.end_angle.to_dxf_degrees())?;
         Ok(())
     }
 
@@ -4701,7 +4731,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
             self.writer.write_i16(70, vertex.flags.bits() as i16)?;
             if vertex.id != 0 { self.writer.write_i32(91, vertex.id)?; }
-            self.writer.write_double(50, vertex.curve_tangent.to_degrees())?;
+            self.writer.write_double(50, vertex.curve_tangent.to_dxf_degrees())?;
             self.write_xdata(&common.extended_data)?;
         }
 
@@ -4832,13 +4862,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(40, text.height)?;
         self.writer.write_string(1, &text.value)?;
         if text.rotation != 0.0 {
-            self.writer.write_double(50, text.rotation.to_degrees())?;
+            self.writer.write_double(50, text.rotation.to_dxf_degrees())?;
         }
         if text.width_factor != 1.0 {
             self.writer.write_double(41, text.width_factor)?;
         }
         if text.oblique_angle != 0.0 {
-            self.writer.write_double(51, text.oblique_angle.to_degrees())?;
+            self.writer.write_double(51, text.oblique_angle.to_dxf_degrees())?;
         }
         self.writer.write_string(7, &text.style)?;
         if text.generation_flags != 0 {
@@ -4868,10 +4898,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_mtext_value(&mtext.value, Self::mtext_lexical_value(mtext))?;
 
         self.writer.write_string(7, &mtext.style)?;
-        let x_direction = mtext
-            .dwg_x_direction
-            .unwrap_or_else(|| Vector3::new(mtext.rotation.cos(), mtext.rotation.sin(), 0.0));
-        self.writer.write_point3d(11, x_direction)?;
+        // The X-axis direction (group 11) is stated when the text has one or is rotated; an unrotated text without
+        // one leaves the group out, as AutoCAD does, so the reader does not gain a direction the source never had.
+        if mtext.dwg_x_direction.is_some() || mtext.rotation != 0.0 {
+            let x_direction = mtext
+                .dwg_x_direction
+                .unwrap_or_else(|| Vector3::new(mtext.rotation.cos(), mtext.rotation.sin(), 0.0));
+            self.writer.write_point3d(11, x_direction)?;
+        }
         // Laid-out text extents (output-only). Skipped when never computed so
         // files authored without layout info round-trip unchanged.
         if mtext.extents_width > 0.0 {
@@ -5006,6 +5040,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     }
 
     fn write_mtext_value(&mut self, value: &str, lexical: Option<&str>) -> Result<()> {
+        // A line feed in the text is not a paragraph break (`\P`): it is written as AutoCAD spells it, `^J` (a
+        // carriage return `^M`), and a binary DXF string holds it as is.
+        let lexical = lexical.or_else(|| value.contains(['\n', '\r']).then_some(value));
         // A value that still equals its decoded source spelling is written as the source spelled it (a line
         // break as ^J, a degree sign as \U+00B0), chunked like any other text.
         if let Some(lexical) = lexical.filter(|_| self.writer.writes_source_spelling()) {
@@ -5105,16 +5142,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             .write_i16(73, spline.control_points.len() as i16)?;
         self.writer.write_i16(74, spline.fit_points.len() as i16)?;
 
-        // Knot / control-point / fit tolerances (round-trip the stored values).
-        // A DWG fit-point record (scenario 2) stores no tolerances; the reference then keeps its initialisers.
+        // Knot / control-point / fit tolerances (round-trip the stored values). A DWG fit-point record (scenario 2)
+        // stores no knot or control tolerances: the groups are left out, so a DXF reader applies its default
+        // (1e-7 in the DXF reference).
         let record_without_tolerances = spline.dwg_scenario == Some(2) && spline.knot_tolerance == 0.0 && spline.control_tolerance == 0.0;
-        let (knot_tolerance, control_tolerance) = if record_without_tolerances {
-            (1e-7, 1e-7)
-        } else {
-            (spline.knot_tolerance, spline.control_tolerance)
-        };
-        self.writer.write_double(42, knot_tolerance)?;
-        self.writer.write_double(43, control_tolerance)?;
+        if !record_without_tolerances {
+            self.writer.write_double(42, spline.knot_tolerance)?;
+            self.writer.write_double(43, spline.control_tolerance)?;
+        }
         self.writer.write_double(44, spline.fit_tolerance)?;
 
         // Start / end tangents (only when set).
@@ -5222,10 +5257,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(42, base.actual_measurement)?;
         // DXF angles are in degrees; internal representation is radians.
         self.writer
-            .write_double(53, base.text_rotation.to_degrees())?;
+            .write_double(53, base.text_rotation.to_dxf_degrees())?;
         if base.horizontal_direction.abs() > 1e-12 {
             self.writer
-                .write_double(51, base.horizontal_direction.to_degrees())?;
+                .write_double(51, base.horizontal_direction.to_dxf_degrees())?;
         }
         // Groups the DXF source left out stay out (the reference reader then uses its own defaults) unless the
         // value was changed from the native default.
@@ -5273,7 +5308,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_point3d(14, dim.second_point)?;
         if dim.ext_line_rotation.abs() > 1e-12 {
             self.writer
-                .write_double(52, dim.ext_line_rotation.to_degrees())?;
+                .write_double(52, dim.ext_line_rotation.to_dxf_degrees())?;
         }
         Ok(())
     }
@@ -5285,10 +5320,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_point3d(13, dim.first_point)?;
         self.writer.write_point3d(14, dim.second_point)?;
         // DXF dimension-line rotation is in degrees.
-        self.writer.write_double(50, dim.rotation.to_degrees())?;
+        self.writer.write_double(50, dim.rotation.to_dxf_degrees())?;
         if dim.ext_line_rotation.abs() > 1e-12 {
             self.writer
-                .write_double(52, dim.ext_line_rotation.to_degrees())?;
+                .write_double(52, dim.ext_line_rotation.to_dxf_degrees())?;
         }
         self.writer.write_subclass("AcDbRotatedDimension")?;
         Ok(())
@@ -5441,7 +5476,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         if !hatch.is_solid {
             self.writer
-                .write_double(52, hatch.pattern_angle.to_degrees())?;
+                .write_double(52, hatch.pattern_angle.to_dxf_degrees())?;
             self.writer.write_double(41, hatch.pattern_scale)?;
             self.writer
                 .write_i16(77, if hatch.is_double { 1 } else { 0 })?;
@@ -5450,7 +5485,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer
                 .write_i16(78, hatch.pattern.lines.len() as i16)?;
             for line in &hatch.pattern.lines {
-                self.writer.write_double(53, line.angle.to_degrees())?;
+                self.writer.write_double(53, line.angle.to_dxf_degrees())?;
                 self.writer.write_double(43, line.base_point.x)?;
                 self.writer.write_double(44, line.base_point.y)?;
                 self.writer.write_double(45, line.offset.x)?;
@@ -5510,14 +5545,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i16(76, hatch.pattern_type as i16)?;
         if !hatch.is_solid {
             self.writer
-                .write_double(52, hatch.pattern_angle.to_degrees())?;
+                .write_double(52, hatch.pattern_angle.to_dxf_degrees())?;
             self.writer.write_double(41, hatch.pattern_scale)?;
             self.writer
                 .write_i16(77, if hatch.is_double { 1 } else { 0 })?;
             self.writer
                 .write_i16(78, hatch.pattern.lines.len() as i16)?;
             for line in &hatch.pattern.lines {
-                self.writer.write_double(53, line.angle.to_degrees())?;
+                self.writer.write_double(53, line.angle.to_dxf_degrees())?;
                 self.writer.write_double(43, line.base_point.x)?;
                 self.writer.write_double(44, line.base_point.y)?;
                 self.writer.write_double(45, line.offset.x)?;
@@ -5617,8 +5652,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_double(10, arc.center.x)?;
                 self.writer.write_double(20, arc.center.y)?;
                 self.writer.write_double(40, arc.radius)?;
-                self.writer.write_double(50, arc.start_angle.to_degrees())?;
-                self.writer.write_double(51, arc.end_angle.to_degrees())?;
+                self.writer.write_double(50, arc.start_angle.to_dxf_degrees())?;
+                self.writer.write_double(51, arc.end_angle.to_dxf_degrees())?;
                 self.writer
                     .write_i16(73, if arc.counter_clockwise { 1 } else { 0 })?;
             }
@@ -5631,8 +5666,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer
                     .write_double(21, ellipse.major_axis_endpoint.y)?;
                 self.writer.write_double(40, ellipse.minor_axis_ratio)?;
-                self.writer.write_double(50, ellipse.start_angle.to_degrees())?;
-                self.writer.write_double(51, ellipse.end_angle.to_degrees())?;
+                self.writer.write_double(50, ellipse.start_angle.to_dxf_degrees())?;
+                self.writer.write_double(51, ellipse.end_angle.to_dxf_degrees())?;
                 self.writer
                     .write_i16(73, if ellipse.counter_clockwise { 1 } else { 0 })?;
             }
@@ -5752,7 +5787,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(43, insert.z_scale())?;
         }
         if insert.rotation != 0.0 {
-            self.writer.write_double(50, insert.rotation.to_degrees())?;
+            self.writer.write_double(50, insert.rotation.to_dxf_degrees())?;
         }
         if insert.column_count > 1 {
             self.writer.write_i16(70, insert.column_count as i16)?;
@@ -6005,8 +6040,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_double(45, viewport.view_height)?;
 
         // Snap and twist angles
-        self.writer.write_double(50, viewport.snap_angle.to_degrees())?;
-        self.writer.write_double(51, viewport.twist_angle.to_degrees())?;
+        self.writer.write_double(50, viewport.snap_angle.to_dxf_degrees())?;
+        self.writer.write_double(51, viewport.twist_angle.to_dxf_degrees())?;
 
         // Circle sides
         self.writer.write_i16(72, viewport.circle_sides)?;
@@ -6053,11 +6088,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(146, viewport.elevation)?;
         }
 
-        // Grid major; a DXF source without the group keeps it out unless the value was changed.
+        // Grid major (R2007+); a DXF source without the group, or a DWG older than R2007 (no such field in its
+        // record), keeps it out unless the value was changed.
         let grid_major_absent = viewport
             .source
             .as_ref()
-            .is_some_and(|source| source.dxf_codes.is_some() && !source.contains(61));
+            .is_some_and(|source| source.dxf_codes.is_some() && !source.contains(61))
+            || self.dwg_source.is_some_and(|version| version < DxfVersion::AC1021);
         if viewport.grid_major != 0 && !(grid_major_absent && viewport.grid_major == Viewport::new().grid_major) {
             self.writer.write_i16(61, viewport.grid_major)?;
         }
@@ -6146,23 +6183,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Text height
         self.writer.write_double(40, attdef.height)?;
 
-        // Default value (a multiline one also lives in the embedded MTEXT;
-        // the reference application reads it from here too)
-        self.write_attribute_text_value(
-            multiline,
+        // Default value (a multiline one lives in the embedded MTEXT)
+        self.write_attribute_text_value(attribute_own_value(
             &attdef.default_value,
-            attdef.embedded_mtext.as_deref(),
-        )?;
+            attdef.embedded_mtext.as_deref().filter(|_| multiline),
+            attdef.source.as_deref(),
+        ))?;
 
         // Rotation
-        self.writer.write_double(50, attdef.rotation.to_degrees())?;
+        self.writer.write_double(50, attdef.rotation.to_dxf_degrees())?;
 
         // Width factor
         self.writer.write_double(41, attdef.width_factor)?;
 
         // Oblique angle
         self.writer
-            .write_double(51, attdef.oblique_angle.to_degrees())?;
+            .write_double(51, attdef.oblique_angle.to_dxf_degrees())?;
 
         // Text style
         self.writer.write_string(7, &attdef.text_style)?;
@@ -6289,23 +6325,16 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(43, mtext.extents_height)?;
         }
         if mtext.rotation != 0.0 {
-            self.writer.write_double(50, mtext.rotation.to_degrees())?;
+            self.writer.write_double(50, mtext.rotation.to_dxf_degrees())?;
         }
         self.writer.write_i16(73, mtext.line_spacing_style as i16)?;
         self.writer.write_double(44, mtext.line_spacing_factor)?;
         Ok(())
     }
 
-    fn write_attribute_text_value(
-        &mut self,
-        multiline: bool,
-        value: &str,
-        embedded: Option<&MText>,
-    ) -> Result<()> {
-        let value = match embedded {
-            Some(mtext) if multiline => mtext.value.as_str(),
-            _ => value,
-        };
+    /// Group 1 of an ATTRIB/ATTDEF is the record's own text value. A multiline attribute keeps its text in the
+    /// embedded MTEXT, and AutoCAD writes group 1 empty then: the MTEXT text is not copied here.
+    fn write_attribute_text_value(&mut self, value: &str) -> Result<()> {
         // DXF is line based: a line break in the value would end the group.
         if value.contains(['\n', '\r']) {
             let value = value.replace("\r\n", "\\P").replace(['\r', '\n'], "\\P");
@@ -6331,23 +6360,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Text height
         self.writer.write_double(40, attrib.height)?;
 
-        // Value (a multiline one also lives in the embedded MTEXT; the
-        // reference application reads it from here too)
-        self.write_attribute_text_value(
-            multiline,
+        // Value (a multiline one lives in the embedded MTEXT)
+        self.write_attribute_text_value(attribute_own_value(
             &attrib.value,
-            attrib.embedded_mtext.as_deref(),
-        )?;
+            attrib.embedded_mtext.as_deref().filter(|_| multiline),
+            attrib.source.as_deref(),
+        ))?;
 
         // Rotation
-        self.writer.write_double(50, attrib.rotation.to_degrees())?;
+        self.writer.write_double(50, attrib.rotation.to_dxf_degrees())?;
 
         // Width factor
         self.writer.write_double(41, attrib.width_factor)?;
 
         // Oblique angle
         self.writer
-            .write_double(51, attrib.oblique_angle.to_degrees())?;
+            .write_double(51, attrib.oblique_angle.to_dxf_degrees())?;
 
         // Text style
         self.writer.write_string(7, &attrib.text_style)?;
@@ -6545,8 +6573,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     }
                 }
                 0x10 => {
-                    if point_size {
-                        self.writer.write_i32(92, if value.data_size != 0 { value.data_size } else { 16 })?;
+                    // AutoCAD's own files carry no size before a point; one is written only when the source had it.
+                    if point_size && value.data_size != 0 {
+                        self.writer.write_i32(92, value.data_size)?;
                     }
                     self.writer.write_point2d(
                         11,
@@ -6554,8 +6583,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     )?;
                 }
                 0x20 => {
-                    if point_size {
-                        self.writer.write_i32(92, if value.data_size != 0 { value.data_size } else { 24 })?;
+                    if point_size && value.data_size != 0 {
+                        self.writer.write_i32(92, value.data_size)?;
                     }
                     self.writer.write_point3d(11, value.point_value)?;
                 }
@@ -8534,10 +8563,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Start angle (code 51) — DXF expects degrees
         self.writer
-            .write_double(51, style.start_angle.to_degrees())?;
+            .write_double(51, style.start_angle.to_dxf_degrees())?;
 
         // End angle (code 52) — DXF expects degrees
-        self.writer.write_double(52, style.end_angle.to_degrees())?;
+        self.writer.write_double(52, style.end_angle.to_dxf_degrees())?;
 
         // Number of elements (code 71)
         self.writer.write_i16(71, style.element_count() as i16)?;
@@ -9202,7 +9231,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
             ObjectContextKind::MTextAttribute(value) => {
                 self.writer.write_i16(70, value.horizontal_mode)?;
-                self.writer.write_double(50, value.rotation.to_degrees())?;
+                self.writer.write_double(50, value.rotation.to_dxf_degrees())?;
                 self.writer.write_point2d(10, value.insertion)?;
                 self.writer.write_point2d(11, value.alignment)?;
                 let has_context = value.enable_context && value.context.is_some();
@@ -9267,7 +9296,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_handle(330, value.view)?;
                 self.writer.write_point3d(10, value.view_normal)?;
                 self.writer
-                    .write_double(51, value.view_rotation.to_degrees())?;
+                    .write_double(51, value.view_rotation.to_dxf_degrees())?;
                 self.writer.write_bool(290, value.evaluate_hatch)?;
             }
             ObjectContextKind::Opaque => {}
@@ -9284,7 +9313,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer
             .write_i16(78, value.pattern_lines.len() as i16)?;
         for line in &value.pattern_lines {
-            self.writer.write_double(53, line.angle.to_degrees())?;
+            self.writer.write_double(53, line.angle.to_dxf_degrees())?;
             self.writer.write_double(43, line.base_point.x)?;
             self.writer.write_double(44, line.base_point.y)?;
             self.writer.write_double(45, line.offset.x)?;
@@ -9429,7 +9458,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbVisualStyle")?;
         self.writer.write_string(2, &obj.description)?;
         self.writer.write_i16(70, obj.style_type)?;
-        if self.dxf_version >= DxfVersion::AC1027 {
+        // The R2013 layout holds every property; the older layouts hold only the core ones. A style that carries
+        // more than the core properties is written in the R2013 layout whatever the file version, so none is lost.
+        let extended = self.dxf_version >= DxfVersion::AC1027
+            || obj.properties.len() > Self::visual_style_core_properties(obj).len();
+        if extended {
             let mut properties = Self::visual_style_core_properties(obj);
             properties.extend(Self::visual_style_extended_properties(obj));
             self.writer.write_i16(177, obj.extended_lighting_model)?;
@@ -9550,6 +9583,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         );
         let gate = MaterialGate { source: obj.dxf_source.as_deref(), minimal: builtin };
         let defaults = Material::new();
+        // Translucence, self-illumination, reflectivity, illumination model, channel flags and mode are R2007+
+        // fields of a DWG material: from an older DWG they hold the native default, which the file never stated,
+        // so only a value that was changed is written.
+        let r2007_fields = !self.dwg_source.is_some_and(|version| version < DxfVersion::AC1021);
+        let stated_r2007 = |code: usize, differs: bool| {
+            if r2007_fields {
+                gate.writes(code, differs)
+            } else {
+                differs
+            }
+        };
         if !obj.description.is_empty() {
             self.writer.write_string(2, &obj.description)?;
         }
@@ -9571,7 +9615,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(145, obj.refraction_index)?;
         }
         self.write_material_dxf_map(&obj.refraction_map, &gate, 146, 273, 9, 274, 275, 276, 147)?;
-        if gate.writes(148, obj.translucence != defaults.translucence) {
+        if stated_r2007(148, obj.translucence != defaults.translucence) {
             self.writer.write_double(148, obj.translucence)?;
         }
         // Group 90 is the self-illumination integer unless it is the first one of an RGB ambient colour. It is not
@@ -9583,20 +9627,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer
                 .write_i32(90, obj.self_illumination.round() as i32)?;
         }
-        if gate.writes(149, obj.self_illumination != defaults.self_illumination) {
+        if stated_r2007(149, obj.self_illumination != defaults.self_illumination) {
             self.writer.write_double(149, obj.self_illumination)?;
         }
-        if gate.writes(468, obj.reflectivity != defaults.reflectivity) {
+        if stated_r2007(468, obj.reflectivity != defaults.reflectivity) {
             self.writer.write_double(468, obj.reflectivity)?;
         }
-        if gate.writes(93, obj.illumination_model != defaults.illumination_model) {
+        if stated_r2007(93, obj.illumination_model != defaults.illumination_model) {
             self.writer.write_i32(93, obj.illumination_model)?;
         }
         // Built-in materials always carry the channel flags; the others when the source or an edit has them.
-        if builtin && obj.dxf_source.is_none() || gate.writes(94, obj.channel_flags != defaults.channel_flags) {
+        if builtin && obj.dxf_source.is_none() && r2007_fields
+            || stated_r2007(94, obj.channel_flags != defaults.channel_flags)
+        {
             self.writer.write_i32(94, obj.channel_flags)?;
         }
-        if gate.writes(282, obj.mode != defaults.mode) {
+        if stated_r2007(282, obj.mode != defaults.mode) {
             self.writer.write_i16(282, obj.mode as i16)?;
         }
         // Advanced properties (460-465, 290, 293, 270-273 and the normal map)
@@ -9768,7 +9814,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 .write_point3d(11, obj.obsolete_observation_point)?;
             let north_angle =
                 std::f64::consts::FRAC_PI_2 - obj.north_direction.y.atan2(obj.north_direction.x);
-            self.writer.write_double(52, north_angle.to_degrees())?;
+            self.writer.write_double(52, north_angle.to_dxf_degrees())?;
             self.writer.write_double(43, obj.obsolete_scale_vector.x)?;
             self.writer.write_double(44, obj.obsolete_scale_vector.y)?;
             self.writer.write_double(45, obj.obsolete_scale_vector.z)?;
@@ -10358,15 +10404,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
             for value in &record.values {
                 match value {
-                    // A DWG string keeps its UTF-16 terminator; a NUL is not part of a DXF string.
                     XDataValue::String(s) => {
-                        self.writer.write_string(1000, s.trim_end_matches('\0'))?;
+                        self.writer.write_string(1000, s)?;
                     }
                     XDataValue::ControlString(s) => {
-                        self.writer.write_string(1002, s.trim_end_matches('\0'))?;
+                        self.writer.write_string(1002, s)?;
                     }
                     XDataValue::LayerName(s) => {
-                        self.writer.write_string(1003, s.trim_end_matches('\0'))?;
+                        self.writer.write_string(1003, s)?;
                     }
                     XDataValue::BinaryData(data) => {
                         self.writer.write_binary(1004, data)?;
@@ -10489,7 +10534,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             for size in &ctx.column_sizes {
                 self.writer.write_double(144, *size)?;
             }
-            if self.dxf_version >= DxfVersion::AC1027 {
+            // Group 295 is R2013+, but the reader accepts it in any version (the default is true): an earlier
+            // file that stated false keeps it.
+            if self.dxf_version >= DxfVersion::AC1027 || !ctx.word_break {
                 self.writer.write_bool(295, ctx.word_break)?;
             }
         }
@@ -10631,7 +10678,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             for size in &ctx.column_sizes {
                 self.writer.write_double(144, *size)?;
             }
-            if self.dxf_version >= DxfVersion::AC1027 {
+            // Group 295 is R2013+, but the reader accepts it in any version (the default is true): an earlier
+            // file that stated false keeps it.
+            if self.dxf_version >= DxfVersion::AC1027 || !ctx.word_break {
                 self.writer.write_bool(295, ctx.word_break)?;
             }
         }
@@ -11077,8 +11126,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if self.needs_sab() {
             // AC1027+: SAB binary format stored in ACDSDATA section
             self.writer.write_bool(290, false)?;
-            self.writer
-                .write_string(2, "{00000000-0000-0000-0000-000000000000}")?;
+            // The entity's unique identifier (group 2, R2013+); the zero GUID when it has none.
+            self.writer.write_string(2, modeler_uid(&solid.uid))?;
 
             // Convert SAT to SAB and queue for ACDSDATA section
             self.queue_sab_data(&solid.acis_data, solid.common.handle);
@@ -11108,8 +11157,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         if self.needs_sab() {
             self.writer.write_bool(290, false)?;
-            self.writer
-                .write_string(2, "{00000000-0000-0000-0000-000000000000}")?;
+            // The entity's unique identifier (group 2, R2013+); the zero GUID when it has none.
+            self.writer.write_string(2, modeler_uid(&region.uid))?;
             self.queue_sab_data(&region.acis_data, region.common.handle);
         } else {
             self.writer.write_i16(70, 1)?;
@@ -11127,8 +11176,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         if self.needs_sab() {
             self.writer.write_bool(290, false)?;
-            self.writer
-                .write_string(2, "{00000000-0000-0000-0000-000000000000}")?;
+            // The entity's unique identifier (group 2, R2013+); the zero GUID when it has none.
+            self.writer.write_string(2, modeler_uid(&body.uid))?;
             self.queue_sab_data(&body.acis_data, body.common.handle);
         } else {
             self.writer.write_i16(70, 1)?;
@@ -12638,7 +12687,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Rotation
         if shape.rotation.abs() > 1e-10 {
-            self.writer.write_double(50, shape.rotation.to_degrees())?;
+            self.writer.write_double(50, shape.rotation.to_dxf_degrees())?;
         }
 
         // Relative X scale
@@ -12649,7 +12698,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Oblique angle
         if shape.oblique_angle.abs() > 1e-10 {
             self.writer
-                .write_double(51, shape.oblique_angle.to_degrees())?;
+                .write_double(51, shape.oblique_angle.to_dxf_degrees())?;
         }
 
         // Normal
@@ -12683,7 +12732,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // Rotation
         self.writer
-            .write_double(50, underlay.rotation.to_degrees())?;
+            .write_double(50, underlay.rotation.to_dxf_degrees())?;
 
         // Normal
         self.writer.write_double(210, underlay.normal.x)?;
@@ -13102,4 +13151,13 @@ fn wrap_sat_line(line: &str) -> Vec<&str> {
     }
     pieces.push(&line[start..]);
     pieces
+}
+
+/// The group 2 identifier of a modeler entity: its own GUID, or the zero GUID AutoCAD writes for none.
+fn modeler_uid(uid: &str) -> &str {
+    if uid.is_empty() {
+        "{00000000-0000-0000-0000-000000000000}"
+    } else {
+        uid
+    }
 }

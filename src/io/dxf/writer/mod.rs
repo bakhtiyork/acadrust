@@ -9,11 +9,41 @@ mod text_writer;
 mod r5a_tests;
 #[cfg(test)]
 mod r5a2_tests;
+#[cfg(test)]
+mod r5a3_tests;
 
 pub use binary_writer::DxfBinaryWriter;
 pub use section_writer::SectionWriter;
 pub use stream_writer::{value_type_for_code, DxfStreamWriter, DxfStreamWriterExt};
 pub use text_writer::DxfTextWriter;
+
+/// Angles are radians in the model and degrees in DXF. A plain `to_degrees` followed by the reader's `to_radians`
+/// can come back one unit in the last place away; this picks the degree value (the plain one first, then its
+/// neighbours) that reads back as exactly the stored radians, when one exists.
+pub(crate) trait ToDxfDegrees {
+    fn to_dxf_degrees(self) -> f64;
+}
+
+impl ToDxfDegrees for f64 {
+    fn to_dxf_degrees(self) -> f64 {
+        let plain = self.to_degrees();
+        if !plain.is_finite() || plain.to_radians() == self {
+            return plain;
+        }
+        let (mut up, mut down) = (plain, plain);
+        for _ in 0..4 {
+            up = up.next_up();
+            down = down.next_down();
+            if up.to_radians() == self {
+                return up;
+            }
+            if down.to_radians() == self {
+                return down;
+            }
+        }
+        plain
+    }
+}
 
 use crate::document::CadDocument;
 use crate::entities::EntityType;

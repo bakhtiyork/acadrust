@@ -4,7 +4,8 @@ pub(crate) const DEFAULT_FONT_FLAGS: i32 = 34;
 pub(crate) fn encode(wide: bool, typeface: &str, flags: i32) -> Vec<u8> {
     let mut b = vec![0];
     if wide {
-        let units: Vec<u16> = typeface.encode_utf16().collect();
+        // R2007+ strings are counted with their UTF-16 NUL terminator.
+        let units: Vec<u16> = typeface.encode_utf16().chain(std::iter::once(0)).collect();
         b.extend_from_slice(&(units.len() as u16).to_le_bytes());
         for u in units {
             b.extend_from_slice(&u.to_le_bytes());
@@ -31,12 +32,16 @@ pub(crate) fn decode(bytes: &[u8], wide: bool) -> Option<(String, i32)> {
             0 => {
                 let text = if wide {
                     let n = u16::from_le_bytes([*bytes.get(i)?, *bytes.get(i + 1)?]) as usize;
-                    let units: Vec<u16> = bytes
+                    let mut units: Vec<u16> = bytes
                         .get(i + 2..i + 2 + n * 2)?
                         .chunks_exact(2)
                         .map(|c| u16::from_le_bytes([c[0], c[1]]))
                         .collect();
                     i += 2 + n * 2;
+                    // The counted units end with a UTF-16 NUL terminator, which is not part of the name.
+                    if units.last() == Some(&0) {
+                        units.pop();
+                    }
                     String::from_utf16_lossy(&units)
                 } else {
                     let n = *bytes.get(i)? as usize;

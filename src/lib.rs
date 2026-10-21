@@ -266,3 +266,5 @@ mod hatch_origin;
 
 #[cfg(feature = "acadsharp-compat")]
 pub mod compat;
+#[cfg(feature = "acadsharp-compat")]
+pub use document::native_dump;

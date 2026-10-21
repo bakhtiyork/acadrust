@@ -471,10 +471,18 @@ fn table_cell_style_of_a_binary_file_writes_only_what_it_overrides() {
 }
 
 #[test]
-fn extended_data_strings_lose_their_trailing_nul() {
+fn extended_data_strings_of_a_dwg_reach_the_dxf_without_their_terminator() {
+    // The DWG reader removes the UTF-16 terminator of a wide EED string, so the DXF writer has nothing to trim.
+    let mut payload = vec![0u8];
+    let units: Vec<u16> = "name".encode_utf16().chain(std::iter::once(0)).collect();
+    payload.extend_from_slice(&(units.len() as u16).to_le_bytes());
+    for unit in units {
+        payload.extend_from_slice(&unit.to_le_bytes());
+    }
+    let decoded = crate::io::dwg::eed_codec::decode_values(&payload, true, |_| None).unwrap();
     let mut point = Point::new();
     let mut record = ExtendedDataRecord::new("ACAD");
-    record.values.push(crate::xdata::XDataValue::String("name\0".to_string()));
+    record.values = decoded;
     point.common.extended_data.add_record(record);
     let mut doc = CadDocument::new();
     doc.add_entity(EntityType::Point(point)).unwrap();

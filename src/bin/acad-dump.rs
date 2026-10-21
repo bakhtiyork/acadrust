@@ -48,8 +48,42 @@ fn write_dxf(args: &[std::ffi::OsString]) -> i32 {
     }
 }
 
+/// `native-dump <in.dwg|in.dxf> <out.jsonl>`: failsafe read, then the native dump of the model (no ACadSharp
+/// view; see `acadrust::native_dump`). Exit 0, 1 (`read failed:` on stderr), 2 (usage).
+fn native_dump(args: &[std::ffi::OsString]) -> i32 {
+    if args.len() != 4 {
+        eprintln!("usage: acad-dump native-dump <in.dwg|in.dxf> <out.jsonl>");
+        return 2;
+    }
+    let document = match read_document_file(Path::new(&args[2])) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("read failed: {error}");
+            return 1;
+        }
+    };
+    let file = match std::fs::File::create(&args[3]) {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("{error}");
+            return 2;
+        }
+    };
+    let mut writer = BufWriter::with_capacity(256 * 1024, file);
+    match acadrust::native_dump::write_native_dump(&document, &mut writer).and_then(|()| writer.flush()) {
+        Ok(()) => 0,
+        Err(error) => {
+            eprintln!("write failed: {error}");
+            1
+        }
+    }
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args_os().collect();
+    if args.len() > 1 && args[1] == "native-dump" {
+        std::process::exit(native_dump(&args));
+    }
     if args.len() > 1 && args[1] == "write-dxf" {
         std::process::exit(write_dxf(&args));
     }
