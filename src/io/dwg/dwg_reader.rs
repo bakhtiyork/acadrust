@@ -373,10 +373,11 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
     };
     let marker = [0xACu8, 0xD5, 0x5F, 0x64, 0x61, 0x74, 0x61, 0x5F]; // "\xAC\xD5_data_"
-    let mut out: Vec<(u64, Vec<u8>)> = Vec::new();
+    // (handle, segment sequence number, blob)
+    let mut listed: Vec<(u64, u32, Vec<u8>)> = Vec::new();
     // Records whose blob is not in the table's own data — handled below from
     // unclaimed blob segments elsewhere in the datastore. Kept in record order.
-    let mut orphan_handles: Vec<u64> = Vec::new();
+    let mut orphan_handles: Vec<(u64, u32)> = Vec::new();
     let mut claimed_starts: HashSet<usize> = HashSet::new();
     // A large datastore splits its records across several `_data_` segments, so
     // process every one whose content is a record table (opens with `col0=0x14`).
@@ -393,6 +394,10 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             .get(seg + 16..seg + 24)
             .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()) as usize);
         let seg_end = seg.saturating_add(seg_size).min(buf.len());
+        // An incrementally saved drawing keeps older revisions of a body in
+        // earlier-written segments; the segment's sequence number says which
+        // listing is current.
+        let seq = rd(seg + 8).unwrap_or(0);
         // Record table: (handle, cumulative data offset) per record.
         let mut recs: Vec<(u64, usize)> = Vec::new();
         let mut p = seg + 48;
@@ -419,7 +424,7 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             let region_end = recs.get(k + 1).map_or(seg_end, |&(_, o)| base + o);
             if region_start >= seg_end || region_end <= region_start {
                 if modeler_handles.contains(&handle) {
-                    orphan_handles.push(handle); // blob lives in an external segment
+                    orphan_handles.push((handle, seq)); // blob lives in an external segment
                 }
                 continue;
             }
@@ -430,7 +435,7 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
                 .or_else(|| region.windows(15).position(|w| w == b"ACIS BinaryFile"))
             else {
                 if modeler_handles.contains(&handle) {
-                    orphan_handles.push(handle); // blob lives in an external segment
+                    orphan_handles.push((handle, seq)); // blob lives in an external segment
                 }
                 continue;
             };
@@ -444,21 +449,48 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             let end_bound = (region_end + ACIS_TAGGED_END_MARKER.len()).min(seg_end);
             if let Some((end, marker_len)) = find_acds_end(buf, start, end_bound) {
                 claimed_starts.insert(start);
-                out.push((handle, buf[start..end + marker_len].to_vec()));
+                listed.push((handle, seq, buf[start..end + marker_len].to_vec()));
             }
         }
     }
+    // Keep only the current listing of each handle.
+    let mut current: HashMap<u64, u32> = HashMap::new();
+    for (handle, seq) in listed
+        .iter()
+        .map(|(handle, seq, _)| (*handle, *seq))
+        .chain(orphan_handles.iter().copied())
+    {
+        let best = current.entry(handle).or_insert(seq);
+        *best = (*best).max(seq);
+    }
+    let mut out: Vec<(u64, Vec<u8>)> = Vec::new();
+    let mut emitted: HashSet<u64> = HashSet::new();
+    for (handle, seq, blob) in listed.into_iter().rev() {
+        if current[&handle] == seq && emitted.insert(handle) {
+            out.push((handle, blob));
+        }
+    }
+    out.reverse();
     // A record can point to an external blob segment before or after its table.
     // Pair only blobs not already claimed by table offsets, and require an exact
     // count so stray magic cannot shift the association.
-    if !orphan_handles.is_empty() {
+    let mut orphan_seen = HashSet::new();
+    let mut orphans: Vec<u64> = orphan_handles
+        .iter()
+        .rev()
+        .filter(|(handle, seq)| current[handle] == *seq && !emitted.contains(handle))
+        .map(|(handle, _)| *handle)
+        .filter(|handle| orphan_seen.insert(*handle))
+        .collect();
+    orphans.reverse();
+    if !orphans.is_empty() {
         let pool: Vec<Vec<u8>> = extract_acds_sab_blob_ranges(buf)
             .into_iter()
             .filter(|(start, _)| !claimed_starts.contains(start))
             .map(|(start, stop)| buf[start..stop].to_vec())
             .collect();
-        if pool.len() == orphan_handles.len() {
-            out.extend(orphan_handles.into_iter().zip(pool));
+        if pool.len() == orphans.len() {
+            out.extend(orphans.into_iter().zip(pool));
         }
     }
     out
@@ -2862,7 +2894,16 @@ impl<R: Read + Seek> DwgReader<R> {
         // The section is its pages: a declared size they cannot hold is a
         // corrupt header, while a large drawing legitimately spans many pages.
         let page_count = section.pages.len().max(section.page_count.max(0) as usize);
-        if total_size > page_count.saturating_mul(max_page_size) {
+        // Pages may be sparse: an all-zero page is not written, so the last
+        // page's offset (not the page count) bounds the section.
+        let reachable = section
+            .pages
+            .iter()
+            .map(|page| page.offset)
+            .max()
+            .and_then(|offset| usize::try_from(offset).ok())
+            .map_or(0, |offset| offset.saturating_add(max_page_size));
+        if total_size > page_count.saturating_mul(max_page_size).max(reachable) {
             return Err(DxfError::Parse(format!(
                 "AC18 section '{}' size {} exceeds its {} page(s) of {} bytes",
                 section_name, total_size, page_count, max_page_size
@@ -3218,6 +3259,67 @@ mod dwg_reader_tests {
     #[test]
     fn empty_when_first_byte_null() {
         assert_eq!(section_name_from_field(&[0u8; 64]), "");
+    }
+
+    /// One record-table segment: header (magic, sequence at +8, size at +16),
+    /// 20-byte entries, then the blob data.
+    fn acds_segment(sequence: u32, records: &[(u32, Vec<u8>)]) -> Vec<u8> {
+        let table_end = 48 + 20 * records.len();
+        let mut data = Vec::new();
+        let mut entries = Vec::new();
+        for (handle, value) in records {
+            entries.push((*handle, data.len()));
+            data.extend_from_slice(value);
+        }
+        let size = table_end + data.len();
+        let mut segment = vec![0u8; size];
+        segment[..8].copy_from_slice(b"\xAC\xD5_data_");
+        segment[8..12].copy_from_slice(&sequence.to_le_bytes());
+        segment[16..24].copy_from_slice(&(size as u64).to_le_bytes());
+        for (index, (handle, offset)) in entries.into_iter().enumerate() {
+            let entry = 48 + index * 20;
+            segment[entry..entry + 4].copy_from_slice(&0x14u32.to_le_bytes());
+            segment[entry + 8..entry + 12].copy_from_slice(&handle.to_le_bytes());
+            segment[entry + 16..entry + 20].copy_from_slice(&(offset as u32).to_le_bytes());
+        }
+        segment[table_end..].copy_from_slice(&data);
+        segment
+    }
+
+    fn acds_blob(label: u8) -> Vec<u8> {
+        let mut value = b"ASM BinaryFile".to_vec();
+        value.push(label);
+        value.extend_from_slice(ACIS_END_MARKER);
+        value
+    }
+
+    #[test]
+    fn acds_handle_listed_by_several_segments_uses_the_highest_sequence() {
+        let older = acds_segment(0x30, &[(0x70, vec![0; 8]), (0x91, acds_blob(1))]);
+        let newer = acds_segment(0x40, &[(0x70, vec![0; 8]), (0x91, acds_blob(2))]);
+        let handles = HashSet::from([0x91u64]);
+        for (first, second, expected) in [(&older, &newer, 2u8), (&newer, &older, 2u8)] {
+            let mut buffer = first.clone();
+            buffer.extend_from_slice(second);
+            let extracted = extract_acds_record_blobs(&buffer, &handles);
+            assert_eq!(extracted.len(), 1);
+            assert_eq!(extracted[0].1, acds_blob(expected));
+        }
+    }
+
+    #[test]
+    fn acds_stale_listing_does_not_block_external_blob_pairing() {
+        // 0x91 is listed by an older segment (no blob of its own) and by a
+        // newer one whose blob sits in a trailing external segment.
+        let stale = acds_segment(0x30, &[(0x70, vec![0; 8]), (0x91, vec![0; 8])]);
+        let mut current = acds_segment(0x40, &[(0x70, vec![0; 8]), (0x91, vec![0; 8])]);
+        let mut buffer = stale;
+        buffer.append(&mut current);
+        buffer.extend_from_slice(&[0u8; 16]);
+        buffer.extend_from_slice(&acds_blob(9));
+        let handles = HashSet::from([0x91u64]);
+        let extracted = extract_acds_record_blobs(&buffer, &handles);
+        assert_eq!(extracted, vec![(0x91, acds_blob(9))]);
     }
 
     #[test]

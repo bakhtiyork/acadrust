@@ -39,6 +39,19 @@ use crate::types::Handle;
 use crate::types::LineWeight;
 use std::collections::{HashMap, HashSet};
 
+fn preserve_source_block_markers(document: &CadDocument, occupied: &mut HashSet<Handle>) {
+    for block in document.block_records.iter() {
+        for handle in [block.block_entity_handle, block.block_end_handle] {
+            if matches!(
+                document.get_entity(handle),
+                Some(EntityType::Block(_) | EntityType::BlockEnd(_))
+            ) {
+                occupied.remove(&handle);
+            }
+        }
+    }
+}
+
 fn linetype_segment_is_complex(segment: &tables::LinetypeSegment, shape_handle: u64) -> bool {
     // Scale, rotation and offsets have no meaning on a plain dash; native
     // writers commonly store scale 0 instead of 1 (issue #128).
@@ -1494,6 +1507,7 @@ impl DwgDocumentBuilder {
                             };
                             LineTypeElement {
                                 length: s.length,
+                                source_scale: Some(s.scale),
                                 complex,
                             }
                         })
@@ -1503,6 +1517,7 @@ impl DwgDocumentBuilder {
                 }
                 ParsedEntry::DimStyle(h, data) => {
                     let mut ds = crate::tables::DimStyle::new(&data.name);
+                    ds.source_present = true;
                     ds.handle = Handle::from(*h);
                     ds.xref_reference = data.xref_reference;
                     ds.xref_resolved = data.xref_resolved;
@@ -2581,6 +2596,11 @@ impl DwgDocumentBuilder {
         occupied.extend(document.app_ids.iter().map(|entry| entry.handle));
         occupied.extend(document.dim_styles.iter().map(|entry| entry.handle));
         occupied.extend(document.vx_table.iter().map(|entry| entry.handle));
+        // A retained source BLOCK/ENDBLK wins over a colliding constructor
+        // default (notably Standard DIMSTYLE). The default is rehomed in the
+        // table repair below; moving the source marker here would create a
+        // second marker and leave the block pointing at the wrong identity.
+        preserve_source_block_markers(document, &mut occupied);
         fn allocate_marker(
             occupied: &mut std::collections::HashSet<Handle>,
             next_handle: &mut u64,
@@ -2941,6 +2961,7 @@ impl DwgDocumentBuilder {
                 if let Some(style) = document.text_styles.iter_mut().find(|s| s.handle == handle) {
                     style.true_type_font = typeface;
                     style.true_type_font_flags = flags;
+                    style.true_type_font_eed_position = Some(index);
                 }
             }
         }
@@ -5097,6 +5118,10 @@ impl DwgDocumentBuilder {
                     e.dwg_mode = data.mode;
                     e.is_paper_space = data.mode == 1;
                     e.lock_aspect = data.lock_aspect;
+                    if e.encoded_payload() != data.raw_payload {
+                        e.source_payload =
+                            Some(crate::entities::ole2frame::SourcePayload(data.raw_payload));
+                    }
                     let _ = document.add_entity(EntityType::Ole2Frame(Box::new(e)));
                 }
 
@@ -5299,6 +5324,10 @@ impl DwgDocumentBuilder {
                         OBJ_NURBSURFACE => crate::entities::SurfaceKind::Nurb,
                         _ => crate::entities::SurfaceKind::Generic,
                     };
+                    let source = crate::entities::solid3d::source::DwgAcisSource::capture(
+                        reader.main_mut(),
+                        self.obj_reader.dxf_version(),
+                    );
                     let data = entities::read_surface(
                         &mut reader,
                         self.obj_reader.version(),
@@ -5313,6 +5342,9 @@ impl DwgDocumentBuilder {
                     } else {
                         crate::entities::solid3d::AcisVersion::Version1
                     };
+                    e.acis_data.source = Some(std::sync::Arc::new(
+                        crate::entities::solid3d::source::AcisSource::Dwg(source),
+                    ));
                     e.acis_data.sat_data = data.acis.sat_data;
                     e.acis_data.sab_data = data.acis.sab_data;
                     e.acis_data.is_binary = data.acis.is_binary;

@@ -4,11 +4,19 @@ use super::TableEntry;
 use crate::types::Handle;
 
 /// Line type element (dash, dot, space)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct LineTypeElement {
     /// Length of the element (positive = dash, negative = space, 0 = dot)
     pub length: f64,
+    /// Scale factor stored in the source record (DWG group 46).
+    ///
+    /// ACadSharp exposes this value for every segment, including ordinary
+    /// dash/space segments that have no geometric use for it. Native
+    /// constructors have no source record and leave it absent; the
+    /// compatibility projection then uses the constructor default `1.0`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_scale: Option<f64>,
     /// Complex data for shape or text display (codes 74-75, 9, 44-46, 50, 340)
     pub complex: Option<LineTypeComplexData>,
 }
@@ -18,6 +26,7 @@ impl LineTypeElement {
     pub fn dash(length: f64) -> Self {
         LineTypeElement {
             length: length.abs(),
+            source_scale: None,
             complex: None,
         }
     }
@@ -26,6 +35,7 @@ impl LineTypeElement {
     pub fn space(length: f64) -> Self {
         LineTypeElement {
             length: -length.abs(),
+            source_scale: None,
             complex: None,
         }
     }
@@ -34,6 +44,7 @@ impl LineTypeElement {
     pub fn dot() -> Self {
         LineTypeElement {
             length: 0.0,
+            source_scale: None,
             complex: None,
         }
     }
@@ -51,6 +62,15 @@ impl LineTypeElement {
     /// Check if this is a dot
     pub fn is_dot(&self) -> bool {
         self.length == 0.0
+    }
+}
+
+// Source-scale retention is compatibility metadata. It must not make a
+// source-read element unequal to the same native drawing element, just as
+// other source-presence fields on table entries are excluded from equality.
+impl PartialEq for LineTypeElement {
+    fn eq(&self, other: &Self) -> bool {
+        self.length == other.length && self.complex == other.complex
     }
 }
 

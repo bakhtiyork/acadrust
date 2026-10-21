@@ -7,6 +7,57 @@ pub(super) fn source_document(doc: &CadDocument) -> bool {
     doc.header.source_handle_seed.is_some() || doc.header.dxf_source_variables.is_some()
 }
 
+/// The dictionary ACadSharp adopts as its root: the first dictionary with owner
+/// zero that the object reader meets. A DWG reader starts from the header's
+/// dictionary handles in file order (group, mlinestyle, named objects, then the
+/// R2000+ layout/plot/material/colour/visual-style dictionaries), so a damaged
+/// file whose ACAD_GROUP also has owner zero makes that dictionary the root and
+/// leaves the real named-objects dictionary unregistered.
+pub(super) fn root_dictionary(doc: &CadDocument, reader: &str) -> u64 {
+    let named = doc.header.named_objects_dict_handle;
+    if reader != "dwg" {
+        return named.value();
+    }
+    let header = &doc.header;
+    [
+        header.acad_group_dict_handle,
+        header.acad_mlinestyle_dict_handle,
+        named,
+        header.acad_layout_dict_handle,
+        header.acad_plotsettings_dict_handle,
+        header.acad_plotstylename_dict_handle,
+        header.acad_material_dict_handle,
+        header.acad_color_dict_handle,
+        header.acad_visualstyle_dict_handle,
+    ]
+    .into_iter()
+    .find(|candidate| {
+        !candidate.is_null()
+            && matches!(
+                doc.objects.get(candidate),
+                Some(crate::objects::ObjectType::Dictionary(dictionary)) if dictionary.owner.is_null()
+            )
+    })
+    .unwrap_or(named)
+    .value()
+}
+
+/// Entities that carry a `DimensionStyle` defaulting to "Standard".
+pub(super) fn is_dimension_entity(record: &Value) -> bool {
+    record["type"].as_str().is_some_and(|ty| {
+        matches!(ty, "Leader" | "Tolerance")
+            || (ty.starts_with("Dimension")
+                && !matches!(
+                    ty,
+                    "DimensionStyle" | "DimensionStylesTable" | "DimensionAssociation"
+                ))
+    })
+}
+
+pub(super) fn has_dimension_entity(records: &[Value]) -> bool {
+    records.iter().any(is_dimension_entity)
+}
+
 fn id(value: &Value) -> Option<u64> {
     u64::from_str_radix(value.as_str()?.strip_prefix('#')?, 16).ok()
 }
@@ -18,6 +69,13 @@ pub(super) fn supported(record: &Value, reader: &str) -> bool {
         // TableEntity content is a different, supported path).
         && !(reader == "dxf" && record["type"] == "VisualStyle")
         && !(reader == "dwg" && record["type"] == "TableContent")
+        // DwgObjectReader.readMTextAttributeObjectContextData is a TODO that
+        // returns no template, so the object is never registered.
+        && !(reader == "dwg" && record["type"] == "MTextAttributeObjectContextData")
+        // VPortsTable.Add keeps the name as given instead of generating one,
+        // and the table then refuses an empty key.
+        && !(record["type"] == "VPort"
+            && record["props"]["Name"].as_str().is_some_and(str::is_empty))
 }
 
 /// Apply reader registration policy after projection, before handle deduplication.
@@ -25,6 +83,12 @@ pub(super) fn supported(record: &Value, reader: &str) -> bool {
 pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -> HashSet<u64> {
     if !source_document(doc) {
         return HashSet::new();
+    }
+    // R13/R14 drawings yield no ACDBPLACEHOLDER objects in the reference
+    // reader (observed on every such corpus file), so the plot-style
+    // dictionary's default entry is never registered.
+    if reader == "dwg" && doc.version < DxfVersion::AC1015 {
+        records.retain(|record| record["type"] != "AcdbPlaceHolder");
     }
     // First concrete representation wins, as in the canonical dumper.
     let mut index = HashMap::with_capacity(records.len());
@@ -39,7 +103,38 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -
     let mut names: HashMap<u64, String> = HashMap::new();
     let mut dictionaries: HashMap<u64, Vec<(String, u64)>> = HashMap::new();
     let mut roots = Vec::new();
-    let root = doc.header.named_objects_dict_handle.value();
+    // Table.Add names an empty entry "unnamed<N>", the first N not yet used in
+    // that table.
+    let mut unnamed_entries = HashMap::new();
+    let mut table_names: HashMap<u64, HashSet<String>> = HashMap::new();
+    for record in records.iter().filter(|r| {
+        r["type"] != "VPort"
+            && r["props"]["SubclassMarker"]
+                .as_str()
+                .is_some_and(|marker| marker.ends_with("TableRecord"))
+    }) {
+        let Some(table) = id(&record["owner"]) else {
+            continue;
+        };
+        let names = table_names.entry(table).or_default();
+        let name = record["props"]["Name"].as_str().unwrap_or("");
+        if name.is_empty() {
+            if let Some(h) = id(&record["handle"]) {
+                let mut n = 0;
+                let name = loop {
+                    let candidate = format!("unnamed{n}");
+                    n += 1;
+                    if names.insert(candidate.to_uppercase()) {
+                        break candidate;
+                    }
+                };
+                unnamed_entries.insert(h, name);
+            }
+        } else {
+            names.insert(name.to_uppercase());
+        }
+    }
+    let root = root_dictionary(doc, reader);
     if root != 0 {
         roots.push(root);
     }
@@ -196,19 +291,34 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -
         .source_app_id_order
         .as_ref()
         .map(|names| names.iter().map(|name| name.to_uppercase()).collect());
+    // A native constructor dimension style that the source table did not
+    // contain is not part of the ACadSharp document unless a dimension-like
+    // entity exists: attaching one to a block creates "Standard" from its
+    // default style before the entity's own style reference is resolved.
+    let unused_default_dimstyles: HashSet<_> = if has_dimension_entity(records) {
+        HashSet::new()
+    } else {
+        doc.dim_styles
+            .iter()
+            .filter(|style| !style.source_present)
+            .map(|style| style.handle.value())
+            .collect()
+    };
     let template_handles: HashSet<_> = index
         .iter()
         .filter_map(|(&h, &i)| {
             let record = &records[i];
-            let native_default = record["type"] == "AppId"
-                && source_app_ids.as_ref().is_some_and(|source| {
-                    !source.contains(
-                        &record["props"]["Name"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_uppercase(),
-                    )
-                });
+            let native_default = (record["type"] == "DimensionStyle"
+                && unused_default_dimstyles.contains(&h))
+                || (record["type"] == "AppId"
+                    && source_app_ids.as_ref().is_some_and(|source| {
+                        !source.contains(
+                            &record["props"]["Name"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_uppercase(),
+                        )
+                    }));
             (supported(record, reader) && !native_default).then_some(h)
         })
         .collect();
@@ -221,6 +331,15 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -
             roots.extend(children);
         }
     }
+    // A DWG layout template links its block whether or not the layout itself
+    // ends up registered, so any decoded layout counts. The DXF reader links
+    // only layouts that its dictionary walk registered (observed on ce.dxf,
+    // whose layout the reference never creates).
+    let registered_layouts: HashSet<_> = if reader == "dxf" { &registered } else { &template_handles }
+        .iter()
+        .copied()
+        .filter(|h| records[index[h]]["type"] == "Layout")
+        .collect();
     let mut table_counts = HashMap::<u64, usize>::new();
     for &h in &registered {
         let record = &records[index[&h]];
@@ -267,8 +386,24 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -
             if let Some(entities) = record["props"]["Entities"].as_array_mut() {
                 entities.retain(|value| id(value).is_some_and(|h| registered.contains(&h)));
             }
+            // A reference to something that is not a decoded layout cannot be linked.
+            if id(&record["props"]["Layout"]).is_some_and(|h| !registered_layouts.contains(&h)) {
+                record["props"]["Layout"] = Value::Null;
+            }
         }
-        if h == root {
+        if record["type"] == "EvaluationGraph" {
+            if let Some(nodes) = record["props"]["Nodes"].as_array_mut() {
+                for node in nodes {
+                    // The graph template resolves an expression only to an object
+                    // the reader produced; unsupported block parameters and
+                    // proxy nodes leave it unset.
+                    if !id(&node["Expression"]).is_some_and(|h| template_handles.contains(&h)) {
+                        node["Expression"] = Value::Null;
+                    }
+                }
+            }
+        }
+        if h == root && root == doc.header.named_objects_dict_handle.value() {
             record["owner"] = handle(Handle::NULL);
             record["props"]["Name"] = json!("");
         } else if let Some(&owner) = owners.get(&h) {
@@ -280,6 +415,19 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -
             if record["type"] != "AecBinRecord" && record["props"].get("Name").is_some() {
                 record["props"]["Name"] = json!(name);
             }
+        }
+        if record["type"] == "Group" {
+            // Group.IsUnnamed is a getter over the final dictionary-assigned
+            // name, not the stored GROUP unnamed flag.
+            let name = record["props"]["Name"].as_str().unwrap_or("");
+            record["props"]["IsUnnamed"] = json!(name.trim().is_empty() || name.starts_with('*'));
+        }
+        let named = match record["type"].as_str() {
+            Some("Block") => id(&record["owner"]),
+            _ => Some(h),
+        };
+        if let Some(name) = named.and_then(|h| unnamed_entries.get(&h)) {
+            record["props"]["Name"] = json!(name);
         }
         if let Some(entries) = dictionaries.get(&h) {
             // readCommonDictionary consumes the R14 byte without assigning

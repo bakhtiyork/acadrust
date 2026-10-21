@@ -172,7 +172,23 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                                 | (i16::from(v.flags.xref_dependent) << 4)
                         ),
                     ),
-                    ("Color", json!(color(v.color))),
+                    (
+                        "Color",
+                        json!(color(
+                            // The DWG layer reader turns ByBlock/ByLayer into
+                            // Color.Default (index 7).
+                            if source_dwg(doc)
+                                && matches!(
+                                    v.color,
+                                    crate::types::Color::ByBlock | crate::types::Color::ByLayer
+                                )
+                            {
+                                crate::types::Color::Index(7)
+                            } else {
+                                v.color
+                            }
+                        ))
+                    ),
                     ("IsOn", json!(!v.flags.off)),
                     (
                         "LineType",
@@ -720,7 +736,9 @@ fn line_type_segments(doc: &CadDocument, v: &crate::tables::LineType) -> Value {
                 let mut p = vec![
                     ("Length", number(s.length)),
                     ("Flags", json!(0)),
-                    ("Scale", number(1.0)),
+                    // A plain dash/space segment still carries the stored scale;
+                    // constructed segments take the constructor default.
+                    ("Scale", number(s.source_scale.unwrap_or(1.0))),
                     ("Rotation", number(0.0)),
                     ("Offset", json!([0.0, 0.0])),
                     ("Style", Value::Null),

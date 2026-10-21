@@ -129,6 +129,18 @@ pub use xrecord::{
 
 use crate::types::Handle;
 
+/// A flag describing how a record was read rather than what it holds, so it
+/// never takes part in equality.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SourceFlag(pub bool);
+
+impl PartialEq for SourceFlag {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// Dictionary object - stores key-value pairs of object handles
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -145,6 +157,11 @@ pub struct Dictionary {
     pub hard_owner_entries: Vec<String>,
     /// Duplicate record cloning flag
     pub duplicate_cloning: i16,
+    /// The DXF record carried no group 281, so `duplicate_cloning` is the
+    /// native default rather than a stored value.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[doc(hidden)]
+    pub cloning_absent: SourceFlag,
     /// Hard owner flag
     pub hard_owner: bool,
     /// Reactor handles ({ACAD_REACTORS})
@@ -162,6 +179,7 @@ impl Dictionary {
             entries: Vec::new(),
             hard_owner_entries: Vec::new(),
             duplicate_cloning: 1,
+            cloning_absent: SourceFlag(false),
             hard_owner: false,
             reactors: Vec::new(),
             xdictionary_handle: None,
