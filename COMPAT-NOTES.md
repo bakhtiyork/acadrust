@@ -164,12 +164,51 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5a source-absent groups | A DXF record writes only the groups its source had, unless the value differs from the reader default: DIMSTYLE (via `dxf_present_codes`), LEADER (71/40/41/73), MULTILEADER (272/273), MLEADERSTYLE (173/174/178/46/272/273/300), VIEWPORT (61), TOLERANCE (11), MTEXT (441), ATTDEF/ATTRIB group 71 when zero, DIMENSION (71/72, and 41 when zero), DBCOLOR (62/420). Header variables absent from a DXF source whose value is still the default are left out (`$ACADVER`, `$ACADMAINTVER`, `$HANDSEED`, `$DWGCODEPAGE` always written). | ACadSharp applies its own defaults to an absent group; writing the native default asserted a value the source never had. Edits still reach the file. |
 | R5a version gates | DIMENSION 71/72/41 and MTEXT 73/44 are R2000 groups and are not written below AC1015; DIMFXL/DIMJOGANG are not written for a record read from a DWG older than R2007; LAYOUT group 78 is skipped when 0; `$DIMSTYLE` takes the table entry named by the header handle when the name is still the default. | A DWG read leaves zero placeholders for fields its version lacks; writing them changed the value ACadSharp reads. |
 | R5a header | `$CMLJUST` and `$CMLSCALE` are written. | The reader read them, the writer never wrote them (ACadSharp then read 20 for the multiline scale). |
-| R5a line breaks and spelling | MTEXT writes the source spelling (`\U+00B0`, `^J`) while it still decodes to the value (`MText::source_value` now also kept for caret escapes and binary line breaks); binary DXF writes it raw; a line break in TOLERANCE text, GEODATA definitions and retained spellings is a caret escape. XRECORD strings, TOLERANCE text and ATTRIB/ATTDEF tags keep their source spelling while unchanged. The generic `\P` replacement stays for text without a source spelling. | The writer turned every line break into `\P` and every decoded escape into the character. New stream-writer methods `writes_source_spelling` / `write_source_spelling`. |
+| R5a line breaks and spelling | MTEXT writes the source spelling (`\U+00B0`, `^J`) while it still decodes to the value (`MText::source_value` now also kept for caret escapes and binary line breaks); binary DXF writes it raw; a line break in TOLERANCE text, GEODATA definitions and retained spellings is a caret escape. XRECORD strings, TOLERANCE text and ATTRIB/ATTDEF tags keep their source spelling while unchanged. Text without a source spelling: see R5a-3 (a line feed is `^J`, `\P` stays a paragraph break). | The writer turned every line break into `\P` and every decoded escape into the character. New stream-writer methods `writes_source_spelling` / `write_source_spelling`. |
 | R5a pre-R2004 restored data | A gradient or MTEXT background fill the reader restored from the round-trip XDATA of a pre-R2004 save is not also written as native groups below AC1018. | The native groups made ACadSharp read a fill the original file never stated. |
 | R5a alignment grip | BLOCKALIGNMENTGRIP orientation uses groups 140/141/142. | Written as 140/150/160, which ACadSharp rejects ("Invalid dxf code"). |
 | R5a LTYPE reader | An empty group 9 after a shape element no longer turns it into text. | ACadSharp writes `9` with an empty string after every shape element; the shape number was lost. |
 | R5a layout provenance | `Layout::dxf_layout_flags_present` (additive, not serialized) records whether the `AcDbLayout` subclass had its own group 70. | The ACadSharp view needs it (below). |
 | R5a ACadSharp view | `LayoutFlags` of a DXF without the `AcDbLayout` group 70 is the PlotSettings word; DXF `ShadePlotMode` and DIMSTYLE `Flags` are the reference defaults (it never assigns them); `ImageDefinition.DefaultSize` is (1, 1) when a DXF omits groups 11/21; a `BookColor` name with several `$` keeps the first and last segment. | ACadSharp's own writer omits the layout group 70 and the image default size; its readers route codes 76 and the first 70 elsewhere. |
+| R5a-2 CLASSES | A document read from DXF writes its CLASSES section as read (flags, application, instance count); the default class registry it also carries is not written. A class a written entity/object needs and the section lacks is added only for records created after the read (no handle yet, or at or above `$HANDSEED`). Other documents (DWG source, built in memory) write their registry as before. | The fixed 260-entry list replaced the source's flags and invented instance counts; a built-in DXF type (MLINE) has no class in AutoCAD files. |
+| R5a-2 MATERIAL groups | A MATERIAL read from DXF writes the groups its record had plus those whose value differs from the native default; ambient RGB (90) and the self-illumination integer (90) are told apart by group 149 and the ambient method. A built-in (ByLayer/ByBlock/Global) material without a DXF source keeps the minimal form plus any changed value. | Native defaults were written for absent groups (projection 2, source 0, channel flags 127, matrices, colours), which ACadSharp reads differently from the absent group, and a trailing `90 0` replaced the ambient colour. |
+| R5a-2 header variables | About 85 reader-known system variables the writer never wrote (`$PLIMMIN/MAX`, `$PEXTMIN/MAX`, `$PINSBASE`, `$USRTIMER`, `$TDUSRTIMER`, `$XEDIT`, `$HIDETEXT`, `$SORTENTS`, `$PROJECTNAME`, `$STYLESHEET`, `$DIMBLK/1/2`, `$DIMLDRBLK`, `$LENSLENGTH`, `$LOFT*`, `$TIMEZONE`, `$LATITUDE/$LONGITUDE`, `$USERI/R1-5`, ...) are written when the DXF source had them, when a DWG source of a version that stores them was read (even at the native default), or when the value differs from the default. Arrow block names of a DWG header come from the block record handle. `$HYPERLINKBASE` is written empty when the source stated it. `$SKTOLERANCE`, `$CANNOSCALE`, `$CTABLESTYLE/$CMLEADERSTYLE` policies are unchanged. | The reader read them, the writer dropped them; a source-absent or default value in a built document is still not written. |
+| R5a-2 purge preventer | `ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION` is written (class version in group 70, no block pointer). Unknown or associative records of that name without decoded data are still skipped. | AutoCAD's own DXF has the record; dropping it removed a dictionary entry (`AcDbDynamicBlockRoundTripPurgePreventer`) from the file. |
+| R5a-2 default application IDs | The native default APPIDs `AcadAnnotative`, `AcCmTransparency`, `AcAecLayerStandard` are not written for a document read from a file whose APPID table lacked them, unless XDATA, a layer transparency or a layer description needs them. | The writer invented applications the source never registered. |
+| R5a-2 handle seed and sort handles | `$HANDSEED` of a document read from a file is the source's seed (or one above the highest handle written) when no handle is allocated while writing; a SORTENTSTABLE entry keeps its sort handle (only a missing or repeated key is allocated); `count_extra_handles` no longer counts the entries of a table written verbatim. | The seed grew by the defaults the reader creates on every round trip, and every sort entry got a new handle (so SEQEND identities shifted). |
+| R5a-2 MLEADER line type | MLEADER group 341 keeps the ByBlock linetype handle. | It was rewritten to ByLayer. |
+| R5a-2 entity material | Group 347 (material handle) is written from R2007 for an entity whose `material_flags` say a handle follows. | The reader read it, the writer dropped it. |
+| R5a-2 VIEWPORT groups | Groups 1 (sheet style), 74, 79, 345, 346, 332, 333, 348, 361, 141, 142, 63/421, 292, 282 are written when the DXF source had them, a DWG record of the version stores them (sheet style R2000+, lighting R2007+), or the value differs from a new viewport's. | Only the geometry groups were written. |
+| R5a-2 dynamic block connections | An action's connections are written as code, name, code, name (`92 301 93 302`), not all codes first. | The reference reader names the connection it has just read: the second name was lost. |
+| R5a-2 dimension record | Bit 32 of group 70 is set for a dimension without DXF source word that has a geometry block; group 41 is written at 1.0 for a record read from a DWG of R2000 or later (and for a DXF source that had it). | DWG dimensions lost the bit and the spacing factor (ACadSharp then reads 0). |
+| R5a-2 hatch gradient | A pattern hatch of an R2004+ drawing keeps its disabled gradient definition (450 = 0, colours, name). | Written only when enabled; the DWG record holds the definition either way. |
+| R5a-2 polyline widths | POLYLINE groups 40/41 are written from the source's default widths once the widths live on the vertices. | A second write dropped them (not idempotent). |
+| R5a-2 DWG header omissions | For a document read from DWG the writer leaves out the variables the source version has no slot for: `$DIMFIT` (R2000+ reads DIMATFIT), `$OSMODE` above R14, `$PSTYLEMODE` below R2000, `$MEASUREMENT` without a template or below R2004. Text style, linetype and dimension text style names of the header come from the table record handle, `$MAINTENANCE` falls back to the document's maintenance version, `$DIMMZS/$DIMALTMZS` only when set. | The names were stale or invented for a DWG source; a DXF source and a built document are unchanged. |
+| R5a-2 layer description | The `AcAecLayerStandard` XDATA record of a layer is regenerated only when the description differs from the one the source record carries; the record the source had is written as it was. | A one-string record was rewritten as two strings, the layer then differed from its source. |
+| R5a-2 layout plot view name | LAYOUT group 6 is written (empty or not) for a document read from a DWG of R13..R2000, which stores the plot view name. | The group was left out when empty. |
+| R5a-2 leader box | LEADER groups 40/41 are not written for a record read from a DWG of R2010+ (it stores no box size). | The native 2.5 default was written as if stated. |
+| R5a-2 spline | A control-vertex spline carries a parametrisation bit in group 70 only when it states chord or uniform, the DXF source had one, or it is a fit-method spline. (The 1e-7 tolerances this row once wrote for the DWG scenario 2 spline are gone, see R5a-3.) | The DWG custom-parametrisation default (15) became bit 256 for every spline. |
+| R5a-2 XDATA strings | Superseded by R5a-3: the DWG reader removes the UTF-16 terminator, the DXF writer no longer trims. | DSTYLE override strings read from DWG ended in a NUL and the overrides were lost on reading. |
+| R5a-2 viewport override layers | Layer names of a VIEWPORT's per-viewport layer overrides ("0 @ 1" form) are resolved from the layer table when the entity carries only handles. | The groups held a handle number. |
+| R5a-2 underlay reactors | PDF/DWF/DGN underlay definitions take their reactor list from `reactors_by_handle` when the object has none (DWG). | The owner reactor was lost. |
+| R5a-2 R13/R14 dimension style | The DWG reader gives `dimlwd`/`dimlwe` -2 (ByBlock) for an R13/R14 DIMSTYLE record, which has neither field. | It gave 0, a 0.00 mm line weight, which the DXF then stated. |
+| R5a-2 table cell style | A cell style read from a binary R2010+ file is written as only the properties its property flags override (alignment, background fill/colour, content colour, text style/height, borders), not as the full style. A cell that overrides nothing writes no style groups. | The full style gave every cell an explicit background colour (0 or 257 in ACadSharp's reading) instead of none. Per-row styles (`Rows[n].CellStyle`) have no DXF group and stay lost. |
+| R5a-3 `acad-dump native-dump` | New command `native-dump <in.dwg\|in.dxf> <out.jsonl>`: failsafe read, then `acadrust::native_dump::write_native_dump` (module `src/document/native_dump.rs`, feature `acadsharp-compat`). JSON lines, one record per line, no ACadSharp view. Built from the `Debug` text of every record (so no serde attribute hides a field, and a new field appears by itself); the fields it leaves out are the named lists `EXCLUDED_FIELDS`, `EXCLUDED_FIELDS_WHEN` and `EXCLUDED_DOCUMENT_FIELDS` (a reason each; a document field in neither list does not compile; a test checks that every name is a real field). Three splits of one datum between the two readers are folded: BLOCK/ENDBLK markers, object reactors/extension dictionaries, object XDATA still held as raw DWG EED (decoded). | The compat view copies ACadSharp's DXF-reader losses, so RR measured against it could not see a writer that drops those fields (review of R5a-2). RR and idem now compare this dump. |
+| R5a-3 MATERIAL R2007 fields | Translucence, self-illumination, reflectivity, illumination model, channel flags (94) and mode of a material read from a DWG older than R2007 are written only when changed; the minimal built-in form keeps group 94 where the source version stores it (R2007+ DWG, built in memory). | The DWG record has none of these fields; the native defaults (94 = 127) were written as if stated. |
+| R5a-3 VIEWPORT group 61 | Grid major is not written for a DWG older than R2007 (the record has no such field) unless its value was changed. | Default 5 was written as if stated. |
+| R5a-3 spline tolerances | Groups 42/43 are left out for a DWG scenario 2 (fit points) spline whose knot and control tolerances are both zero; stored and changed values are written as they are. | The writer wrote 1e-7 to imitate ACadSharp's initialisers; the native model has 0 and ACadSharp applies its own default to the absent groups. |
+| R5a-3 XDATA terminator | `eed_codec` and `typeface_eed` remove one UTF-16 NUL terminator from a counted wide EED string and write it back; `write_xdata` no longer trims NULs. The ACadSharp view is unchanged (it trims). | The DWG reader kept the terminator in the native string (root cause) and the writer trimmed it. Upstream-PR candidate. |
+| R5a-3 ATTRIB / ATTDEF group 1 | Group 1 is the record's own value; the text of a multiline attribute stays in its embedded MTEXT only. | The embedded text was copied into group 1; AutoCAD's own file has group 1 empty there. |
+| R5a-3 MTEXT line feed | A line feed in MTEXT is written `^J` (carriage return `^M`) in ASCII DXF and as is in binary DXF; `\P` stays a paragraph break. The tests that pinned the old `\P` (`test_binary_dxf_roundtrip_mtext_newlines`, `mtext_without_source_spelling...`) now pin the line feed. | `\P` is a paragraph break, not a line feed; the writer turned every line feed into one (a loss). |
+| R5a-3 layer material | LAYER group 347 is written from R2007. | The reader read it, the writer dropped it. |
+| R5a-3 MLEADER word break | Group 295 of the context is written when false in any version (R2013+: always). | A file older than R2013 that stated 0 came back as true. |
+| R5a-3 table cell values | A point value carries a size group (92) only when the source had one; the DXF reader ends a table value at an end marker (309), the next data item (301, or 300 before a unit group 94) as well as at 304. | AutoCAD's R2004 files have no size and no ACVALUE_END; the reader ran on through the following groups and read garbage into the custom data of a cell. The writer still writes 304 (ACadSharp's reader needs it, else it loses later objects). |
+| R5a-3 modeler uid | 3DSOLID/REGION/BODY write their `uid` (group 2, R2013+), the zero GUID when empty. | Always the zero GUID. (A SURFACE has no `uid` field in the model.) |
+| R5a-3 angles | Angle groups are written as the degree value that `to_radians` reads back as exactly the stored radians when one exists (`ToDxfDegrees`). | A degree value read from DXF came back a unit in the last place away after a write (not idempotent). |
+| R5a-3 DIMPOST | An empty DIMPOST is written (group 3 empty); `<>` is what an absent group reads as. | An empty text came back as `<>`. |
+| R5a-3 VISUALSTYLE layout | A style that carries more than the core properties is written in the R2013 layout whatever the file version. | The older layouts dropped the extended properties (58 became 28). |
+| R5a-3 `$CMATERIAL` | The DXF reader reads and the writer writes `$CMATERIAL` (347, R2007+) as `current_material_handle`. | AutoCAD's header has it; the fork dropped it (found by comparing the groups of the AutoCAD samples with the written file, not by RR). |
+
 
 ## ACadSharp differential dump
 
@@ -323,16 +362,88 @@ C#→Rust (the fork reads the C# file), Rust→C# (C# reads the fork's file), Ru
   both implementations share are invisible. A triage script that sorted the remaining rows into the classes below
   reported 92 of 96 cells explained; an adversarial review found it hides real writer losses (it matched whole
   properties regardless of value, counted every extra object as explained), so it is not a gate and is not kept.
-* The fork's own round trip (dump of the input vs dump of the fork's re-read DXF output) matches in 0 of 96 cells.
-  R5a reduced its differing (section, type, property) rows from 502 to 443 with none growing. **Open native writer
-  losses** (pre-existing, next job): header variables never written (`$PLIMMIN/MAX`, `$PEXTMIN/MAX`, `$USRTIMER`,
-  `$TDUSRTIMER`, `$XEDIT`, `$HIDETEXT`, `$SORTENTS`, `$PROJECTNAME`, `$STYLESHEET`, `$DIMBLK/1/2`, `$LENSLENGTH`,
-  `$LOFTANG1/2`, `$LOFTNORMALS`, `$LOFTPARAM`, `$TIMEZONE`, `$LATITUDE/$LONGITUDE`); entity material (group 347);
-  VIEWPORT lighting and other groups (292/282/63/421, 141/142, 348, 1, 74, 110–130, 79, 146); MATERIAL defaults
-  invented and matrices/ChannelFlags lost; MLEADER 341 ByBlock rewritten to ByLayer; DynamicBlockPurgePreventer
-  dropped; the CLASSES section replaced by a fixed list (proxy flags, instance counts); DWG→DXF: TEXT layer
-  (sample_AC1015 #3BA), DSTYLE xdata string written with a trailing NUL (dimension overrides lost), PDFDEFINITION
-  owner reactor, MText LF written as `\P`; layer plot style (390) decided per document, not per layer.
+* The fork's own round trip (dump of the input vs dump of the fork's re-read DXF output) matched in 0 of 96 cells at R5a.
+
+### R5a-2 / R5a-3: gate G4 as redefined
+
+`Tools/roundtrip-report.sh --impl rust` (driver `Tools/g4-roundtrip.py`) measures per sample and mode (ASCII, binary):
+
+* **RR**: the native dump (`acad-dump native-dump`, see R5a-3 above) of the fork's re-read output equals the native
+  dump of the input. Comparer `Tools/g4-native-compare.py` (numbers exact, signed zero one value; `--self-test`),
+  closed list `Tools/g4-rr-allowlist.json` (11 rules, below).
+* **idem**: the native dump of a second write's re-read equals the first re-read's. No rules.
+* **RC**: ACadSharp reading the fork's output equals the committed C# dump D of the original (canonical dump,
+  `Tools/g4-compare.py`, `Tools/g4-allowlist.json`, 478 rules, `python3 Tools/g4-compare.py --self-test`). Every rule
+  is RC only: its cause is ACadSharp's reader or a D-b row, which RR and idem do not see.
+
+RR allow-list (format-inherent differences, each rule names record scope, struct type, property, relation, exact
+values and a reason that holds without the run):
+
+| id | property | relation | reason in one line |
+| --- | --- | --- | --- |
+| RR-001 | TableStyle `raw_dxf_codes` values | same text after trimming blanks, or the same number | DXF numbers are free-format text; binary DXF has no spelling |
+| RR-002 | Layout `raw_plot_settings_codes` values | same | same |
+| RR-003/004 | SummaryInfo created/modified date (DWG source) | number to none | DXF has no SUMMARYINFO; the instants are `$TDCREATE/$TDUPDATE` (header, compared) |
+| RR-005 | Hatch `pattern.lines[].angle` (DWG source) | within 2 ulp | DXF group 53 is degrees, the model radians |
+| RR-006..008 | SortEntitiesTable / TableStyle / Layout raw DXF group pairs (DWG source) | none to any | a DWG has no DXF group pairs; the typed fields are compared |
+| RR-009 | Shape `shape_number` (DWG source) | number to 0 | a DXF SHAPE names the shape (group 2), no group for its .shx number |
+| RR-010 | Layer `source_flags` (DWG source) | equal outside bits 1, 2, 4, 16 | those bits are typed fields; the DXF reader keeps the whole word, the DWG reader the rest |
+| RR-011 | TextStyle `source_flags` (DWG source) | equal outside bits 1, 4, 16 | same |
+
+Counts, cells of 96 passing (ASCII + binary, 48 samples each):
+
+| | RR | RC | idem |
+| --- | --- | --- | --- |
+| before R5a-3 (native dump and the rules above, writer of 78947fc) | 0 (0 + 0) | 60 (30 + 30) | 74 (37 + 37) |
+| after R5a-3 (agent) | 44 (24 + 20; 4 exact, 40 allowed) | 64 (32 + 32; 24 exact, 40 allowed) | 92 (46 + 46; all exact) |
+| after the R5a-3 review | 44 (24 + 20) | 68 (34 + 34) | 92 (46 + 46; all exact) |
+
+(The numbers recorded before this job, RR 44 / RC 60 / idem 92, compared the compat view for RR and idem and are not
+comparable.) No cell passes less than before in any check, and no cell has more unexplained RC rows.
+
+
+The review of R5a-3 removed three native-dump exclusions that could hide losses (`EntityProperties.graphic_data`, which
+DXF carries in groups 92/160/310; `MText.dwg_x_direction`, group 11; `Polyline2D.source_widths`, groups 40/41), added
+`doc/header_references` (current records by name, so excluded header handles hide nothing) and `entity_xdata_raw`
+(EED the DWG reader could not structure), and fixed MTEXT group 11 (written only when the text has a direction or a
+rotation) and ATTRIB/ATTDEF group 1 (the record's own empty group 1 written back for an unedited multi-line value).
+Losses this exposed, open: DWG→DXF loses entity graphic data for Mesh, Wipeout, RasterImage and Underlay (the DXF
+reader keeps common graphics only for proxy, MLine, Light, Surface and Table); `$CMLSTYLE`, `$DIMLTYPE`, `$DIMLTEX1`,
+`$DIMLTEX2` are not resolved from their DWG handles (sample_AC1021 writes BATTING/TRACKS/ZIGZAG as ByBlock).
+UNVERIFIED: a VISUALSTYLE with extended properties is written in the R2013 layout into R2010-and-older files; whether
+older AutoCAD accepts it needs a manual check in AutoCAD.
+
+Open, listed by cause (RR unless noted). Nothing here is allow-listed.
+
+* **DXF-sourced, 8 cells.** Binary DXF of R2000/R2004 sources (4 cells: AC1015/AC1018 ascii and binary inputs, binary
+  output) is written as R2010 binary DXF (`DxfWriter::output_version`, BricsCAD rejects the older binary headers); the
+  document version is the only difference. This is writer policy, not a format fact, so it is not an RR rule (the RC
+  rules G4-009..011 keep it). The four R12 cells (AC1009, ASCII and binary output; idem fails there too): the writer
+  declares an R12 document as R13 (`writable_version`, issue #68), so owners (group 330) the R12 source lacks appear,
+  the second unnamed shape-file STYLE comes back with another handle and `$HANDSEED` grows on every pass (the idem failure; cause not traced), polyline widths move
+  from the polyline to its vertices, and viewports/layouts/MLEADERSTYLE/TABLESTYLE the R13 structure adds differ.
+* **DWG-sourced, 44 cells (22 samples).** Every cell has at least 37 differing property groups (median 42, most 149; 22,163 rows in all). Families:
+  (1) the DWG reader keeps less than the DXF reader fills: `Dictionary.hard_owner_entries` (a DWG states ownership per
+  dictionary; every entry reference is a soft-owner handle, the writer writes 360 for the keys AutoCAD does), the
+  MLEADERSTYLE and GROUP names (dictionary keys), header `last_saved_by`, `maintenance_version`, the arrow block
+  name, `current_dimstyle_name` (the DWG header gives a handle; the name the reader keeps is stale), `legacy`;
+  (2) DXF carries less or other: `Preview` (the fork's DXF reader and writer do not implement THUMBNAILIMAGE: a real
+  loss), `$CECOLOR` true colour (DXF has the ACI only), DIMSTYLE true colours and `dimmzf/dimaltmzf`, 3DSOLID/REGION
+  `point_of_reference`, `acis_empty_bit`, wireframe isolines and the R2013 revision block, `DynamicBlockObject`
+  block handle, RADIUS `base.definition_point`, TableStyle text style handles (the DWG gives handles, DXF names),
+  VX table;
+  (3) real losses not fixed: modern TABLE (entity and object: cell styles, `fill_enabled`, geometry, custom data,
+  contents, `block_name`), TableStyle modern style/overrides and `double_line_spacing`, XDATA records the writer
+  generates (STYLE font, layer transparency) against the typed fields of the DWG, hidden per-viewport layer names,
+  SAB written as SAT.
+* **Invisible to RR.** Where both the DXF reader and the model drop a group, RR cannot see it. A model-independent
+  audit (group counts per record type in the AutoCAD ASCII samples against the written file, 19 samples) lists group
+  kinds with fewer occurrences in the output; most are defaults left out (normals 210/220/230, viewport UCS 110..146)
+  or a changed layout, but these look like real losses and are not fixed: header `$INTERFEREOBJVS`/`$INTERFEREVPVS`
+  (345/346), `$UCSORTHOREF` text, `$HANDLING` (R12), LAYER 348 (visual style), TABLE 340 (default dimension style
+  handle), MLEADERSTYLE 179, LWPOLYLINE 43 (constant width), MTEXT 46/63, DIMENSION 73/74/75/280, the ACDSDATA
+  schema and records (dynamic blocks, `ACDSRECORD` 8 to 6), GEODATA 303 and SUN 421. (`$CMATERIAL` was found this way
+  and fixed.) Each is UNVERIFIED as a loss until its group is looked up.
 
 Classes, each with the reason (classes 1-3 are decided by experiment, the rest by inspection):
 
@@ -351,8 +462,8 @@ Classes, each with the reason (classes 1-3 are decided by experiment, the rest b
    default AppIds `AcCmTransparency` / `AcAecLayerStandard` and default dictionaries the compat view hides.
 5. **Fork writer policy kept.** AcDbDynamicBlockRoundTripPurgePreventer and other association objects other
    applications cannot restore are not written (`is_unrestorable_assoc_object`); binary DXF of an R2000/R2004
-   drawing is written as R2010 (BricsCAD rejects the older binary headers), which adds the R2007+ groups; a
-   multi-line ATTRIB repeats its text in group 1; R12 sources are written as R13 structure (upstream issue #68).
+   drawing is written as R2010 (BricsCAD rejects the older binary headers), which adds the R2007+ groups; R12
+   sources are written as R13 structure (upstream issue #68).
 6. **DWG originals.** D holds ACadSharp's DWG-reader values, which the compat view reproduces and a DXF cannot carry:
    `CreateDateTime`/`UpdateDateTime` are half a day later (DWG date conversion), `DIMFIT` is read from the DIMATFIT
    slot, entity transparency of an ENC word 0 is "opaque", the DWG has-attributes bit and attachment/spacing

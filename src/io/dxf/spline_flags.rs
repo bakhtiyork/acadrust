@@ -39,7 +39,12 @@ pub(super) fn write(spline: &Spline) -> i16 {
     let mut flags = spline.dxf_flags & !0x7ff;
     let fit_method = spline.dwg_flags1 & 1 != 0
         || (!spline.fit_points.is_empty() && spline.control_points.is_empty());
-    if fit_method || spline.knot_parameterization != 0 || spline.dxf_flags & PARAMETERIZATION != 0 {
+    // A control-vertex spline read from DWG carries the custom parametrisation (15) as its default; AutoCAD
+    // writes no parametrisation bit for it, only for a fit-method spline or one that states chord/uniform methods.
+    if fit_method
+        || matches!(spline.knot_parameterization, 1 | 2)
+        || spline.dxf_flags & PARAMETERIZATION != 0
+    {
         flags |= match spline.knot_parameterization {
             0 => 32,
             1 => 64,
@@ -70,4 +75,29 @@ pub(super) fn write(spline: &Spline) -> i16 {
         flags |= 16;
     }
     flags
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Vector3;
+
+    #[test]
+    fn control_vertex_spline_with_the_dwg_custom_parametrisation_states_no_method_bit() {
+        let mut spline = Spline::new();
+        spline.control_points = vec![Vector3::ZERO, Vector3::new(1.0, 1.0, 0.0), Vector3::new(2.0, 0.0, 0.0)];
+        spline.knot_parameterization = 15;
+        assert_eq!(write(&spline) & PARAMETERIZATION, 0);
+        // A stated chord or uniform method is written, and so is any method the DXF source stated.
+        spline.knot_parameterization = 2;
+        assert_eq!(write(&spline) & PARAMETERIZATION, 128);
+        spline.knot_parameterization = 15;
+        spline.dxf_flags = 256;
+        assert_eq!(write(&spline) & PARAMETERIZATION, 256);
+        // A fit-method spline always carries its method.
+        let mut fit = Spline::new();
+        fit.fit_points = vec![Vector3::ZERO, Vector3::new(1.0, 2.0, 0.0)];
+        fit.knot_parameterization = 15;
+        assert_eq!(write(&fit) & PARAMETERIZATION, 256);
+    }
 }

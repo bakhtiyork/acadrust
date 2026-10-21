@@ -87,6 +87,8 @@ mod block_graph;
 pub use block_graph::BlockGraph;
 mod dynamic_properties;
 pub use dynamic_properties::DynamicBlockProperty;
+#[cfg(feature = "acadsharp-compat")]
+pub mod native_dump;
 
 #[cfg(feature = "serde")]
 fn default_sketch_tolerance() -> f64 {

@@ -110,9 +110,8 @@ fn record_value(doc: &CadDocument, value: &XDataValue) -> Value {
 }
 
 fn decoded_record_value(doc: &CadDocument, value: &XDataValue) -> Value {
-    // The native DWG decoder preserves the source UTF-16 terminator so the
-    // value remains lossless for round-trip use. ACadSharp exposes the logical
-    // string through its compatibility property, without that terminator.
+    // The native DWG decoder removes one UTF-16 terminator; ACadSharp exposes the logical string, which also
+    // ends before any further trailing NULs.
     if let XDataValue::String(value) = value {
         let trimmed = value.trim_end_matches('\0');
         if trimmed.len() != value.len() {

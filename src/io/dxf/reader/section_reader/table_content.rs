@@ -13,13 +13,20 @@ use super::{append_hex_bytes, parse_dxf_handle, SectionReader};
 impl<'a> SectionReader<'a> {
     fn read_table_value_dxf(&mut self) -> Result<CellValue> {
         let mut value = CellValue::new();
+        // A value of R2007+ ends with group 304 (ACVALUE_END) and carries its format after group 94. An earlier
+        // file has neither: its value ends where an end marker (309) or the next data item (300 key name, 301
+        // type) begins.
+        let mut seen_unit = false;
         while let Some(pair) = self.reader.read_pair()? {
-            if pair.code == 0 {
+            if pair.code == 0 || pair.code == 309 || pair.code == 301 || (pair.code == 300 && !seen_unit) {
                 self.reader.push_back(pair);
                 break;
             }
             if pair.code == 304 {
                 break;
+            }
+            if pair.code == 94 {
+                seen_unit = true;
             }
             match pair.code {
                 93 => value.flags = pair.as_i32().unwrap_or(0),

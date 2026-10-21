@@ -50,7 +50,8 @@ pub(crate) fn encode_values_with_encoding(
     let push_string = |b: &mut Vec<u8>, s: &str| {
         b.push(0);
         if wide {
-            let units: Vec<u16> = s.encode_utf16().collect();
+            // R2007+ strings are counted with their UTF-16 NUL terminator.
+            let units: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
             b.extend_from_slice(&(units.len() as u16).to_le_bytes());
             for u in units {
                 b.extend_from_slice(&u.to_le_bytes());
@@ -161,6 +162,11 @@ fn decode_values_impl<T>(
                     for _ in 0..n {
                         units.push(read_u16(bytes, i)?);
                         i += 2;
+                    }
+                    // The counted units of a DWG string end with a UTF-16 NUL terminator, which is not part
+                    // of the text (the encoder writes it back).
+                    if units.last() == Some(&0) {
+                        units.pop();
                     }
                     String::from_utf16_lossy(&units)
                 } else {

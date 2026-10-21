@@ -2309,6 +2309,11 @@ impl<'a> SectionReader<'a> {
                         }
                     }
                 }
+                "$CMATERIAL" => {
+                    if let Some(p) = self.reader.read_pair()? {
+                        hdr.current_material_handle = parse_dxf_handle(&p.value_string);
+                    }
+                }
                 "$INTERFERECOLOR" => {
                     if let Some(p) = self.reader.read_pair()? {
                         if let Some(v) = p.as_i16() {
@@ -23536,16 +23541,8 @@ mod tests {
         let entities: Vec<_> = doc2.entities().collect();
         assert_eq!(entities.len(), 1);
         if let EntityType::MText(ref m) = entities[0] {
-            // Newlines should have been converted to \P paragraph markers
-            assert!(
-                m.value.contains("\\P"),
-                "Expected \\P paragraph marker, got: {}",
-                m.value
-            );
-            assert!(
-                !m.value.contains('\n'),
-                "Literal newline should not survive roundtrip"
-            );
+            // A line feed is not a paragraph break (`\P`): a binary DXF string holds it as it is.
+            assert_eq!(m.value, "Hello\nWorld");
         } else {
             panic!("Expected MText entity");
         }

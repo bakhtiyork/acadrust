@@ -418,14 +418,15 @@ fn mtext_source_spelling_and_line_breaks_round_trip_in_ascii_dxf() {
 }
 
 #[test]
-fn mtext_without_source_spelling_still_gets_the_paragraph_mark() {
+fn mtext_without_source_spelling_writes_a_line_feed_as_a_caret_escape() {
+    // `\P` is a paragraph break, not a line feed: the line feed keeps its meaning, spelled as AutoCAD spells it.
     let mut doc = CadDocument::new();
     let mut mtext = MText::new();
-    mtext.value = "one\ntwo".to_string();
+    mtext.value = "one\ntwo\\Pthree".to_string();
     doc.add_entity(EntityType::MText(Box::new(mtext))).unwrap();
     let text = write(&doc);
     let mtext = records(&text, "MTEXT").pop().expect("MTEXT");
-    assert_eq!(first(mtext, 1).as_deref(), Some("one\\Ptwo"));
+    assert_eq!(first(mtext, 1).as_deref(), Some("one^Jtwo\\Pthree"));
 }
 
 #[test]
