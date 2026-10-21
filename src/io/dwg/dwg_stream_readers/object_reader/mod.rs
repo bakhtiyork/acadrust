@@ -575,10 +575,11 @@ impl DwgObjectReader {
         let linetype_scale = reader.read_bit_double();
 
         // R13-R14: invisibility + return early
-        // DXF group 60 convention (all DWG versions): 0 = visible, non-zero = invisible
+        // DXF group 60 convention (all DWG versions): 1 = invisible. Only bit 0 is
+        // the flag; other bits (e.g. 2, seen on real files) do not hide the entity.
         let invisible;
         if self.version.r13_14_only() {
-            invisible = reader.read_bit_short() != 0;
+            invisible = invisible_flag(reader.read_bit_short());
             return EntityCommonData {
                 common,
                 has_graphic,
@@ -667,7 +668,7 @@ impl DwgObjectReader {
         }
 
         // Invisibility
-        invisible = reader.read_bit_short() != 0;
+        invisible = invisible_flag(reader.read_bit_short());
 
         // R2000+: Lineweight (5-bit DWG index → raw byte value)
         let line_weight = if self.version.r2000_plus() {
@@ -911,9 +912,23 @@ fn read_modular_unsigned(data: &[u8], width: usize, payload_bits: u32) -> Result
 //  Tests
 // ════════════════════════════════════════════════════════════════════════════
 
+/// Invisibility (DXF group 60) is a flag word: only bit 0 hides the entity.
+fn invisible_flag(raw: i16) -> bool {
+    raw & 1 != 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_bit_zero_of_the_invisibility_word_hides_an_entity() {
+        assert!(!invisible_flag(0));
+        assert!(invisible_flag(1));
+        // ACadSharp reads `(value & 1) == 1`; real drawings carry 2.
+        assert!(!invisible_flag(2));
+        assert!(invisible_flag(3));
+    }
 
     #[test]
     fn test_modular_short_read() {

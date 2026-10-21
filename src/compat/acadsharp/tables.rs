@@ -331,8 +331,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                 vec![
                     (
                         "AttributeDefinitions",
-                        json!(v
-                            .entity_handles
+                        json!(view_entity_handles(doc, v)
                             .iter()
                             .filter(|h| matches!(
                                 doc.get_entity(**h),
@@ -352,8 +351,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ("Source", block_source(doc, v)),
                     (
                         "Entities",
-                        json!(v
-                            .entity_handles
+                        json!(view_entity_handles(doc, v)
                             .iter()
                             .copied()
                             .map(handle)
@@ -373,7 +371,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ),
                     (
                         "HasAttributes",
-                        json!(v.entity_handles.iter().any(|h| matches!(
+                        json!(view_entity_handles(doc, v).iter().any(|h| matches!(
                             doc.get_entity(*h),
                             Some(crate::entities::EntityType::AttributeDefinition(_))
                         ))),
@@ -398,8 +396,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ),
                     (
                         "Viewports",
-                        json!(v
-                            .entity_handles
+                        json!(view_entity_handles(doc, v)
                             .iter()
                             .filter(|h| matches!(
                                 doc.get_entity(**h),
@@ -631,6 +628,28 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
 
 pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
     out.extend(records(doc).into_iter().map(|render| render()));
+}
+
+/// The block's entities as ACadSharp registers them from a DWG: only the handles the block record itself lists
+/// (R2004+ owned-object list, R13-R2000 first/last chain). An entity that merely names the block as its owner but
+/// is absent from that list is never added to the block, so ACadSharp does not register it. The native record
+/// keeps owner-derived members too; documents that were not read from a DWG have no source list.
+pub(super) fn view_entity_handles<'a>(
+    doc: &'a CadDocument,
+    b: &'a crate::tables::BlockRecord,
+) -> std::borrow::Cow<'a, [crate::types::Handle]> {
+    use std::borrow::Cow;
+    let Some(listed) = doc.block_entity_handles.get(&b.handle) else {
+        return Cow::Borrowed(&b.entity_handles);
+    };
+    let listed: std::collections::HashSet<_> = listed.iter().copied().collect();
+    Cow::Owned(
+        b.entity_handles
+            .iter()
+            .copied()
+            .filter(|h| listed.contains(h))
+            .collect(),
+    )
 }
 
 pub(super) fn block_flags(doc: &CadDocument, b: &crate::tables::BlockRecord) -> i16 {

@@ -49,8 +49,7 @@ impl<'a> Records<'a> {
             .block_records
             .iter()
             .map(|block| {
-                let viewports = block
-                    .entity_handles
+                let viewports = super::tables::view_entity_handles(doc, block)
                     .iter()
                     .copied()
                     .filter(|h| {

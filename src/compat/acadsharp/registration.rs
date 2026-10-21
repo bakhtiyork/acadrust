@@ -160,15 +160,20 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -
                         .as_str()
                         .is_some_and(|marker| marker.ends_with("TableRecord")))
                     || (record["props"].get("ProxyGeometries").is_some()
-                        && matches!(
-                            parent_type,
-                            "BlockRecord"
-                                | "Insert"
-                                | "Polyline2D"
-                                | "Polyline3D"
-                                | "PolyfaceMesh"
-                                | "PolygonMesh"
-                        ))
+                        && match parent_type {
+                            // A block lists its own entities (membership edges
+                            // below); its BLOCK/ENDBLK markers and non-graphical
+                            // objects follow the owner pointer. An entity that
+                            // names the block as owner but is not in its list
+                            // stays unregistered.
+                            "BlockRecord" => {
+                                matches!(ty, "Block" | "BlockEnd")
+                                    || doc.get_entity(Handle::new(h)).is_none()
+                            }
+                            "Insert" | "Polyline2D" | "Polyline3D" | "PolyfaceMesh"
+                            | "PolygonMesh" => true,
+                            _ => false,
+                        })
                 {
                     edges.entry(owner).or_default().push(h);
                 }
@@ -277,13 +282,14 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -
     }
     // Block entity membership is retained independently of source owner fields.
     for block in doc.block_records.iter() {
-        for h in &block.entity_handles {
+        let members = super::tables::view_entity_handles(doc, block);
+        for h in members.iter() {
             owners.insert(h.value(), block.handle.value());
         }
         edges
             .entry(block.handle.value())
             .or_default()
-            .extend(block.entity_handles.iter().map(|h| h.value()));
+            .extend(members.iter().map(|h| h.value()));
     }
     // Template lookup is broader than document registration: a known orphan
     // can still be an XRecord reference. Unknown-reader policy applies to both.

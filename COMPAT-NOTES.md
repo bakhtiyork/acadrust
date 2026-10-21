@@ -139,6 +139,17 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R4-C3 entity-attached defaults | A dimension, leader or tolerance in a block makes the view contain a "Standard" dimension style with constructor values and the next free identity; a MultiLeader makes it contain a "1:1" scale. Without such an entity the native default dimension style is omitted. | `Entity.AssignDocument` adds the default style/scale to the document tables before the entity's own reference is resolved. |
 | R4-C3 table entries | Empty table-entry names become `unnamed<N>` (not for VPORT), an empty-name VPORT is dropped, ByBlock/ByLayer DWG layer colours read as index 7, BLOCK_RECORD.Layout is null unless a decoded layout exists (registered for DXF), Group.IsUnnamed follows the dictionary-assigned name, graph expressions the reader never produced are null, MTEXTATTRIBUTE context data is not read from DWG. | Table.Add naming, the DWG layer reader, VPortsTable.Add, CadLayoutTemplate, the Group getter, the EvaluationGraph template and the TODO in `readMTextAttributeObjectContextData`. Compat only. |
 | R4-C3 record projections | DWG ucs icon bit 1 maps to OnOrigin (3), DWG R2000+ headers expose DIMSD1/DIMSD2 as the extension-line suppression flags, OLE frames report no source application or paper-space flag for DWG, MLineStyle colours pack RGB like the other appearance colours, a DWG DIMENSION association resolves polyline vertices as targets, BlockReference context data keeps the annotation-scale identity, an unresolved MLeader linetype is ByLayer. | Reference reader quirks and getters. Compat only. |
+| R4-C1 DWG invisibility | The common entity data reads the invisibility word as a flag: only bit 0 hides the entity (was: any non-zero value). | DXF group 60 is 0/1 and ACadSharp tests `(value & 1) == 1`. Real files carry 2 (206,650 SEQENDs of bridge-slab/UIT BHUWANA PART1.dwg, 77 of cadviewer/ma1000_133.dwg), which hid entities AutoCAD shows. Upstream-PR candidate. |
+| R4-C1 DWG dimension elevation | The record's single elevation is also the Z of the dimension's insertion point (point 12), not 0. | The DWG stores one elevation for points 11, 12 and 16; owerko/dimensions.dwg has dimensions at -208. The writer still writes only X and Y. Upstream-PR candidate. |
+| R4-C1 DWG owned-vertex lists | When a POLYLINE/mesh record lists its owned vertices (R2004+), vertices that merely name it as owner but are absent from the list are dropped. An empty list keeps the owner-derived members. | Stale vertices are not part of the polyline in AutoCAD; bridge-slab/PIER REINFORCEMENT 02122007.dwg has 5 polylines with 2 unlisted vertices each (18 `Vertex2D`). |
+| R4-C1 DXF hatch ellipse edges | The DXF reader converts HATCH elliptic-arc edge angles (groups 50/51) from degrees to radians, as it already did for circular arcs; the DXF writer converts back. | The model holds radians (the DWG reader and the doc comment agree) and DXF stores degrees; the reader kept degrees, so DXF and DWG ellipse edges differed (ezdxf/hatches_2.dxf). Upstream-PR candidate. |
+| R4-C1 table cell group 91 | `CellValue::dxf_long` (additive) keeps DXF group 91 as read, even when the 93 flags suppress the value body. | Needed to tell "91 present" from "absent" in the ACadSharp view (below). |
+| R4-C1 LWPOLYLINE flags | The view reports Flags as Closed (1) plus Plinegen (128). | `LwPolylineFlags` has both bits; the view only reported Closed (6,048 polylines in 29 files). |
+| R4-C1 arc dimension name | `DimensionArc.ObjectName` is `ARC_DIMENSION`. | ACadSharp overrides it; every other dimension reports `DIMENSION`. |
+| R4-C1 two-line angular measurement | The view reproduces `DimensionAngular2Line.Measurement`: the angle between the two direction vectors, replaced by its supplement when the one-sided cross-product signs against the normal differ, with the exact-equality `Center`. | The native `measurement_radians` picks the sector geometrically. ACadSharp's rule disagrees on markov-ai/task-020_gold.dwg #1191 (3.0595 vs 0.0821). |
+| R4-C1 legacy code-page replacement | In the view, a U+FFFD in a pre-R2007 DWG TEXT value becomes `?`, and an ASCII character right after it is dropped. | .NET's DBCS decoders replace an invalid lead byte and the following ASCII byte with one `?`; encoding_rs emits U+FFFD and keeps the ASCII byte (scau-gis/别墅建筑结构全套图纸.dwg, 462 texts). Applied to TEXT only, the only mismatch seen. |
+| R4-C1 block membership view | For DWG sources the view lists as a block's entities only the handles the block record itself lists (`block_entity_handles`: R2004+ owned list, R13-R2000 chain); the native record keeps owner-derived members too. A BlockRecord's owner pointer registers only its BLOCK/ENDBLK markers and non-graphical objects. | ACadSharp adds an entity to a block only through that list, so an entity that names the block as owner but is unlisted is never registered (et2_blocks/py.dwg `py_resist90`, 12 stale entities; most owerko/*.dwg files, in anonymous blocks). DXF sources and documents without a source list are unchanged. |
+| R4-C1 DXF unknown-typed table cell values | In a DXF TABLE, a cell value of unknown type reports group 91 as its Value (also when the 93 flags say empty); with no group 91 it stays null. | `readCadValue` calls `SetValue(int)` for group 91 whatever the flags (ezdxf/acad_table_with_blk_ref.dxf). |
 
 ## ACadSharp differential dump
 
@@ -236,3 +247,35 @@ reader diagnostics establishes the following; no fixture-specific filter is used
   corpus R14 files), so the plot-style dictionary-with-default has no entries
   and `#F` is absent; the view now omits R14 placeholders. The earlier remark
   that a blanket policy is incorrect rested on this one sample.
+
+## R4-C1 remaining reference differences (decision D-b)
+
+Corpus entity rows left after R4-C1, each a case where ACadSharp provably loses data that the fork reads
+correctly. Nothing is emulated. The reference side was traced with the CadCore port (a 1:1 port of the C#
+reader) printing its notifications.
+
+* **ACDBVIEWREPBLOCKREFERENCE inserts (35 `Insert`).** The reference reads this class as an `UnknownEntity`
+  ("Unlisted object with DXF name ACDBVIEWREPBLOCKREFERENCE") and `CadBlockRecordTemplate.addEntity` drops
+  unknown entities (`KeepUnknownEntities` is false), so they are never registered. The fork decodes them as
+  `Insert` (the class derives from AcDbBlockReference). Handles: cwoffenden/radiator-bracket.dwg `#5371 #544C
+  #59F2`; markov-ai task-030 `#3A6 #3AA #4C1 #4C5 #512 #516 #573 #577 #C0A #C0E`; task-040 `#548 #54C #5B9 #5BD
+  #603 #607`; task-043 `#4D3C #4D40 #6BE3 #6BE7 #846B #846F #897D #8981`; task-050 `#374 #378 #722 #726 #EE5
+  #EE9 #1031 #1035`. Rows: `Insert` extra-object, `BlockRecord.Entities` for their blocks.
+* **LARGE_RADIAL_DIMENSION (3 `DimensionRadius`).** Read as `UnknownEntity` ("Unlisted object with DXF name
+  LARGE_RADIAL_DIMENSION" in DWG, "Entity not supported" in DXF) and dropped. The fork reads the jogged radial
+  dimension. Handles: owerko/dimensions.dwg `#73FA`; ezdxf/uncommon.dxf `#37C #414` (the reference reports a third one). Follow-on rows: the entities' extension dictionaries and their DimensionAssociation
+  (`CadDictionary` extra-object 3, `DimensionAssociation` 3), `DimensionStyle.Reactors` of `#27` (2 files) and
+  `BlockRecord.Entities` of model space.
+* **MINSERT with a zero Z scale (scau-gis/10号别墅建筑施工图.dwg, AC1015).** The reference's `Insert.ZScale`
+  setter throws "ZScale value must be none zero", the MINSERT reads fail (`#11E8`, `#11EB`, `#2442`: three
+  Error notifications) and, because AC1015 walks the block's first/last entity chain until a template is
+  missing, every later model-space entity is lost: 242 `Insert`, 184 `AttributeEntity`, 182 `Seqend`, 3,526
+  `Line`, 1,067 `TextEntity`, 317 `DimensionLinear`, 217 `LwPolyline`, 115 `Hatch`, 87 `Arc`, 63
+  `DimensionAligned`, 60 `Circle`, 7 `Spline` and 2 `AttributeDefinition` (the latter two plus
+  `BlockRecord.AttributeDefinitions/HasAttributes` of `#2`). The fork keeps the stored zero scale and the
+  whole chain.
+* **XDATA strings with a legacy code page (scau-gis/10号别墅建筑施工图.dwg `Line #446F`, 1 row).** The
+  reference decodes each 1000 string through `ReadTextUnicode`, with the code-page key stored in the record,
+  and gets U+FFFD for every byte of "西文字型", "中文字型", ... (6 strings); the fork decodes them with the
+  drawing's GB2312/GBK page and reads the Chinese text.
+* **Rows owned by the next job:** `ProxyEntity`, `ProxyObject`, `Field` and `FieldList`.

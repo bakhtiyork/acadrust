@@ -481,6 +481,9 @@ pub struct CellValue {
     pub point_value: Vector3,
     /// Date/buffer/result-buffer payload.
     pub binary_value: Vec<u8>,
+    /// DXF group 91 exactly as read, kept even when the value flags suppress the body.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub dxf_long: Option<i32>,
 }
 
 impl CellValue {
@@ -500,6 +503,7 @@ impl CellValue {
             handle_value: None,
             point_value: Vector3::ZERO,
             binary_value: Vec::new(),
+            dxf_long: None,
         }
     }
 
@@ -519,6 +523,7 @@ impl CellValue {
             handle_value: None,
             point_value: Vector3::ZERO,
             binary_value: Vec::new(),
+            dxf_long: None,
         }
     }
 
@@ -538,6 +543,7 @@ impl CellValue {
             handle_value: None,
             point_value: Vector3::ZERO,
             binary_value: Vec::new(),
+            dxf_long: None,
         }
     }
 
@@ -557,6 +563,7 @@ impl CellValue {
             handle_value: None,
             point_value: Vector3::ZERO,
             binary_value: Vec::new(),
+            dxf_long: None,
         }
     }
 
