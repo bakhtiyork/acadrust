@@ -206,7 +206,11 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
         .map(|(prefix, suffix)| (prefix.to_string(), suffix.to_string()))
         .unwrap_or_else(|| (String::new(), postfix.clone()));
 
-    let flags = if source_dwg {
+    let flags = if source_dxf {
+        // The reference DXF reader treats the first group 70 only as "flags seen" (the second carries the
+        // text background color), so the standard flags of a DXF record stay zero.
+        0
+    } else if source_dwg {
         // ACadSharp's DWG reader exposes only the dependant and reference
         // bits.  The resolved bit is retained by the native model but is not
         // part of its compatibility StandardFlags projection.

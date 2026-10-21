@@ -165,7 +165,7 @@ fn dump_object(
         ObjectType::Scale(value) => dump_scale(map_handle, value),
         ObjectType::VisualStyle(value) => dump_visual_style(map_handle, value, reader),
         ObjectType::Material(value) => dump_material(_doc, reader, map_handle, value),
-        ObjectType::ImageDefinition(value) => dump_image_definition(map_handle, value),
+        ObjectType::ImageDefinition(value) => dump_image_definition(map_handle, value, reader),
         ObjectType::ImageDefinitionReactor(value) => {
             dump_image_definition_reactor(map_handle, value)
         }
@@ -641,8 +641,19 @@ fn dump_layout(
     } else {
         value.plot_flags.to_bits() as i64
     };
+    // Code 70 is one property to the reference reader, so a DXF whose AcDbLayout subclass has no group 70
+    // (ACadSharp's own writer omits it) leaves the PlotSettings value as the layout flags.
     let layout_flags = if is_new && value.flags == 0 {
         1
+    } else if dxf_source && !value.dxf_layout_flags_present {
+        value
+            .raw_plot_settings_codes
+            .iter()
+            .flatten()
+            .rev()
+            .find(|(code, _)| *code == 70)
+            .and_then(|(_, text)| text.trim().parse::<i16>().ok())
+            .map_or(value.flags as i64, i64::from)
     } else {
         value.flags as i64
     };
@@ -780,7 +791,12 @@ fn dump_layout(
         ("ScaledFit", int(value.plot_scale_type as i64)),
         ("ShadePlotDPI", int(shade_plot_dpi)),
         ("ShadePlotIDHandle", int(0)),
-        ("ShadePlotMode", int(value.shade_plot_mode as i64)),
+        // The reference DXF reader hands group 76 to the Layout's own UCS orthographic type before the
+        // PlotSettings member is tried, so a DXF never assigns the shade plot mode.
+        (
+            "ShadePlotMode",
+            int(if dxf_source { 0 } else { value.shade_plot_mode as i64 }),
+        ),
         ("ShadePlotResolutionMode", int(shade_plot_resolution)),
         ("StandardScale", number(value.plot_scale_factor)),
         (
@@ -1151,14 +1167,18 @@ fn dump_scale(handle_value: Handle, value: &Scale) -> Value {
     record(handle_value, "Scale", value.owner_handle, props("Scale", p))
 }
 
-fn dump_image_definition(handle_value: Handle, value: &ImageDefinition) -> Value {
+fn dump_image_definition(handle_value: Handle, value: &ImageDefinition, reader: &str) -> Value {
     let mut p = common("IMAGEDEF", UNLISTED, "AcDbRasterImageDef", None, None, None);
+    // A DXF without groups 11/21 (ACadSharp's writer omits them) leaves the reference constructor's (1, 1);
+    // the native pixel size of such an object is the zero it was created with.
+    let default_size = if reader == "dxf" && value.pixel_size == (0.0, 0.0) {
+        (1.0, 1.0)
+    } else {
+        value.pixel_size
+    };
     p.extend([
         ("ClassVersion", int(value.class_version as i64)),
-        (
-            "DefaultSize",
-            tuple2((value.pixel_size.0, value.pixel_size.1)),
-        ),
+        ("DefaultSize", tuple2(default_size)),
         ("FileName", text(&value.file_name)),
         ("IsLoaded", bool_value(value.is_loaded)),
         (
@@ -1717,6 +1737,13 @@ fn dump_book_color(
         dictionary_parts.map_or("", |(_, color)| color)
     } else {
         value.color_name.as_str()
+    };
+    // Its Name setter splits a DXF group 430 on every `$`: the first segment becomes the book and the last the
+    // color (the native model keeps everything after the first `$` as the color name).
+    let color_name = if doc.dwg_source_version.is_none() {
+        color_name.rsplit('$').next().unwrap_or(color_name)
+    } else {
+        color_name
     };
     let name = if color_name.is_empty() {
         String::new()

@@ -101,8 +101,9 @@ pub struct MTextDxfSource {
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MText {
-    /// Source lexical text, retained only when decoding changed it. DXF caret
-    /// escapes have already been interpreted independently for each chunk.
+    /// Source lexical text, retained when decoding changed it or when the source spelled a line break itself
+    /// (a caret escape or, in binary DXF, a literal break). DXF caret escapes have already been interpreted
+    /// independently for each chunk.
     #[cfg_attr(feature = "serde", serde(default))]
     pub source_value: Option<String>,
     /// Source DXF presence and ordered alignment assignments.
@@ -195,6 +196,19 @@ impl PartialEq for MText {
 }
 
 impl MText {
+    /// The text as the source file spelled it (`\U+00B0` escapes rather than the decoded character), while the
+    /// public value is still the decoded form of that spelling; `None` once the value has been edited or when
+    /// the source spelling was not altered by decoding.
+    pub(crate) fn unchanged_source_value(&self) -> Option<&str> {
+        let raw = self.source_value.as_deref()?;
+        let unchanged = if let Some(dxf) = &self.dxf_source {
+            dxf.decoded_value.as_ref() == Some(&self.value)
+        } else {
+            crate::io::dxf::code_page::decode_legacy_escapes(raw) == self.value
+        };
+        unchanged.then_some(raw)
+    }
+
     /// Create a new MText entity
     pub fn new() -> Self {
         MText {

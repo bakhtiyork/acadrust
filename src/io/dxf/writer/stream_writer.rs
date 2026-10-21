@@ -17,6 +17,18 @@ pub trait DxfStreamWriter {
     /// Write an XRecord string without applying MTEXT-specific substitutions.
     fn write_xrecord_string(&mut self, code: i32, value: &str) -> Result<()>;
 
+    /// Whether this writer can emit text exactly as a DXF text file spells it (caret escapes such as `^J`,
+    /// `\U+00B0` escapes). Only the ASCII writer can; others take decoded values.
+    fn writes_source_spelling(&self) -> bool {
+        false
+    }
+
+    /// Write text already in DXF file spelling, with no further escaping. Only meaningful when
+    /// [`writes_source_spelling`](Self::writes_source_spelling) is true.
+    fn write_source_spelling(&mut self, code: i32, text: &str) -> Result<()> {
+        self.write_string(code, text)
+    }
+
     /// Write a code/value pair with a byte value (for codes 280-289)
     fn write_byte(&mut self, code: i32, value: u8) -> Result<()>;
 

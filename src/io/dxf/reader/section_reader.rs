@@ -7576,6 +7576,7 @@ impl<'a> SectionReader<'a> {
                         70 => {
                             if let Some(v) = pair.as_i16() {
                                 layout.flags = v;
+                                layout.dxf_layout_flags_present = true;
                             }
                         }
                         71 => {
@@ -10121,7 +10122,9 @@ impl<'a> SectionReader<'a> {
                 }
                 9 => {
                     if let Some(last) = linetype.elements.last_mut() {
-                        if last.complex.is_some() {
+                        // Some writers emit an empty `9` after a shape element; it must not turn the shape into
+                        // text (and drop its shape number).
+                        if last.complex.is_some() && !(last.is_shape() && pair.value_string.is_empty()) {
                             last.complex_mut().set_text(pair.value_string.clone());
                         }
                     }
@@ -13862,7 +13865,14 @@ impl<'a> SectionReader<'a> {
                     } else {
                         std::borrow::Cow::Borrowed(raw.as_str())
                     };
-                    if lexical != pair.value_string && mtext.source_value.is_none() {
+                    // Retained when decoding changed the text, and also when it only turned caret escapes into
+                    // their characters or the source carried a literal line break (binary DXF): the writer needs
+                    // to know that those line breaks are source characters, not MText paragraph marks.
+                    if (lexical != pair.value_string
+                        || raw.as_str() != pair.value_string.as_str()
+                        || pair.value_string.contains(['\n', '\r']))
+                        && mtext.source_value.is_none()
+                    {
                         mtext.source_value = Some(mtext.value.clone());
                     }
                     if let Some(value) = &mut mtext.source_value {

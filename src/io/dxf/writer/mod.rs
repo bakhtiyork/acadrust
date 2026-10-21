@@ -5,6 +5,8 @@ mod r12;
 mod section_writer;
 mod stream_writer;
 mod text_writer;
+#[cfg(test)]
+mod r5a_tests;
 
 pub use binary_writer::DxfBinaryWriter;
 pub use section_writer::SectionWriter;
