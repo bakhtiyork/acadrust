@@ -230,6 +230,18 @@ pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -
             }
             dictionaries.insert(h, entries);
         }
+        if ty == "Field" {
+            // `Field.Children` registers each child field it holds
+            // (`CadObjectCollection.Add` sets the owner and registers).
+            for child in record["props"]["Children"].as_array().into_iter().flatten() {
+                if let Some(child) = id(child) {
+                    if index.get(&child).is_some_and(|&i| records[i]["type"] == "Field") {
+                        edges.entry(h).or_default().push(child);
+                        owners.insert(child, h);
+                    }
+                }
+            }
+        }
         if ty == "EvaluationGraph" {
             if let Some(nodes) = record["props"]["Nodes"].as_array() {
                 for node in nodes {

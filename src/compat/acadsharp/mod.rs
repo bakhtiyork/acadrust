@@ -22,10 +22,13 @@ mod mtext_plain_text;
 mod new_document;
 mod objects;
 mod palette;
+mod proxy;
 mod registration;
 mod registration_order;
 #[cfg(test)]
 mod r4_c1_tests;
+#[cfg(test)]
+mod r4_c2_tests;
 #[cfg(test)]
 mod r4_c3_tests;
 mod stream;

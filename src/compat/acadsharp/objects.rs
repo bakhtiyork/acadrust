@@ -178,13 +178,13 @@ fn dump_object(
         ObjectType::SortEntitiesTable(value) => dump_sort_entities(map_handle, value),
         ObjectType::PlotSettings(value) => dump_plot_settings(_doc, reader, map_handle, value),
         ObjectType::WipeoutVariables(value) => dump_wipeout_variables(map_handle, value),
-        ObjectType::Field(value) => dump_field(map_handle, value),
+        ObjectType::Field(value) => dump_field(_doc, reader, map_handle, value),
         ObjectType::FieldList(value) => dump_field_list(map_handle, value),
         ObjectType::BlockVisibilityParameter(value) => dump_visibility_parameter(_doc, reader, map_handle, value),
         ObjectType::DynamicBlock(value) => dump_dynamic_block(_doc, reader, map_handle, value),
         ObjectType::ObjectContextData(value) => dump_object_context_data(map_handle, value),
         ObjectType::TableContent(value) => dump_table_content(_doc, map_handle, value),
-        ObjectType::ProxyObject(value) => dump_proxy_object(map_handle, value),
+        ObjectType::ProxyObject(value) => dump_proxy_object(_doc, map_handle, value),
         ObjectType::UnderlayDefinition(value) => dump_underlay_definition(map_handle, value),
         ObjectType::Associative(value) => match &value.data {
             crate::objects::AssociativeData::DimensionAssociation(data) => {
@@ -2652,47 +2652,58 @@ fn dynamic_data_props(
 // Keep their scalar and handle members explicit here; properties that have no
 // equivalent model are left for `props` to mark as `!unmapped`.
 
-fn cell_value(value: &crate::entities::CellValue) -> Value {
-    match value.value_type {
-        crate::entities::CellValueType::Long => int(value.numeric_value as i64),
-        crate::entities::CellValueType::Double => number(value.numeric_value),
-        crate::entities::CellValueType::String => text(&value.text),
-        crate::entities::CellValueType::Handle => {
-            value.handle_value.map(handle).unwrap_or(Value::Null)
+/// The `CadValue` a FIELD holds (`readCadValue`; the field template never
+/// builds its value templates, so a handle value stays unset).
+fn field_cad_value(
+    doc: &crate::CadDocument,
+    reader: &str,
+    value: &crate::entities::CellValue,
+) -> Value {
+    use crate::entities::CellValueType as Kind;
+    let dxf = reader == "dxf";
+    let r2007 = doc.version >= DxfVersion::AC1021;
+    let body = if r2007 { value.flags & 1 == 0 } else { true };
+    let shown = if !body {
+        Value::Null
+    } else {
+        match value.value_type {
+            Kind::Unknown | Kind::Long => int(value.numeric_value as i64),
+            Kind::Double => number(value.numeric_value),
+            // Before R2007 the reference decodes the stored bytes including
+            // the terminating NUL.
+            Kind::String | Kind::General if !dxf && !r2007 => text(format!("{}\0", value.text)),
+            Kind::String | Kind::General => text(&value.text),
+            Kind::Date if !dxf => super::entities::table::date_value(&value.binary_value),
+            Kind::Point2D => vec2(Vector2::new(value.point_value.x, value.point_value.y)),
+            Kind::Point3D => vec3(value.point_value),
+            Kind::Handle | Kind::Date | Kind::Buffer | Kind::ResultBuffer => Value::Null,
         }
-        crate::entities::CellValueType::Point2D => {
-            vec2(Vector2::new(value.point_value.x, value.point_value.y))
-        }
-        crate::entities::CellValueType::Point3D => vec3(value.point_value),
-        crate::entities::CellValueType::Date
-        | crate::entities::CellValueType::Buffer
-        | crate::entities::CellValueType::ResultBuffer
-        | crate::entities::CellValueType::General
-        | crate::entities::CellValueType::Unknown => {
-            if !value.text.is_empty() {
-                text(&value.text)
-            } else if !value.binary_value.is_empty() {
-                super::bytes(&value.binary_value)
-            } else {
-                Value::Null
-            }
-        }
-    }
+    };
+    let strings = |s: &str| if r2007 { text(s) } else { Value::Null };
+    props(
+        "CadValue",
+        [
+            ("Flags", int(value.flags as i64)),
+            ("Format", strings(&value.format)),
+            ("FormattedValue", strings(&value.formatted_value)),
+            ("Units", int(value.raw_unit_type_code as i64)),
+            ("Value", shown),
+            ("ValueType", int(value.raw_type_code as i64)),
+        ],
+    )
 }
 
-fn dump_field(handle_value: Handle, value: &crate::objects::Field) -> Value {
+fn dump_field(
+    doc: &crate::CadDocument,
+    reader: &str,
+    handle_value: Handle,
+    value: &crate::objects::Field,
+) -> Value {
     let mut p = common("FIELD", UNLISTED, "AcDbField", None, None, None);
     p.extend([
-        (
-            "CadObjects",
-            handles(
-                value
-                    .child_fields
-                    .iter()
-                    .chain(value.referenced_objects.iter())
-                    .copied(),
-            ),
-        ),
+        // `CadObjects` holds the 331 references only; child fields go to
+        // `Children`.
+        ("CadObjects", handles(value.referenced_objects.iter().copied())),
         ("Children", handles(value.child_fields.iter().copied())),
         (
             "EvaluationErrorCode",
@@ -2708,16 +2719,25 @@ fn dump_field(handle_value: Handle, value: &crate::objects::Field) -> Value {
         ("FieldCode", text(&value.code)),
         ("FieldStateFlags", int(value.state as i64)),
         ("FilingOptionFlags", int(value.filing_option as i64)),
-        ("FormatString", text(value.pre2007_format())),
+        // Both readers assign the value string (DWG: the last text of the
+        // record, after the older format string; DXF: group 301).
+        // (DXF keeps the group's source caret escapes.)
+        (
+            "FormatString",
+            text(match &value.value_string_source.0 {
+                Some(source) if reader == "dxf" => source,
+                _ => &value.value_string,
+            }),
+        ),
         ("ObjectName", text("FIELD")),
-        ("Value", cell_value(&value.value)),
+        ("Value", field_cad_value(doc, reader, &value.value)),
         (
             "Values",
             Value::Array(
                 value
                     .child_values
                     .iter()
-                    .map(|child| json!([child.key, cell_value(&child.value)]))
+                    .map(|child| json!([child.key, field_cad_value(doc, reader, &child.value)]))
                     .collect(),
             ),
         ),
@@ -3525,7 +3545,11 @@ fn dump_table_content(
     record(handle_value, "TableContent", value.common.owner_handle, props("TableContent", p))
 }
 
-fn dump_proxy_object(handle_value: Handle, value: &crate::objects::ProxyObject) -> Value {
+fn dump_proxy_object(
+    doc: &crate::CadDocument,
+    handle_value: Handle,
+    value: &crate::objects::ProxyObject,
+) -> Value {
     let mut p = common(
         "ACAD_PROXY_OBJECT",
         UNLISTED,
@@ -3534,16 +3558,27 @@ fn dump_proxy_object(handle_value: Handle, value: &crate::objects::ProxyObject) 
         Some(&value.reactors),
         value.xdictionary_handle,
     );
+    let dwg = doc.classes.source_classes().is_none();
+    p.extend(super::proxy::members(
+        doc,
+        value.class_id,
+        value.dwg_version,
+        value.maintenance_version,
+        value.from_dxf,
+        value.text_payload.bit_count > 0 || value.payload.bit_count > 0,
+    ));
     p.extend([
-        ("BinaryData", super::bytes(&value.payload.data())),
-        ("Data", super::bytes(&value.text_payload.data())),
-        ("DrawingFormat", int(value.dwg_version as i64)),
-        ("MaintenanceVersion", int(value.maintenance_version as i64)),
+        // The DWG reader never assigns BinaryData (code 310 only exists in DXF).
+        (
+            "BinaryData",
+            if !dwg && value.payload.bit_count > 0 {
+                json!({})
+            } else {
+                Value::Null
+            },
+        ),
         ("ObjectName", text("ACAD_PROXY_OBJECT")),
-        ("OriginalDataFormatDxf", bool_value(value.from_dxf)),
         ("ProxyClassId", int(value.proxy_id as i64)),
-        ("ClassId", int(value.class_id as i64)),
-        ("Version", int(value.version as i64)),
     ]);
     record(
         handle_value,
@@ -3803,10 +3838,15 @@ fn enrich_object_record(
             props_value.insert("Name".to_string(), text(name));
         } else if unnamed_aec || matches!(
             object,
-            Some(ObjectType::Dictionary(_) | ObjectType::DictionaryWithDefault(_))
+            Some(
+                ObjectType::Dictionary(_)
+                    | ObjectType::DictionaryWithDefault(_)
+                    | ObjectType::Field(_)
+                    | ObjectType::FieldList(_)
+            )
         ) {
             // NonGraphicalObject.Name starts empty. An extension dictionary
-            // has no dictionary key to assign it a name.
+            // or a child field has no dictionary key to assign it a name.
             props_value.insert("Name".to_string(), text(""));
         }
     }

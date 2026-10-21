@@ -141,6 +141,18 @@ impl PartialEq for SourceFlag {
     }
 }
 
+/// Source spelling of a decoded string, kept only when decoding changed it.
+/// Metadata about how the record was read, so it never takes part in equality.
+#[doc(hidden)]
+#[derive(Debug, Clone, Default)]
+pub struct SourceText(pub Option<String>);
+
+impl PartialEq for SourceText {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// Dictionary object - stores key-value pairs of object handles
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

@@ -150,6 +150,10 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R4-C1 legacy code-page replacement | In the view, a U+FFFD in a pre-R2007 DWG TEXT value becomes `?`, and an ASCII character right after it is dropped. | .NET's DBCS decoders replace an invalid lead byte and the following ASCII byte with one `?`; encoding_rs emits U+FFFD and keeps the ASCII byte (scau-gis/别墅建筑结构全套图纸.dwg, 462 texts). Applied to TEXT only, the only mismatch seen. |
 | R4-C1 block membership view | For DWG sources the view lists as a block's entities only the handles the block record itself lists (`block_entity_handles`: R2004+ owned list, R13-R2000 chain); the native record keeps owner-derived members too. A BlockRecord's owner pointer registers only its BLOCK/ENDBLK markers and non-graphical objects. | ACadSharp adds an entity to a block only through that list, so an entity that names the block as owner but is unlisted is never registered (et2_blocks/py.dwg `py_resist90`, 12 stale entities; most owerko/*.dwg files, in anonymous blocks). DXF sources and documents without a source list are unchanged. |
 | R4-C1 DXF unknown-typed table cell values | In a DXF TABLE, a cell value of unknown type reports group 91 as its Value (also when the 93 flags say empty); with no group 91 it stays null. | `readCadValue` calls `SetValue(int)` for group 91 whatever the flags (ezdxf/acad_table_with_blk_ref.dxf). |
+| R4-C2 proxy view | `ProxyEntity` / `ProxyObject` resolve `DxfClass` by class number in the name-deduplicated class list (all DXF classes are 500) and `ClassId` reads its number, throwing `NullReferenceException` without a class. `Version` is the stored low word and `DrawingFormat` the combined word (the native record keeps them the other way round); `Data` is an empty-object stream only for DWG R2010+ (the reference learns the handle-section offset there only) and `BinaryData` is never assigned by the DWG reader. Before R2000 the version fields stay zero. | View only; the native proxy records keep the stored class id, both words and the bit-exact payload. Dump quirks of `readCommonProxyData`. |
+| R4-C2 field values | `Field.Value` / `Values` are `CadValue` objects (flags, type, units, format strings from R2007, value). The reference does not wire the value templates, so handle values stay unset; before R2007 it decodes strings with their stored NUL. `FormatString` is the value string (the DWG reader overwrites the older format string with it, DXF group 301), `CadObjects` holds only the 331 references that resolve, `Children` and `FieldList.Fields` only fields that resolve (the list once each), and a field outside a dictionary has an empty `Name`. | View only. Native `Field` keeps format, children and references separate. |
+| R4-C2 field registration | A registered field registers the child fields it lists (`Field.Children`) and owns them. | `CadFieldTemplate.build` adds each child to `Children`, which registers it; the children are not in any dictionary (259 fields in 15 files were missing). |
+| R4-C2 DXF field value string source | `Field::value_string_source` (additive, excluded from equality, not serialized) keeps group 301 as written when caret-escape decoding changed it. | ACadSharp does not decode caret escapes in this group (`^I` stays `^I`); the native value stays decoded. |
 
 ## ACadSharp differential dump
 
@@ -278,4 +282,14 @@ reader) printing its notifications.
   reference decodes each 1000 string through `ReadTextUnicode`, with the code-page key stored in the record,
   and gets U+FFFD for every byte of "西文字型", "中文字型", ... (6 strings); the fork decodes them with the
   drawing's GB2312/GBK page and reads the Chinese text.
-* **Rows owned by the next job:** `ProxyEntity`, `ProxyObject`, `Field` and `FieldList`.
+* **Rows owned by the next job:** `ProxyEntity`, `ProxyObject`, `Field` and `FieldList` (closed in R4-C2, below).
+
+## R4-C2 remaining reference differences (decision D-b)
+
+* **DXF FIELD code written as 3-chunks before group 2 (ezdxf/mtext_complex_inline_codes.dxf, 8 `Field.FieldCode`).**
+  ezdxf writes the long field code as groups 3 (255-character chunks) followed by the closing group 2. The
+  reference appends group 3 to `FieldCode` and then assigns group 2 through the generic property mapping, which
+  replaces everything read before it, so it ends with only the last chunk (", sed diam nonumy ..."). The fork
+  concatenates 2 and 3 in file order and keeps the complete code (`{\A1;Complex MTEXT content:}...`). Handles:
+  #A9 #DD #E4 #EB #F7 #100 #107 #10E. The closing `Value` string of these fields (groups 2 chunks then group 1)
+  agrees in both readers, since the fork also takes the code-1 group; no other row of the file differs.
