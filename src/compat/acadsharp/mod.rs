@@ -31,6 +31,8 @@ mod r4_c1_tests;
 mod r4_c2_tests;
 #[cfg(test)]
 mod r4_c3_tests;
+#[cfg(test)]
+mod r5a_tests;
 mod stream;
 mod tables;
 mod table_dimstyle;
@@ -292,6 +294,16 @@ pub fn write_file(path: &Path, writer: &mut impl std::io::Write) -> serde_json::
         Ok(doc) => write_reader_document(&doc, &file, &reader, writer),
         Err(error) => serde_json::to_writer(writer, &error_dump(&file, &reader, &error)),
     }
+}
+
+/// Failsafe read of a `.dwg` or `.dxf` file as the dump commands do (used by `acad-dump write-dxf`).
+pub fn read_document_file(path: &Path) -> Result<CadDocument, String> {
+    let reader = path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    read_file(path, &reader)
 }
 
 fn read_file(path: &Path, reader: &str) -> Result<CadDocument, String> {

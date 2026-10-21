@@ -120,7 +120,11 @@ impl ExtendedData {
 
     // Update the modeled fields while retaining unrelated values owned by the app.
     pub(crate) fn merge_modeled_record(&mut self, replacement: &ExtendedDataRecord) {
-        let mut record = self.remove_record(&replacement.application_name)
+        // Application names are case-insensitive (R14 DWG files store them upper case): merge into the retained
+        // record under its own spelling instead of adding a second record for the same application.
+        let existing = self.records.iter()
+            .position(|record| record.application_name.eq_ignore_ascii_case(&replacement.application_name));
+        let mut record = existing.map(|index| self.records.remove(index))
             .unwrap_or_else(|| ExtendedDataRecord::new(&replacement.application_name));
         let labeled_group = matches!(replacement.values.get(1), Some(XDataValue::ControlString(value)) if value == "{");
         if labeled_group {
@@ -155,7 +159,10 @@ impl ExtendedData {
                 }
             }
         }
-        self.add_record(record);
+        match existing {
+            Some(index) => self.records.insert(index, record),
+            None => self.add_record(record),
+        }
     }
 
     /// Remove and return the record owned by `application_name`.

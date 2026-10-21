@@ -192,6 +192,18 @@ impl<W: Write> DxfStreamWriter for DxfTextWriter<W> {
         Ok(())
     }
 
+    fn writes_source_spelling(&self) -> bool {
+        true
+    }
+
+    fn write_source_spelling(&mut self, code: i32, text: &str) -> Result<()> {
+        if text.contains(['\n', '\r']) {
+            return self.write_string(code, text);
+        }
+        self.write_code(code)?;
+        self.write_text_crlf(text)
+    }
+
     fn write_xrecord_string(&mut self, code: i32, value: &str) -> Result<()> {
         self.write_code(code)?;
         let escaped = value

@@ -5,18 +5,9 @@ use super::*;
 use crate::entities::{MText, MTextColumnData};
 
 fn value(text: &MText) -> String {
-    if let Some(raw) = &text.source_value {
-        let unchanged = if let Some(dxf) = &text.dxf_source {
-            dxf.decoded_value.as_ref() == Some(&text.value)
-        } else {
-            crate::io::dxf::code_page::decode_legacy_escapes(raw) == text.value
-        };
-        // An edit to the public value supersedes the original spelling.
-        if unchanged {
-            return raw.clone();
-        }
-    }
-    text.value.clone()
+    // An edit to the public value supersedes the original spelling.
+    text.unchanged_source_value()
+        .map_or_else(|| text.value.clone(), str::to_string)
 }
 
 fn background_color(c: Color) -> Value {

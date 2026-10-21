@@ -312,6 +312,9 @@ pub struct Layout {
     /// pairs on read and replay them verbatim on write.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub raw_plot_settings_codes: Option<Vec<(i32, String)>>,
+    /// Whether the DXF `AcDbLayout` subclass carried its own group 70 (layout flags). Source provenance only.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dxf_layout_flags_present: bool,
     /// Physical paper width in mm (from embedded PlotSettings, code 44).
     /// Zero means unknown / not read from the file.
     pub paper_width: f64,
@@ -390,6 +393,7 @@ impl Layout {
             reactors: Vec::new(),
             xdictionary_handle: None,
             raw_plot_settings_codes: None,
+            dxf_layout_flags_present: false,
             paper_width: 0.0,
             paper_height: 0.0,
             plot_rotation: 0,
@@ -568,7 +572,10 @@ impl ObjectType {
                 *raw_dwg_data = None;
                 *raw_dwg_version = None;
             }
-            ObjectType::Layout(value) => value.raw_plot_settings_codes = None,
+            ObjectType::Layout(value) => {
+                value.raw_plot_settings_codes = None;
+                value.dxf_layout_flags_present = false;
+            }
             ObjectType::PlotSettings(value) => value.dxf_present_codes = None,
             _ => {}
         }
@@ -627,6 +634,7 @@ impl ObjectType {
         match (self, source) {
             (Self::Layout(value), Self::Layout(source)) => {
                 value.raw_plot_settings_codes = source.raw_plot_settings_codes.clone();
+                value.dxf_layout_flags_present = source.dxf_layout_flags_present;
             }
             (Self::PlotSettings(value), Self::PlotSettings(source)) => {
                 value.dxf_present_codes = source.dxf_present_codes;
