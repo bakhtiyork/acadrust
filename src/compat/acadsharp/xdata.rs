@@ -247,15 +247,21 @@ fn append_text_style_font(
         return;
     }
     emitted.push("ACAD".to_owned());
-    pairs.push(Value::Array(vec![
-        handle(app_handle(doc, "ACAD")),
-        json!({
-            "Records": [
-                record_value(doc, &XDataValue::String(style.true_type_font.clone())),
-                record_value(doc, &XDataValue::Integer32(style.true_type_font_flags)),
-            ]
-        }),
-    ]));
+    let position = style
+        .true_type_font_eed_position
+        .map_or(pairs.len(), |position| position.min(pairs.len()));
+    pairs.insert(
+        position,
+        Value::Array(vec![
+            handle(app_handle(doc, "ACAD")),
+            json!({
+                "Records": [
+                    record_value(doc, &XDataValue::String(style.true_type_font.clone())),
+                    record_value(doc, &XDataValue::Integer32(style.true_type_font_flags)),
+                ]
+            }),
+        ]),
+    );
 }
 
 fn project(

@@ -191,8 +191,15 @@ pub(super) fn vport_overrides(doc: &CadDocument, vport: &VPort) -> Vec<(&'static
     let source_dxf = source_dxf(doc);
     let source_dwg = source_dwg(doc);
     let source = source_dxf || source_dwg;
-    let icon = if source_dwg && !vport.ucsicon_lower && !vport.ucsicon_origin {
-        3
+    let icon = if source_dwg {
+        // The DWG reader assigns OnLower for bit 0, then OnOrigin (3, not the
+        // OffOrigin value 2) for bit 1; with neither bit the constructor
+        // default OnOrigin remains.
+        if vport.ucsicon_origin || !vport.ucsicon_lower {
+            3
+        } else {
+            1
+        }
     } else {
         i16::from(vport.ucsicon_lower) | i16::from(vport.ucsicon_origin) * 2
     };
@@ -266,6 +273,29 @@ mod tests {
                 .1,
             0
         );
+    }
+
+    #[test]
+    fn dwg_icon_bits_map_to_the_reader_enum() {
+        let mut doc = CadDocument::new();
+        doc.header.source_handle_seed = Some(0x100);
+        doc.dwg_source_version = Some(crate::types::DxfVersion::AC1015);
+        let icon = |lower: bool, origin: bool| {
+            let mut vport = VPort::new("vp");
+            vport.ucsicon_lower = lower;
+            vport.ucsicon_origin = origin;
+            vport_overrides(&doc, &vport)
+                .iter()
+                .find(|(k, _)| *k == "UcsIconDisplay")
+                .unwrap()
+                .1
+                .clone()
+        };
+        // Bit 1 assigns OnOrigin (3), not the OffOrigin value 2.
+        assert_eq!(icon(false, true), 3);
+        assert_eq!(icon(true, true), 3);
+        assert_eq!(icon(true, false), 1);
+        assert_eq!(icon(false, false), 3);
     }
 
     #[test]

@@ -65,8 +65,10 @@ fn seqend_handles(value: &serde_json::Value) -> Vec<&str> {
 fn modern_dxf_projects_sequence_handles_in_collection_order() {
     let doc = source_document();
     let dump = dump_document(&doc, "fixture.dxf", "dxf");
-    assert_eq!(seqend_handles(&dump), vec!["#116", "#117", "#118", "#119"]);
-    assert_eq!(dump["header"]["HandleSeed"], 0x11A);
+    // UpdateCollections creates every missing collection dictionary (two
+    // more than before here) ahead of the sequence ends.
+    assert_eq!(seqend_handles(&dump), vec!["#118", "#119", "#11A", "#11B"]);
+    assert_eq!(dump["header"]["HandleSeed"], 0x11C);
 }
 
 #[test]

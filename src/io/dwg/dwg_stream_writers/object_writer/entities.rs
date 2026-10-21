@@ -5653,27 +5653,29 @@ impl<'a> DwgObjectWriter<'a> {
                 for wire in wires {
                     self.write_wire(wire);
                 }
+            }
 
-                self.writer.write_bit_long(silhouettes.len() as i32);
-                for sil in silhouettes {
-                    if self.version.r2010_plus() {
-                        self.writer.write_bit_long_long(sil.viewport_id);
-                    } else {
-                        self.writer.write_bit_long(sil.viewport_id as i32);
-                    }
-                    self.writer.write_3bit_double(sil.target);
-                    self.writer.write_3bit_double(sil.view_direction);
-                    self.writer.write_3bit_double(sil.up_vector);
-                    self.writer.write_bit(sil.is_perspective);
-                    let has_wires = sil.has_wires || !sil.wires.is_empty();
-                    self.writer.write_bit(has_wires);
-                    if !has_wires {
-                        continue;
-                    }
-                    self.writer.write_bit_long(sil.wires.len() as i32);
-                    for wire in &sil.wires {
-                        self.write_wire(wire);
-                    }
+            // The silhouette count follows the isoline block whether or not
+            // that block is present, as the reader expects.
+            self.writer.write_bit_long(silhouettes.len() as i32);
+            for sil in silhouettes {
+                if self.version.r2010_plus() {
+                    self.writer.write_bit_long_long(sil.viewport_id);
+                } else {
+                    self.writer.write_bit_long(sil.viewport_id as i32);
+                }
+                self.writer.write_3bit_double(sil.target);
+                self.writer.write_3bit_double(sil.view_direction);
+                self.writer.write_3bit_double(sil.up_vector);
+                self.writer.write_bit(sil.is_perspective);
+                let has_wires = sil.has_wires || !sil.wires.is_empty();
+                self.writer.write_bit(has_wires);
+                if !has_wires {
+                    continue;
+                }
+                self.writer.write_bit_long(sil.wires.len() as i32);
+                for wire in &sil.wires {
+                    self.write_wire(wire);
                 }
             }
         }

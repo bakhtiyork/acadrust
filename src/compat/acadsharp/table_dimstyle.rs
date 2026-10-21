@@ -16,8 +16,28 @@ use serde_json::{json, Value};
 
 /// Project the type-specific members of one DIMSTYLE record.
 pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Value)> {
+    // A native constructor default that survives registration stands for the
+    // "Standard" style ACadSharp creates from `DimensionStyle.Default`: its
+    // constructor values, attached to the document's Standard text style.
+    let created;
+    let (value, dwg_version) = if super::registration::source_document(doc) && !value.source_present
+    {
+        let mut style = DimStyle::standard();
+        style.name = value.name.clone();
+        style.handle = value.handle;
+        style.dimpost.clear();
+        style.dimsah = false;
+        style.dimtxsty_handle = doc
+            .text_styles
+            .get("Standard")
+            .map_or(Handle::NULL, |text| text.handle);
+        created = style;
+        (&created, None)
+    } else {
+        (value, doc.dwg_source_version)
+    };
     let source_dxf = value.dxf_present_codes.is_some();
-    let source_dwg = doc.dwg_source_version.is_some();
+    let source_dwg = dwg_version.is_some();
     let mut defaults = DimStyle::new(value.name.clone());
     // These two native constructor values are writer-oriented conveniences;
     // ACadSharp's DimensionStyle constructor starts with an empty postfix
@@ -74,7 +94,7 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
     // ACadSharp's R13/R14 DWG reader consumes these four bits in a different
     // order from the native reader.  Reinterpret the native fields only for
     // an actual DWG source; constructed styles must keep their values.
-    if let Some(version) = doc.dwg_source_version {
+    if let Some(version) = dwg_version {
         if matches!(version, DxfVersion::AC1012 | DxfVersion::AC1014) {
             outside_horizontal = value.dimtih;
             suppress_first_extension = value.dimtoh;
@@ -113,21 +133,21 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
 
     // DWG records before R2007 do not carry DIMFXL or DIMJOGANG.  The native
     // reader's zero placeholders differ from ACadSharp's constructor values.
-    if let Some(version) = doc.dwg_source_version {
+    if let Some(version) = dwg_version {
         if version < DxfVersion::AC1021 {
             jog_angle = defaults.dimjogang;
         }
     }
 
-    let fixed_extension_length = match doc.dwg_source_version {
+    let fixed_extension_length = match dwg_version {
         Some(version) if version < DxfVersion::AC1021 => defaults.dimfxl,
         _ => field!(dimfxl, 49),
     };
-    let dimension_line_weight = match doc.dwg_source_version {
+    let dimension_line_weight = match dwg_version {
         Some(version) if version < DxfVersion::AC1015 => defaults.dimlwd,
         _ => field!(dimlwd, 371),
     };
-    let extension_line_weight = match doc.dwg_source_version {
+    let extension_line_weight = match dwg_version {
         Some(version) if version < DxfVersion::AC1015 => defaults.dimlwe,
         _ => field!(dimlwe, 372),
     };
@@ -158,7 +178,7 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
         // ACadSharp, although the native model stores it in DIMATFIT for
         // R2000 and newer records.  R13/R14 already retain the old byte in
         // the native DIMFIT field.
-        match doc.dwg_source_version {
+        match dwg_version {
             Some(version) if version >= DxfVersion::AC1015 => value.dimatfit,
             _ => value.dimfit,
         }

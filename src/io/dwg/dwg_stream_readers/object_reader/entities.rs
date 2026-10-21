@@ -2216,6 +2216,8 @@ pub struct Ole2FrameData {
     pub storage: crate::compound_file::StructuredStoragePayload,
     pub envelope: crate::entities::OleFrameEnvelope,
     pub lock_aspect: u8,
+    /// The payload bytes as stored.
+    pub raw_payload: Vec<u8>,
     /// Frame corners decoded from the OLE data blob (see `ole2frame_corners`).
     pub upper_left: Vector3,
     pub lower_right: Vector3,
@@ -4238,6 +4240,7 @@ pub fn read_ole2frame(reader: &mut DwgMergedReader, version: DwgVersion) -> Ole2
         storage,
         envelope,
         lock_aspect,
+        raw_payload: data,
         upper_left,
         lower_right,
     }
@@ -5279,7 +5282,7 @@ fn read_acis_entity_impl(
     // `acis_empty` bit from the entity record.  The first bit after common
     // entity data is `wireframe_data_present` in that layout.  Consuming the
     // legacy bit here shifts every wire/material/revision field by one.
-    let acis_empty = if version.r2013_plus(dxf_version) && !inline_layout {
+    let mut acis_empty = if version.r2013_plus(dxf_version) && !inline_layout {
         !has_ds_data
     } else {
         reader.read_bit()
@@ -5452,41 +5455,56 @@ fn read_acis_entity_impl(
             for _ in 0..num_wires {
                 wires.push(read_wire(reader));
             }
+        }
 
-            // Both cache arrays are absent when isoline_present is false.
-            // Reading a count then consumes the extra-body or revision tail.
-            let num_silhouettes = safe_count(reader.read_bit_long(), reader);
-            for _ in 0..num_silhouettes {
-                // Native R2010+ silhouettes store a BLL viewport identity.
-                // Earlier records use BL, including compact zero identities.
-                let viewport_id = if version.r2010_plus() {
-                    reader.read_bit_long_long()
-                } else {
-                    i64::from(reader.read_bit_long())
-                };
-                let target = reader.read_3bit_double();
-                let view_direction = reader.read_3bit_double();
-                let up_vector = reader.read_3bit_double();
-                let is_perspective = reader.read_bit();
-                let mut sil_wires = Vec::new();
-                let has_sil_wires = reader.read_bit();
-                if has_sil_wires {
-                    let num_sw = safe_count(reader.read_bit_long(), reader);
-                    sil_wires.reserve(num_sw as usize);
-                    for _ in 0..num_sw {
-                        sil_wires.push(read_wire(reader));
-                    }
+        // The silhouette count follows the isoline block (ACadSharp's
+        // COMMON_3DSOLID layout), also when that block is absent: bodies from
+        // some writers store a count of zero there. AutoCAD-authored records
+        // with `isoline_present` clear have no count at all; the next field
+        // is then the ACIS-empty bit, and a bit pair `1,1` cannot start a
+        // bit-long (code 3 is reserved), which tells the two layouts apart.
+        let count_present = isoline_present || reader.main_remaining_bits() >= 2 && {
+            let position = reader.main_mut().position_in_bits();
+            let first = reader.read_bit();
+            let second = reader.read_bit();
+            reader.main_mut().set_position_in_bits(position);
+            !(first && second)
+        };
+        let num_silhouettes = if count_present {
+            safe_count(reader.read_bit_long(), reader)
+        } else {
+            0
+        };
+        for _ in 0..num_silhouettes {
+            // Native R2010+ silhouettes store a BLL viewport identity.
+            // Earlier records use BL, including compact zero identities.
+            let viewport_id = if version.r2010_plus() {
+                reader.read_bit_long_long()
+            } else {
+                i64::from(reader.read_bit_long())
+            };
+            let target = reader.read_3bit_double();
+            let view_direction = reader.read_3bit_double();
+            let up_vector = reader.read_3bit_double();
+            let is_perspective = reader.read_bit();
+            let mut sil_wires = Vec::new();
+            let has_sil_wires = reader.read_bit();
+            if has_sil_wires {
+                let num_sw = safe_count(reader.read_bit_long(), reader);
+                sil_wires.reserve(num_sw as usize);
+                for _ in 0..num_sw {
+                    sil_wires.push(read_wire(reader));
                 }
-                silhouettes.push(Silhouette {
-                    viewport_id,
-                    view_direction,
-                    up_vector,
-                    target,
-                    is_perspective,
-                    has_wires: has_sil_wires,
-                    wires: sil_wires,
-                });
             }
+            silhouettes.push(Silhouette {
+                viewport_id,
+                view_direction,
+                up_vector,
+                target,
+                is_perspective,
+                has_wires: has_sil_wires,
+                wires: sil_wires,
+            });
         }
     }
 
@@ -5499,7 +5517,92 @@ fn read_acis_entity_impl(
     if has_extra_gate {
         acis_empty_bit = reader.read_bit();
     }
-    let extra_acis_data = if allow_extra && has_extra_gate && !acis_empty_bit {
+
+    // R2013+ records keep their modeler body in AcDs, but a clear ACIS-empty
+    // flag after the wireframe cache means the body follows inline (some
+    // writers set the AcDs flag and still store it here). ACadSharp reads the
+    // body whenever that flag is clear, whatever the AcDs flag says.
+    let mut inline_payload = false;
+    if version.r2013_plus(dxf_version)
+        && !inline_layout
+        && wireframe_present
+        && !acis_empty_bit
+    {
+        inline_payload = true;
+        acis_empty = false;
+        let _unknown = reader.read_bit();
+        acis_version = reader.read_bit_short();
+        if acis_version == 1 {
+            is_binary = false;
+            let mut all_bytes = Vec::new();
+            loop {
+                let raw_block_size = reader.read_bit_long();
+                if raw_block_size < 0
+                    || raw_block_size as i64 > reader.main_remaining_bits() / 8
+                {
+                    reader.invalidate("Invalid inline R2013 SAT block length");
+                    break;
+                }
+                let block_size = raw_block_size as usize;
+                if block_size == 0 {
+                    break;
+                }
+                all_bytes.extend_from_slice(&reader.read_bytes(block_size));
+            }
+            let decoded: Vec<u8> = all_bytes
+                .into_iter()
+                .map(|byte| {
+                    if byte <= 32 {
+                        byte
+                    } else {
+                        159u8.wrapping_sub(byte)
+                    }
+                })
+                .collect();
+            sat_data = crate::entities::solid3d::AcisData::strip_sat_terminator(
+                &String::from_utf8_lossy(&decoded),
+            );
+        } else if acis_version == 2 {
+            is_binary = true;
+            let start = reader.main_mut().position_in_bits();
+            let probe = reader.read_bytes(reader.remaining_bytes());
+            let used = crate::entities::acis::SabReader::read_with_consumed(&probe)
+                .ok()
+                .map(|(_, used)| used)
+                .or_else(|| {
+                    // Keep unsupported ASM variants bounded by their explicit
+                    // end marker; material/revision fields follow in the main
+                    // stream and must remain available to the caller.
+                    [&b"End-of-ACIS-data"[..], &b"End-of-ASM-data"[..]]
+                        .iter()
+                        .filter_map(|marker| {
+                            probe
+                                .windows(marker.len())
+                                .position(|window| window == *marker)
+                                .map(|offset| offset + marker.len())
+                        })
+                        .min()
+                });
+            match used {
+                Some(used) if used > 0 && used <= probe.len() => {
+                    sab_data = probe[..used].to_vec();
+                    reader
+                        .main_mut()
+                        .set_position_in_bits(start + used as i64 * 8);
+                }
+                _ => {
+                    reader.invalidate("Invalid inline R2013 SAB payload");
+                }
+            }
+        } else {
+            reader.invalidate("Invalid inline R2013 ACIS version");
+        }
+    }
+    let extra_acis_data = if allow_extra
+        && has_extra_gate
+        && !acis_empty_bit
+        && !inline_payload
+    {
         read_extra_acis_data(reader, inline_end)
     } else {
         None
@@ -6400,5 +6503,72 @@ mod tests {
         assert!(result.acis_empty);
         assert!(result.sat_data.is_empty());
         assert!(result.sab_data.is_empty());
+    }
+
+    fn revision_tail(w: &mut DwgMergedWriter) {
+        w.write_bit(false); // has_guid
+        w.write_bit_long(0); // major
+        w.write_bit_short(0); // minor1
+        w.write_bit_short(0); // minor2
+        w.write_bytes(&[0; 8]);
+        w.write_bit_long(0); // end marker
+    }
+
+    #[test]
+    fn modeler_wireframe_without_isolines_still_carries_a_silhouette_count() {
+        let v = DwgVersion::AC24;
+        let d = DxfVersion::AC1032;
+        let mut w = DwgMergedWriter::new(v, d);
+        w.write_bit(true); // wireframe_present
+        w.write_bit(false); // point_present
+        w.write_bit_long(0); // isolines
+        w.write_bit(false); // isoline_present
+        w.write_bit_long(0); // silhouettes follow even without isolines
+        w.write_bit(true); // acis_empty_bit
+        w.write_bit_long(0); // AcDs-backed record: material count
+        revision_tail(&mut w);
+        let data = w.merge();
+        let hsb = w.handle_start_bits();
+        let mut r = DwgMergedReader::new(data, d, hsb);
+        let result = read_acis_entity(&mut r, v, d, true);
+        assert!(!r.has_error());
+        assert!(result.wireframe_data_present);
+        assert!(!result.wireframe_isoline_present);
+        assert!(result.acis_empty_bit);
+        assert!(result.silhouettes.is_empty());
+        assert_eq!(result.revision.end_marker, 0);
+    }
+
+    #[test]
+    fn r2013_body_follows_a_clear_empty_flag_even_when_acds_is_flagged() {
+        let v = DwgVersion::AC24;
+        let d = DxfVersion::AC1032;
+        let mut w = DwgMergedWriter::new(v, d);
+        w.write_bit(true); // wireframe_present
+        w.write_bit(false); // point_present
+        w.write_bit_long(0);
+        w.write_bit(false); // isoline_present
+        w.write_bit_long(0); // silhouettes
+        w.write_bit(false); // acis_empty_bit: a body follows inline
+        w.write_bit(false); // unknown bit
+        w.write_bit_short(1); // SAT
+        let encrypted: Vec<u8> = b"body\n"
+            .iter()
+            .map(|&b| if b <= 32 { b } else { 159u8.wrapping_sub(b) })
+            .collect();
+        w.write_bit_long(encrypted.len() as i32);
+        w.write_bytes(&encrypted);
+        w.write_bit_long(0); // end of SAT blocks
+        w.write_bit_long(0); // R2007+ legacy unknown
+        revision_tail(&mut w);
+        let data = w.merge();
+        let hsb = w.handle_start_bits();
+        let mut r = DwgMergedReader::new(data, d, hsb);
+        let result = read_acis_entity(&mut r, v, d, true);
+        assert!(!r.has_error());
+        assert!(!result.acis_empty);
+        assert!(!result.is_binary);
+        assert_eq!(result.sat_data, "body\n");
+        assert_eq!(result.revision.end_marker, 0);
     }
 }

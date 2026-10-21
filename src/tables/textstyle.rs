@@ -65,6 +65,12 @@ pub struct TextStyle {
     pub true_type_font: String,
     #[cfg_attr(feature = "serde", serde(default = "default_true_type_font_flags"))]
     pub true_type_font_flags: i32,
+    /// Position of the source `ACAD` typeface block among the style's DWG
+    /// extended-data blocks, kept so the compatibility view can list the
+    /// typeface where the source stored it. Absent for native styles.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[doc(hidden)]
+    pub true_type_font_eed_position: Option<usize>,
     /// Font flags stored directly on STYLE (distinct from ACAD XData font metadata).
     #[cfg_attr(feature = "serde", serde(default))]
     pub font_flags: i32,
@@ -104,6 +110,7 @@ impl TextStyle {
             big_font_file: String::new(),
             true_type_font: String::new(),
             true_type_font_flags: default_true_type_font_flags(),
+            true_type_font_eed_position: None,
             font_flags: 0,
             xref_dependent: false,
             xref_block_record_handle: Handle::NULL,
@@ -130,6 +137,7 @@ impl TextStyle {
             big_font_file: String::new(),
             true_type_font: String::new(),
             true_type_font_flags: default_true_type_font_flags(),
+            true_type_font_eed_position: None,
             font_flags: 0,
             xref_dependent: false,
             xref_block_record_handle: Handle::NULL,

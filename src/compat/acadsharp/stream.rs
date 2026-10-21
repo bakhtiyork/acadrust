@@ -74,6 +74,7 @@ fn retain_metadata(value: &mut Value) {
                 | "BlockEntity"
                 | "BlockEnd"
                 | "Style"
+                | "Layout"
         )
     });
     if let Some(proxy) = p.get_mut("ProxyGeometries") {
@@ -211,8 +212,23 @@ pub(super) fn write_view(
             value["handle"] = projected["handle"].take();
             value["owner"] = projected["owner"].take();
             for (key, replacement) in projected["props"].as_object_mut().unwrap() {
-                // These two fields are planning markers, not replacements.
-                if key == "Nodes" || (key == "ProxyGeometries" && replacement.is_null()) {
+                // Graph nodes carry only their planned Expression reference:
+                // registration clears the ones the reader could not resolve.
+                if key == "Nodes" {
+                    if let (Some(planned), Some(nodes)) = (
+                        replacement.as_array(),
+                        value["props"]["Nodes"].as_array_mut(),
+                    ) {
+                        for (node, planned) in nodes.iter_mut().zip(planned) {
+                            if planned["Expression"].is_null() {
+                                node["Expression"] = Value::Null;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                // ProxyGeometries is a planning marker, not a replacement.
+                if key == "ProxyGeometries" && replacement.is_null() {
                     continue;
                 }
                 value["props"][key] = replacement.take();

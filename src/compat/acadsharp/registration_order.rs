@@ -61,7 +61,21 @@ fn remappable_seqend(
     handle(&record["owner"]).is_some_and(|owner| child_owners.contains(&owner))
 }
 
-const UPDATE_COLLECTION_DICTIONARIES: [&str; 2] = ["ACAD_IMAGE_DICT", "ACAD_PDFDEFINITIONS"];
+// CadDocument.UpdateCollections(true, false) creates the missing collection
+// dictionaries in this order, without populating their default entries.
+const UPDATE_COLLECTION_DICTIONARIES: [&str; 11] = [
+    "ACAD_LAYOUT",
+    "ACAD_GROUP",
+    "ACAD_SCALELIST",
+    "ACAD_MLINESTYLE",
+    "ACAD_MLEADERSTYLE",
+    "ACAD_TABLESTYLE",
+    "ACAD_IMAGE_DICT",
+    "ACAD_PDFDEFINITIONS",
+    "ACAD_COLOR",
+    "AcDbVariableDictionary",
+    "ACAD_MATERIAL",
+];
 
 fn dictionary_entries(records: &[Value], owner_handle: u64) -> (Vec<u64>, Vec<String>) {
     let owner = format!("#{owner_handle:X}");
@@ -127,13 +141,31 @@ fn first_allocated_handle(
     records: &[Value],
 ) -> u64 {
     let source_seed = doc.header.source_handle_seed.unwrap_or(0);
+    let defaults = native_default_dimstyles(doc);
     records
         .iter()
         .filter(|record| !remappable_seqend(doc, reader, child_owners, record))
+        .filter(|record| !is_native_default_dimstyle(&defaults, record))
         .filter_map(|record| handle(&record["handle"]))
         .max()
         .map(|max| source_seed.max(max.saturating_add(1)))
         .unwrap_or(source_seed)
+}
+
+/// Handles of the constructor-default dimension styles: records the source
+/// table did not contain, which keep their native identity until
+/// [`apply_default_dimension_style`] gives them a registration identity.
+fn native_default_dimstyles(doc: &CadDocument) -> HashSet<u64> {
+    doc.dim_styles
+        .iter()
+        .filter(|style| !style.source_present)
+        .map(|style| style.handle.value())
+        .collect()
+}
+
+fn is_native_default_dimstyle(defaults: &HashSet<u64>, record: &Value) -> bool {
+    record["type"] == "DimensionStyle"
+        && handle(&record["handle"]).is_some_and(|h| defaults.contains(&h))
 }
 
 /// Recreate dictionaries that ACadSharp's `UpdateCollections` materializes
@@ -144,7 +176,7 @@ fn apply_update_collection_dictionaries(doc: &CadDocument, reader: &str, records
     if !source_document(doc) || doc.version < DxfVersion::AC1012 {
         return;
     }
-    let root = doc.header.named_objects_dict_handle.value();
+    let root = super::registration::root_dictionary(doc, reader);
     if root == 0 {
         return;
     }
@@ -170,8 +202,10 @@ fn apply_update_collection_dictionaries(doc: &CadDocument, reader: &str, records
         return;
     };
 
+    let defaults = native_default_dimstyles(doc);
     let mut occupied = records
         .iter()
+        .filter(|record| !is_native_default_dimstyle(&defaults, record))
         .filter_map(|record| handle(&record["handle"]))
         .collect::<HashSet<_>>();
     occupied.extend(entry_handles.iter().filter_map(numeric_handle));
@@ -211,6 +245,57 @@ fn apply_update_collection_dictionaries(doc: &CadDocument, reader: &str, records
         let dictionary = synthetic_dictionary(root, target, name, records);
         records.push(dictionary);
     }
+}
+
+/// `MultiLeader.ContextData` inherits `AnnotScaleObjectContextData`, whose
+/// constructor default scale is registered by name once the entity joins the
+/// document, even though the context itself is not a separate object.
+fn apply_embedded_context_scale(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) {
+    if !source_document(doc) || !records.iter().any(|r| r["type"] == "MultiLeader") {
+        return;
+    }
+    let Some(dictionary) = records
+        .iter()
+        .position(|r| r["type"] == "CadDictionary" && r["props"]["Name"] == "ACAD_SCALELIST")
+    else {
+        return;
+    };
+    if records[dictionary]["props"]["EntryNames"]
+        .as_array()
+        .is_some_and(|names| names.iter().any(|name| name == "1:1"))
+    {
+        return;
+    }
+    let child_owners = sequence_child_owners(records);
+    let next = first_allocated_handle(doc, reader, &child_owners, records);
+    let owner = handle(&records[dictionary]["handle"]).unwrap_or(0);
+    for (key, value) in [("EntryHandles", json!(next)), ("EntryNames", json!("1:1"))] {
+        if let Some(values) = records[dictionary]["props"][key].as_array_mut() {
+            values.push(value);
+        }
+    }
+    records.push(record(
+        Handle::new(next),
+        "Scale",
+        Handle::new(owner),
+        props(
+            "Scale",
+            [
+                ("DrawingUnits", json!(1.0)),
+                ("ExtendedData", json!([])),
+                ("HasDynamicSubclass", json!(false)),
+                ("IsUnitScale", json!(true)),
+                ("Name", json!("1:1")),
+                ("ObjectName", json!("SCALE")),
+                ("ObjectType", json!(-999)),
+                ("PaperUnits", json!(1.0)),
+                ("Reactors", json!([])),
+                ("ScaleFactor", json!(1.0)),
+                ("SubclassMarker", json!("AcDbScale")),
+                ("XDictionary", Value::Null),
+            ],
+        ),
+    ));
 }
 
 fn default_seqend_props(doc: &CadDocument, target: u64, owner: u64) -> Value {
@@ -281,9 +366,71 @@ fn apply_legacy_entity_owners(doc: &CadDocument, reader: &str, records: &mut [Va
 /// retained entity order; other readers retain source sequence identities.
 ///
 /// The return value is the number of modern-DXF sequence records changed.
+/// Attaching a dimension, leader or tolerance to a block makes ACadSharp add
+/// its default "Standard" style to a table that lacks one, before the
+/// entity's own style reference is resolved. That style takes the next free
+/// registration identity, ahead of the collection dictionaries created later.
+/// The native constructor default keeps its own handle in the document.
+fn apply_default_dimension_style(doc: &CadDocument, reader: &str, records: &mut [Value]) {
+    if !source_document(doc) || legacy_identity::applies(doc, reader) {
+        return;
+    }
+    let defaults = native_default_dimstyles(doc);
+    if defaults.is_empty() || !super::registration::has_dimension_entity(records) {
+        return;
+    }
+    let mut occupied = records
+        .iter()
+        .filter(|record| !is_native_default_dimstyle(&defaults, record))
+        .filter_map(|record| handle(&record["handle"]))
+        .collect::<HashSet<_>>();
+    let child_owners = sequence_child_owners(records);
+    let mut next = first_allocated_handle(doc, reader, &child_owners, records);
+    let mut remap = HashMap::new();
+    for record in records.iter_mut() {
+        let Some(old) = handle(&record["handle"]) else {
+            continue;
+        };
+        if record["type"] != "DimensionStyle" || !defaults.contains(&old) {
+            continue;
+        }
+        while occupied.contains(&next) {
+            next = next.saturating_add(1);
+        }
+        occupied.insert(next);
+        record["handle"] = Value::String(format!("#{next:X}"));
+        remap.insert(old, next);
+    }
+    if remap.is_empty() {
+        return;
+    }
+    for record in records.iter_mut() {
+        let is_style_user = record["type"].as_str().is_some_and(|ty| {
+            ty == "Leader" || ty == "Tolerance" || ty.starts_with("Dimension")
+        });
+        if !is_style_user {
+            continue;
+        }
+        if let Some(new) = handle(&record["props"]["Style"]).and_then(|old| remap.get(&old)) {
+            record["props"]["Style"] = Value::String(format!("#{new:X}"));
+        }
+    }
+}
+
 pub(super) fn apply(doc: &CadDocument, reader: &str, records: &mut Vec<Value>) -> usize {
     apply_legacy_entity_owners(doc, reader, records);
     apply_update_collection_dictionaries(doc, reader, records);
+    // Both defaults are created while entities join their blocks, after the
+    // collection dictionaries, in the order the first such entity appears.
+    let dimension = records.iter().position(super::registration::is_dimension_entity);
+    let multileader = records.iter().position(|record| record["type"] == "MultiLeader");
+    if multileader.is_some_and(|m| dimension.is_none_or(|d| m < d)) {
+        apply_embedded_context_scale(doc, reader, records);
+        apply_default_dimension_style(doc, reader, records);
+    } else {
+        apply_default_dimension_style(doc, reader, records);
+        apply_embedded_context_scale(doc, reader, records);
+    }
     if !modern_dxf(doc, reader) {
         return 0;
     }
@@ -348,6 +495,26 @@ mod tests {
         doc.header.source_handle_seed = Some(0x40);
         doc.header.handle_seed = 0x200;
         doc
+    }
+
+    #[test]
+    fn embedded_multileader_context_registers_one_default_scale_by_name() {
+        let doc = source_doc(DxfVersion::AC1032);
+        let mut records = vec![
+            json!({"handle":"#20", "type":"CadDictionary",
+                "props":{"Name":"ACAD_SCALELIST", "EntryNames":["1\" = 1\""], "EntryHandles":[33]}}),
+            record("#21", "Scale"),
+            record("#30", "MultiLeader"),
+        ];
+        apply_embedded_context_scale(&doc, "dwg", &mut records);
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[3]["handle"], "#40");
+        assert_eq!(records[3]["owner"], "#20");
+        assert_eq!(records[3]["props"]["Name"], "1:1");
+        assert_eq!(records[3]["props"]["DrawingUnits"], 1.0);
+        assert_eq!(records[0]["props"]["EntryHandles"], json!([33, 64]));
+        apply_embedded_context_scale(&doc, "dwg", &mut records);
+        assert_eq!(records.len(), 4);
     }
 
     #[test]
@@ -442,17 +609,33 @@ mod tests {
         assert_eq!(apply(&doc, "dwg", &mut records), 0);
         assert_eq!(
             records[0]["props"]["EntryNames"],
-            json!(["ACAD_IMAGE_DICT", "ACAD_PDFDEFINITIONS"])
+            json!([
+                "ACAD_LAYOUT",
+                "ACAD_GROUP",
+                "ACAD_SCALELIST",
+                "ACAD_MLINESTYLE",
+                "ACAD_MLEADERSTYLE",
+                "ACAD_TABLESTYLE",
+                "ACAD_IMAGE_DICT",
+                "ACAD_PDFDEFINITIONS",
+                "ACAD_COLOR",
+                "AcDbVariableDictionary",
+                "ACAD_MATERIAL"
+            ])
         );
-        assert_eq!(records[0]["props"]["EntryHandles"], json!([0x200, 0x201]));
+        assert_eq!(
+            records[0]["props"]["EntryHandles"],
+            json!((0x200..=0x20A).collect::<Vec<_>>())
+        );
         assert_eq!(records[1], source);
+        assert_eq!(records.len(), 13);
         assert!(records.iter().any(|record| {
-            record["handle"] == "#200"
+            record["handle"] == "#206"
                 && record["type"] == "CadDictionary"
                 && record["props"]["Name"] == "ACAD_IMAGE_DICT"
         }));
         assert!(records.iter().any(|record| {
-            record["handle"] == "#201"
+            record["handle"] == "#207"
                 && record["type"] == "CadDictionary"
                 && record["props"]["Name"] == "ACAD_PDFDEFINITIONS"
         }));
@@ -510,10 +693,25 @@ mod tests {
         let mut records = vec![root, existing];
         apply(&doc, "dwg", &mut records);
         assert_eq!(records[1], before);
-        assert_eq!(records[0]["props"]["EntryHandles"], json!([0x150, 0x151]));
+        assert_eq!(
+            records[0]["props"]["EntryHandles"],
+            json!((0x150..=0x15A).collect::<Vec<_>>())
+        );
         assert_eq!(
             records[0]["props"]["EntryNames"],
-            json!(["ACAD_IMAGE_DICT", "ACAD_PDFDEFINITIONS"])
+            json!([
+                "ACAD_IMAGE_DICT",
+                "ACAD_LAYOUT",
+                "ACAD_GROUP",
+                "ACAD_SCALELIST",
+                "ACAD_MLINESTYLE",
+                "ACAD_MLEADERSTYLE",
+                "ACAD_TABLESTYLE",
+                "ACAD_PDFDEFINITIONS",
+                "ACAD_COLOR",
+                "AcDbVariableDictionary",
+                "ACAD_MATERIAL"
+            ])
         );
     }
 

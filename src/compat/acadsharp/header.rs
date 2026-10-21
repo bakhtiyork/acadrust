@@ -143,6 +143,12 @@ pub(super) fn header(doc: &CadDocument) -> Value {
         source_missing(doc, var, first, last)
     });
     resolve_references(doc, &mut projected);
+    // DwgHeaderReader's R2000+ block assigns the DIMSD1/DIMSD2 bits to the
+    // extension-line properties, overwriting DIMSE1/DIMSE2.
+    if doc.dwg_source_version.is_some_and(|version| version >= DxfVersion::AC1015) {
+        projected.dim_suppress_ext1 = projected.dim_suppress_line1;
+        projected.dim_suppress_ext2 = projected.dim_suppress_line2;
+    }
     let h = &projected;
     let mut value = props(
         "CadHeader",

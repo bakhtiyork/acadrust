@@ -870,7 +870,10 @@ fn metadata_identity(
         EntityType::Solid3D(_) => ("Solid3D", "AcDb3dSolid", None),
         EntityType::Region(_) => ("Region", "AcDbModelerGeometry", None),
         EntityType::Body(_) => ("CadBody", "AcDbModelerGeometry", None),
-        EntityType::Surface(_) => ("Surface", "AcDbSurface", None),
+        EntityType::Surface(value) => {
+            let (type_name, _, subclass) = surface_identity(value.kind);
+            (type_name, subclass, None)
+        }
         EntityType::Table(_) => ("TableEntity", "AcDbTable", None),
         EntityType::Tolerance(_) => ("Tolerance", "AcDbFcf", None),
         EntityType::PolyfaceMesh(_) => {
@@ -2056,13 +2059,28 @@ fn collect_entity_part(
             "AcDbOle2Frame",
             false,
             vec![
-                ("BinaryData", bytes(&value.encoded_payload())),
-                ("IsPaperSpace", bool_value(value.is_paper_space)),
+                (
+                    "BinaryData",
+                    match &value.source_payload {
+                        Some(source) => bytes(&source.0),
+                        None => bytes(&value.encoded_payload()),
+                    },
+                ),
+                // The DWG reader reads the mode and source application
+                // without assigning either property.
+                (
+                    "IsPaperSpace",
+                    bool_value(value.is_paper_space && doc.dwg_source_version.is_none()),
+                ),
                 ("LowerRightCorner", vec3(value.lower_right_corner)),
                 ("OleObjectType", enum_value(value.ole_object_type as i64)),
                 (
                     "SourceApplication",
-                    Value::String(value.source_application.clone()),
+                    if doc.dwg_source_version.is_some() {
+                        Value::Null
+                    } else {
+                        Value::String(value.source_application.clone())
+                    },
                 ),
                 ("UpperLeftCorner", vec3(value.upper_left_corner)),
                 ("Version", integer(value.version as i64)),
@@ -3586,50 +3604,46 @@ fn collect_modeler_geometry(
     );
 }
 
-fn collect_modeler(
-    doc: &CadDocument,
-    common: &EntityCommon,
-    type_name: &'static str,
-    object_name: &'static str,
-    object_type: i64,
-    subclass: &'static str,
-    acis_data: &crate::entities::AcisData,
-    out: &mut Vec<Value>,
-) {
-    let data = if acis_data.is_binary {
-        bytes(&acis_data.sab_data)
-    } else {
-        bytes(acis_data.sat_data.as_bytes())
-    };
-    field_common(
-        doc,
-        common,
-        type_name,
-        object_name,
-        object_type,
-        subclass,
-        false,
-        vec![
-            ("AcisData", data),
-            ("IsBinaryAcisData", bool_value(acis_data.is_binary)),
-            ("ModelerFormatVersion", integer(acis_data.version as i64)),
-            ("Point", unmapped()),
-        ],
-        out,
-    );
+/// ACadSharp reads each surface subtype as its own class; they share
+/// Surface's properties and differ only in identity.
+fn surface_identity(kind: crate::entities::SurfaceKind) -> (&'static str, &'static str, &'static str) {
+    use crate::entities::SurfaceKind;
+    match kind {
+        SurfaceKind::Generic => ("Surface", "SURFACE", "AcDbSurface"),
+        SurfaceKind::Plane => ("PlaneSurface", "PLANESURFACE", "AcDbPlaneSurface"),
+        SurfaceKind::Extruded => ("ExtrudedSurface", "EXTRUDEDSURFACE", "AcDbExtrudedSurface"),
+        SurfaceKind::Lofted => ("LoftedSurface", "LOFTEDSURFACE", "AcDbLoftedSurface"),
+        SurfaceKind::Revolved => ("RevolvedSurface", "REVOLVEDSURFACE", "AcDbRevolvedSurface"),
+        SurfaceKind::Swept => ("SweptSurface", "SWEPTSURFACE", "AcDbSweptSurface"),
+        SurfaceKind::Nurb => ("NurbSurface", "NURBSURFACE", "AcDbNurbSurface"),
+    }
 }
 
 fn collect_surface(doc: &CadDocument, value: &crate::entities::Surface, out: &mut Vec<Value>) {
-    collect_modeler(
+    let (type_name, object_name, subclass) = surface_identity(value.kind);
+    let mut properties = modeler::properties(
+        &value.acis_data,
+        value.point_of_reference,
+        &value.wires,
+        &value.silhouettes,
+    );
+    // The DWG surface reader does not decode the AcDbSurface isoline counts.
+    let isolines = |count: i16| {
+        integer(if doc.dwg_source_version.is_some() { 0 } else { i64::from(count) })
+    };
+    properties.push(("UIsolines", isolines(value.u_isolines)));
+    properties.push(("VIsolines", isolines(value.v_isolines)));
+    field_common(
         doc,
         &value.common,
-        "Surface",
-        "SURFACE",
+        type_name,
+        object_name,
         -999,
-        "AcDbSurface",
-        &value.acis_data,
+        subclass,
+        false,
+        properties,
         out,
-    )
+    );
 }
 
 fn collect_underlay(doc: &CadDocument, value: &crate::entities::Underlay, out: &mut Vec<Value>) {

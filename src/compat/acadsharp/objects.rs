@@ -398,7 +398,16 @@ fn dump_dictionary(handle_value: Handle, value: &Dictionary) -> Value {
         value.xdictionary_handle,
     );
     p.extend([
-        ("ClonningFlags", int(value.duplicate_cloning as i64)),
+        // A DXF dictionary without group 281 keeps ACadSharp's constructor
+        // default (not applicable) rather than the native cloning default.
+        (
+            "ClonningFlags",
+            int(if value.cloning_absent.0 {
+                0
+            } else {
+                value.duplicate_cloning as i64
+            }),
+        ),
         (
             "EntryHandles",
             numeric_handles(value.entries.iter().map(|(_, h)| *h)),
@@ -879,7 +888,7 @@ fn dump_mline_style(
                         props(
                             "MLineStyle.Element",
                             [
-                                ("Color", color(element.color)),
+                                ("Color", super::common::appearance_color(element.color)),
                                 (
                                     "LineType",
                                     optional_handle(
@@ -896,7 +905,7 @@ fn dump_mline_style(
             ),
         ),
         ("EndAngle", number(value.end_angle)),
-        ("FillColor", color(value.fill_color)),
+        ("FillColor", super::common::appearance_color(value.fill_color)),
         ("Flags", int(value.flags.to_bits() as i64)),
         ("StartAngle", number(value.start_angle)),
     ]);
@@ -929,7 +938,10 @@ fn dump_mleader_style(
         })
         .or_else(|| (!value.name.is_empty()).then(|| value.name.clone()))
         .unwrap_or_else(|| MultiLeaderStyle::STANDARD.to_string());
-    let line_type = value.line_type_handle.or_else(|| {
+    // An unresolved linetype reference leaves the style at its ByLayer default.
+    let line_type = value.line_type_handle.filter(|handle| {
+        !handle.is_null() && doc.line_types.iter().any(|line| line.handle == *handle)
+    }).or_else(|| {
         doc.line_types
             .get("ByLayer")
             .or_else(|| doc.line_types.get("BYLAYER"))
@@ -2773,7 +2785,12 @@ fn dump_object_context_data(handle_value: Handle, value: &ObjectContextData) -> 
             );
             p.extend([
                 ("InsertionPoint", vec3(*insertion)),
-                ("ObjectName", text("BLKREFOBJECTCONTEXTDATA")),
+                ("ObjectName", text("ACDB_BLKREFOBJECTCONTEXTDATA_CLASS")),
+                ("SubclassMarker", text("AcDbAnnotScaleObjectContextData")),
+                // The reader never assigns this public property, so it keeps
+                // its constructor default; it is unrelated to the common
+                // extension-dictionary reference.
+                ("HasFileToExtensionDictionary", bool_value(true)),
                 ("Rotation", number(*rotation)),
                 ("XScale", number(scale_factor.x)),
                 ("YScale", number(scale_factor.y)),

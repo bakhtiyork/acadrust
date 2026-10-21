@@ -3512,10 +3512,13 @@ impl<'a> SectionReader<'a> {
                         _ => {}
                     }
                 }
+                // Keep every raw source record for the compatibility view,
+                // including the empty-name DbBEditSession placeholder found
+                // in several real-world CLASSES sections. Empty names are
+                // not valid native registry keys, so only those are omitted
+                // from the writer-facing collection.
+                document.classes.record_source(class.clone());
                 if !class.dxf_name.is_empty() {
-                    // Keep the raw source record for the compatibility view
-                    // before merging it into the native writer registry.
-                    document.classes.record_source(class.clone());
                     document.classes.add_or_update(class);
                 }
             }
@@ -7408,6 +7411,7 @@ impl<'a> SectionReader<'a> {
     /// Read a DICTIONARY object
     fn read_dictionary(&mut self) -> Result<Option<Dictionary>> {
         let mut dict = Dictionary::new();
+        dict.cloning_absent = crate::objects::SourceFlag(true);
         let mut current_key: Option<String> = None;
 
         while let Some(pair) = self.reader.read_pair()? {
@@ -7445,6 +7449,7 @@ impl<'a> SectionReader<'a> {
                     // Duplicate record cloning flag
                     if let Some(value) = pair.as_i16() {
                         dict.duplicate_cloning = value;
+                        dict.cloning_absent = crate::objects::SourceFlag(false);
                     }
                 }
                 280 => {
@@ -10103,6 +10108,7 @@ impl<'a> SectionReader<'a> {
                     if let Some(dash) = pair.as_double() {
                         linetype.elements.push(LineTypeElement {
                             length: dash,
+                            source_scale: None,
                             complex: None,
                         });
                     }
@@ -10373,6 +10379,9 @@ impl<'a> SectionReader<'a> {
                         // Entry already exists (from initialize_defaults),
                         // update it with the data from the file
                         if let Some(existing) = document.block_records.get_mut(&name) {
+                            // Lookup is case-insensitive, but the stored source
+                            // spelling is data (including *MODEL_SPACE).
+                            existing.name = block_record.name;
                             if !block_record.handle.is_null() {
                                 existing.set_handle(block_record.handle);
                             }
@@ -10548,6 +10557,7 @@ impl<'a> SectionReader<'a> {
             } else if pair.code == 0 && pair.value_string == "DIMSTYLE" {
                 self.reader.record_xdata(true);
                 if let Some(mut dimstyle) = self.read_dimstyle_entry()? {
+                    dimstyle.source_present = true;
                     Self::remember_source_table_entry(
                         document,
                         &dimstyle.name,

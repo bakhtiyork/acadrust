@@ -41,6 +41,19 @@ impl OleObjectType {
     }
 }
 
+/// Source bytes of an OLE payload that the structured form does not re-encode
+/// identically. Metadata about how the record was read, so it never takes part
+/// in equality.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct SourcePayload(pub Vec<u8>);
+
+impl PartialEq for SourcePayload {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// An embedded OLE2 object entity.
 ///
 /// Stores the decoded OLE compound storage and bounding rectangle.
@@ -69,6 +82,11 @@ pub struct Ole2Frame {
     pub dwg_mode: i16,
     /// Preserve the OLE object's aspect ratio while resizing.
     pub lock_aspect: u8,
+    /// The payload as stored in a DWG, kept only when `encoded_payload` would
+    /// lay the compound file out differently.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[doc(hidden)]
+    pub source_payload: Option<SourcePayload>,
 }
 
 impl Ole2Frame {
@@ -86,6 +104,7 @@ impl Ole2Frame {
             envelope: OleFrameEnvelope::None,
             dwg_mode: 0,
             lock_aspect: 0,
+            source_payload: None,
         }
     }
 

@@ -7,6 +7,15 @@ use crate::types::{Color, Handle};
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct DimStyle {
+    /// Whether this record came from the source DIMSTYLE table.
+    ///
+    /// A decoded document starts with native Standard defaults before source
+    /// records are merged.  The compatibility reader view must be able to
+    /// omit that synthetic entry when the source table did not contain it,
+    /// while retaining a real source record named Standard.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    #[doc(hidden)]
+    pub source_present: bool,
     /// Group codes present in the source DXF record.
     ///
     /// The native reader starts with format defaults, while ACadSharp starts
@@ -353,6 +362,7 @@ impl DimStyle {
     /// Create a new dimension style
     pub fn new(name: impl Into<String>) -> Self {
         DimStyle {
+            source_present: false,
             dxf_present_codes: None,
             dxf_last_linear_unit_code: None,
             handle: Handle::NULL,

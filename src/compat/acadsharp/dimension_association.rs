@@ -110,7 +110,9 @@ fn projected_references(
             };
             let mut projected = dump_reference(doc, &defaults);
             projected["Geometry"] = geometry
-                .filter(|handle| super::resolves_handle(doc, *handle))
+                .filter(|handle| {
+                    super::resolves_handle(doc, *handle) || vertex_resolves(doc, *handle)
+                })
                 .map(super::handle)
                 .unwrap_or(Value::Null);
             projected
@@ -132,6 +134,18 @@ fn projected_references(
                 .map(|reference| dump_reference(doc, reference))
                 .unwrap_or(Value::Null)
         }
+    })
+}
+
+/// Polyline vertices are reference targets too, but live inside their
+/// polyline instead of the entity arena; only searched when nothing else matches.
+fn vertex_resolves(doc: &crate::CadDocument, handle: crate::types::Handle) -> bool {
+    use crate::entities::EntityType;
+    doc.entities().any(|entity| match entity {
+        EntityType::Polyline2D(polyline) => {
+            polyline.vertices.iter().any(|vertex| vertex.common.handle == handle)
+        }
+        _ => false,
     })
 }
 

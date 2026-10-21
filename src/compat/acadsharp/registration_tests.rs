@@ -94,11 +94,25 @@ fn dxf_visual_style_callback_and_unknown_policy_prune_owned_subgraphs() {
     let dxf = objects(&doc, "dxf");
     assert_eq!(
         object(&dxf, 0x100)["props"]["EntryHandles"],
-        json!([0x107, 0x1000, 0x1001])
+        // The reference creates all eleven missing collection dictionaries.
+        json!([0x107, 0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x1007, 0x1008, 0x1009, 0x100A])
     );
     assert_eq!(
         object(&dxf, 0x100)["props"]["EntryNames"],
-        json!(["retained", "ACAD_IMAGE_DICT", "ACAD_PDFDEFINITIONS"])
+        json!([
+            "retained",
+            "ACAD_LAYOUT",
+            "ACAD_GROUP",
+            "ACAD_SCALELIST",
+            "ACAD_MLINESTYLE",
+            "ACAD_MLEADERSTYLE",
+            "ACAD_TABLESTYLE",
+            "ACAD_IMAGE_DICT",
+            "ACAD_PDFDEFINITIONS",
+            "ACAD_COLOR",
+            "AcDbVariableDictionary",
+            "ACAD_MATERIAL"
+        ])
     );
     for h in 0x101..=0x106 {
         assert!(!dxf.iter().any(|o| o["handle"] == format!("#{h:X}")));
@@ -130,7 +144,7 @@ fn style_description_is_not_a_dictionary_identity() {
     assert_eq!(object(&result, 0x102)["props"]["Name"], "Annotative");
     assert_eq!(
         object(&result, 0x100)["props"]["EntryHandles"],
-        json!([0x101, 0x102, 0x1000, 0x1001])
+        json!([0x101, 0x102, 0x1000, 0x1001, 0x1002, 0x1003, 0x1004, 0x1005, 0x1006, 0x1007, 0x1008, 0x1009, 0x100A])
     );
 }
 
