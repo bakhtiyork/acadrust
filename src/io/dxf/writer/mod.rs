@@ -7,6 +7,8 @@ mod stream_writer;
 mod text_writer;
 #[cfg(test)]
 mod r5a_tests;
+#[cfg(test)]
+mod r5a2_tests;
 
 pub use binary_writer::DxfBinaryWriter;
 pub use section_writer::SectionWriter;
@@ -157,9 +159,17 @@ impl<'a> DxfWriter<'a> {
             document,
             SectionWriter::<W>::writable_version(output_version),
         );
-        let handle_seed = handle_start + extra_handles + 1;
+        // A document read from a file keeps the seed its source stated unless a handle at or above it is
+        // written: the native seed advances while the reader creates default objects, and writing it back would
+        // grow it with every round trip.
+        let handle_seed = match document.header.source_handle_seed {
+            Some(source) if extra_handles == 0 => source.max(max_written_handle(document) + 1),
+            _ => handle_start + extra_handles + 1,
+        };
         let mut section_writer = SectionWriter::new(writer, handle_start, handle_seed);
         section_writer.set_version(output_version);
+        section_writer.set_dwg_source(document.dwg_source_version);
+        section_writer.set_layer_names(document);
         section_writer.build_valid_handles(document);
 
         // Write all sections
@@ -298,7 +308,11 @@ fn count_extra_handles(document: &CadDocument, version: crate::types::DxfVersion
     // Count SortEntitiesTable sort entries (allocate_handle used for each)
     for obj in document.objects.values() {
         if let ObjectType::SortEntitiesTable(table) = obj {
-            count += table.len() as u64;
+            // A table kept in the source records of this very version is written verbatim, allocating none.
+            let verbatim = table.raw_dxf_version == Some(version) && table.raw_dxf_codes.is_some();
+            if !verbatim {
+                count += section_writer::sort_entries_needing_handles(table) as u64;
+            }
         }
     }
 
@@ -310,6 +324,50 @@ fn count_extra_handles(document: &CadDocument, version: crate::types::DxfVersion
         .count() as u64;
 
     count
+}
+
+/// The highest handle among the records the writer emits (0 when there are none).
+fn max_written_handle(document: &CadDocument) -> u64 {
+    let mut max = 0u64;
+    for entity in document.entities() {
+        max = max.max(entity.common().handle.value());
+        entity.for_each_child_handle(|handle| max = max.max(handle.value()));
+    }
+    max = document.objects.keys().fold(max, |max, handle| max.max(handle.value()));
+    for br in document.block_records.iter() {
+        max = max.max(br.handle.value()).max(br.block_entity_handle.value()).max(br.block_end_handle.value());
+        for eh in &br.entity_handles {
+            max = max.max(eh.value());
+        }
+    }
+    for r in document.layers.iter() {
+        max = max.max(r.handle.value());
+    }
+    for r in document.line_types.iter() {
+        max = max.max(r.handle.value());
+    }
+    for r in document.text_styles.iter() {
+        max = max.max(r.handle.value());
+    }
+    for r in document.dim_styles.iter() {
+        max = max.max(r.handle.value());
+    }
+    let unused = section_writer::unused_default_app_ids(document);
+    for r in document.app_ids.iter() {
+        if !unused.contains(&r.name.to_ascii_uppercase()) {
+            max = max.max(r.handle.value());
+        }
+    }
+    for r in document.views.iter() {
+        max = max.max(r.handle.value());
+    }
+    for r in document.vports.iter() {
+        max = max.max(r.handle.value());
+    }
+    for r in document.ucss.iter() {
+        max = max.max(r.handle.value());
+    }
+    max
 }
 
 /// Compute the true maximum handle across all document objects.

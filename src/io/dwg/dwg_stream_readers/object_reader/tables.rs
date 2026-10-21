@@ -1205,8 +1205,9 @@ pub fn read_dimstyle(
         dimfit: 0,
         dimatfit: 3,
         dimunit: 2,
-        dimlwd: 0,
-        dimlwe: 0,
+        // A R13/R14 record has no DIMLWD/DIMLWE: the defaults are ByBlock (-2), not a 0.00 mm lineweight.
+        dimlwd: -2,
+        dimlwe: -2,
         xref_handle: 0,
         dimtxsty_handle: 0,
         dimldrblk_handle: None,

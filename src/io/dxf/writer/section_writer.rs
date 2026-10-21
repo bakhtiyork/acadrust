@@ -59,7 +59,9 @@ pub(crate) fn polyline2d_downsaves_to_lwpolyline(polyline: &Polyline2D) -> bool 
         })
 }
 
-/// Legacy application objects that have no complete DXF representation.
+/// The dynamic-block purge preventer, by DXF or DWG class name. A decoded `DynamicBlock` one is written (its
+/// version only, without the block pointer the Representation layout carries); an `Unknown` or associative
+/// record of that name has no decoded data and is not written.
 fn is_unrestorable_assoc_object(type_name: &str) -> bool {
     // Normalize: the DWG class names carry underscores (e.g.
     // ACDB_DYNAMICBLOCKPURGEPREVENTER_VERSION) while the DXF records do not.
@@ -69,6 +71,54 @@ fn is_unrestorable_assoc_object(type_name: &str) -> bool {
         .map(|c| c.to_ascii_uppercase())
         .collect();
     normalized.starts_with("ACDBDYNAMICBLOCKPURGEPREVENTER")
+}
+
+/// The native default application IDs (`AcadAnnotative`, `AcCmTransparency`, `AcAecLayerStandard`) of a
+/// document read from a file whose APPID table did not have them, and whose XDATA does not use them.
+/// A reader must not find an application the source never registered.
+pub(super) fn unused_default_app_ids(document: &CadDocument) -> HashSet<String> {
+    let Some(source) = document.source_app_id_order.as_ref() else {
+        return HashSet::new();
+    };
+    let in_source: HashSet<String> = source.iter().map(|name| name.to_ascii_uppercase()).collect();
+    let mut candidates: HashSet<String> = ["ACADANNOTATIVE", "ACCMTRANSPARENCY", "ACAECLAYERSTANDARD"]
+        .into_iter()
+        .map(String::from)
+        .filter(|name| !in_source.contains(name))
+        .filter(|name| document.app_ids.iter().any(|appid| appid.name().eq_ignore_ascii_case(name)))
+        .collect();
+    if candidates.is_empty() {
+        return candidates;
+    }
+    // The layer writer registers these two applications' XDATA from the layer fields.
+    if document.layers.iter().any(|layer| !layer.transparency.is_opaque()) {
+        candidates.remove("ACCMTRANSPARENCY");
+    }
+    if document.layers.iter().any(|layer| !layer.description.is_empty()) {
+        candidates.remove("ACAECLAYERSTANDARD");
+    }
+    let mut forget = |data: &ExtendedData| {
+        for record in data.records() {
+            candidates.remove(&record.application_name.to_ascii_uppercase());
+        }
+    };
+    for data in document.object_xdata.values() {
+        forget(data);
+    }
+    for entity in document.entities() {
+        forget(&entity.common().extended_data);
+    }
+    candidates
+}
+
+/// How many sort entries of a SORTENTSTABLE need a handle allocated while writing: those without a sort handle
+/// and those repeating one (see `write_sort_entities_table`).
+pub(super) fn sort_entries_needing_handles(table: &SortEntitiesTable) -> usize {
+    let mut used = HashSet::new();
+    table
+        .entries()
+        .filter(|entry| entry.sort_handle.is_null() || !used.insert(entry.sort_handle))
+        .count()
 }
 
 /// Writes all DXF sections
@@ -88,6 +138,11 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
     /// Set of all handles that will exist in the output DXF.
     /// Used to filter reactor/xdictionary references to non-existent objects.
     valid_handles: HashSet<Handle>,
+    /// DWG version the document was read from (None for a DXF source or a document built in memory): a field
+    /// the DWG record stores is stated even when its value is the native default.
+    dwg_source: Option<DxfVersion>,
+    /// Names of the layer records by handle, for the viewport-override layers ("0 @ 1") a DWG entity names by handle.
+    layer_names: HashMap<Handle, String>,
     /// Handle of the ByLayer linetype (for defaults in MLeader etc.)
     bylayer_linetype_handle: Handle,
     /// Handle of the ByBlock linetype (treated as "unset" for MLeader etc.)
@@ -145,6 +200,24 @@ fn source_spelling_characters<'a>(spelled: &'a str, decoded: &str) -> std::borro
     }
 }
 
+/// Which MATERIAL groups are written (see `write_material`).
+struct MaterialGate<'a> {
+    source: Option<&'a crate::objects::MaterialDxfSource>,
+    /// A built-in material of a document that did not come from DXF: minimal form.
+    minimal: bool,
+}
+
+impl MaterialGate<'_> {
+    /// A group is written when the DXF source record had it, when its value differs from the native default,
+    /// or (no DXF source, not minimal) always. The minimal form also carries the diffuse map source (72).
+    fn writes(&self, code: usize, differs: bool) -> bool {
+        match self.source {
+            Some(source) => source.contains(code) || differs,
+            None => !self.minimal || differs || matches!(code, 72 | 77 | 171 | 175 | 179 | 273),
+        }
+    }
+}
+
 impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Create a new section writer
     pub fn new(writer: &'a mut W, handle_start: u64, handle_seed: u64) -> Self {
@@ -157,6 +230,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             writing_paper_space: false,
             paper_viewport_ids: HashMap::new(),
             valid_handles: HashSet::new(),
+            dwg_source: None,
+            layer_names: HashMap::new(),
             bylayer_linetype_handle: Handle::NULL,
             byblock_linetype_handle: Handle::NULL,
             model_space_handle: Handle::NULL,
@@ -196,11 +271,6 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 }
                 ObjectType::Associative(assoc) => {
                     if is_unrestorable_assoc_object(&assoc.dxf_name) {
-                        continue;
-                    }
-                }
-                ObjectType::DynamicBlock(dynamic) => {
-                    if is_unrestorable_assoc_object(&dynamic.dxf_name) {
                         continue;
                     }
                 }
@@ -387,6 +457,26 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     }
 
     /// Set the target DXF version
+    /// Record the DWG version the document came from (see `dwg_source`).
+    pub fn set_dwg_source(&mut self, version: Option<DxfVersion>) {
+        self.dwg_source = version;
+    }
+
+    /// Remember the layer records by handle (see `layer_names`).
+    pub fn set_layer_names(&mut self, document: &CadDocument) {
+        self.layer_names = document
+            .layers
+            .iter()
+            .filter(|layer| layer.name.contains(" @ ") && !layer.handle.is_null())
+            .map(|layer| (layer.handle, layer.name.clone()))
+            .collect();
+    }
+
+    /// Whether a DWG source of a version that stores the field was read.
+    fn stated_by_dwg(&self, since: DxfVersion) -> bool {
+        self.dwg_source.is_some_and(|version| version >= since)
+    }
+
     pub fn set_version(&mut self, version: DxfVersion) {
         self.dxf_version = Self::writable_version(version);
     }
@@ -422,6 +512,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Write the HEADER section
     pub fn write_header(&mut self, document: &CadDocument) -> Result<()> {
         self.omitted_header_variables = self.unchanged_absent_header_variables(document);
+        // Variables a DWG header of this version does not store: their native value is a default the DWG never
+        // stated (the reference then keeps its own default for the absent variable).
+        if let Some(version) = document.dwg_source_version {
+            if version > DxfVersion::AC1014 {
+                self.omitted_header_variables.insert("$DIMFIT".to_string());
+                self.omitted_header_variables.insert("$OSMODE".to_string());
+            }
+            if version < DxfVersion::AC1015 {
+                self.omitted_header_variables.insert("$PSTYLEMODE".to_string());
+            }
+            if version < DxfVersion::AC1018 || document.header.dwg_template_data.is_none() {
+                self.omitted_header_variables.insert("$MEASUREMENT".to_string());
+            }
+        }
         self.write_header_for(&document.header, document)
     }
 
@@ -503,7 +607,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             };
             self.write_header_variable("$ACADMAINTVER", |w| w.write_i32(90, maintenance))?;
         } else if self.dxf_version >= DxfVersion::AC1015 {
-            self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, hdr.maintenance_version as i16))?;
+            // A DWG source keeps the release byte of its file header on the document, not in the header.
+            let maintenance = if hdr.maintenance_version == 0 && hdr.dxf_source_variables.is_none() && document.dwg_source_version.is_some() {
+                i32::from(document.maintenance_version)
+            } else {
+                hdr.maintenance_version
+            };
+            self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, maintenance as i16))?;
         }
         self.write_header_variable("$DWGCODEPAGE", |w| w.write_string(3, &hdr.code_page))?;
 
@@ -575,9 +685,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$SKETCHINC", |w| w.write_double(40, hdr.sketch_increment))?;
         self.write_header_variable("$SKPOLY", |w| w.write_i16(70, hdr.sketch_type.clamp(0, 2)))?;
         // SKTOLERANCE is application state, not a portable DXF header variable.
-        self.write_header_variable("$TEXTSTYLE", |w| {
-            w.write_string(7, &hdr.current_text_style_name)
-        })?;
+        // A DWG header names the current styles by handle; the fork default name stands for "not resolved".
+        let style_name = |name: &str, handle: Handle| -> String {
+            if document.dwg_source_version.is_none() || name != "Standard" || handle.is_null() {
+                return name.to_string();
+            }
+            document
+                .text_styles
+                .iter()
+                .find(|style| style.handle == handle)
+                .map_or_else(|| name.to_string(), |style| style.name.clone())
+        };
+        let text_style_name = style_name(&hdr.current_text_style_name, hdr.current_text_style_handle);
+        self.write_header_variable("$TEXTSTYLE", |w| w.write_string(7, &text_style_name))?;
         self.write_header_variable("$CMLSTYLE", |w| w.write_string(2, &hdr.multiline_style))?;
         self.write_header_variable("$CMLJUST", |w| w.write_i16(70, hdr.multiline_justification))?;
         self.write_header_variable("$CMLSCALE", |w| w.write_double(40, hdr.multiline_scale))?;
@@ -605,9 +725,19 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             })?;
         }
         self.write_header_variable("$CLAYER", |w| w.write_string(8, &hdr.current_layer_name))?;
-        self.write_header_variable("$CELTYPE", |w| {
-            w.write_string(6, &hdr.current_linetype_name)
-        })?;
+        let linetype_name = if document.dwg_source_version.is_some()
+            && hdr.current_linetype_name == "ByLayer"
+            && !hdr.current_linetype_handle.is_null()
+        {
+            document
+                .line_types
+                .iter()
+                .find(|linetype| linetype.handle == hdr.current_linetype_handle)
+                .map_or_else(|| hdr.current_linetype_name.clone(), |linetype| linetype.name.clone())
+        } else {
+            hdr.current_linetype_name.clone()
+        };
+        self.write_header_variable("$CELTYPE", |w| w.write_string(6, &linetype_name))?;
         self.write_header_variable("$CECOLOR", |w| {
             w.write_i16(62, hdr.current_entity_color.approximate_index())
         })?;
@@ -657,7 +787,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             } else {
                 document.summary_info.hyperlink_base.as_str()
             };
-            if !base.is_empty() {
+            if !base.is_empty()
+                || hdr.dxf_source_variables.as_ref().is_some_and(|vars| vars.contains("$HYPERLINKBASE"))
+                || self.stated_by_dwg(DxfVersion::AC1015)
+            {
                 self.write_header_variable("$HYPERLINKBASE", |w| w.write_string(1, base))?;
             }
         }
@@ -808,9 +941,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$DIMATFIT", |w| w.write_i16(70, hdr.dim_text_arrow_fit))?;
         self.write_header_variable("$DIMFIT", |w| w.write_i16(70, hdr.dim_fit))?;
         self.write_header_variable("$DIMALTMZF", |w| w.write_double(40, hdr.dim_alt_mzf))?;
-        self.write_header_variable("$DIMALTMZS", |w| {
-            w.write_string(6, hdr.dim_alt_mzs.as_deref().unwrap_or(""))
-        })?;
+        if let Some(text) = hdr.dim_alt_mzs.as_deref() {
+            self.write_header_variable("$DIMALTMZS", |w| w.write_string(6, text))?;
+        }
         self.write_header_variable("$DIMARCSYM", |w| {
             w.write_i16(70, hdr.dim_arc_length_symbol_position)
         })?;
@@ -820,9 +953,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$DIMTXTDIRECTION", |w| w.write_i16(70, hdr.dim_text_direction))?;
         self.write_header_variable("$DIMUNIT", |w| w.write_i16(70, hdr.dim_unit))?;
         self.write_header_variable("$DIMMZF", |w| w.write_double(40, hdr.dim_mzf))?;
-        self.write_header_variable("$DIMMZS", |w| {
-            w.write_string(6, hdr.dim_mzs.as_deref().unwrap_or(""))
-        })?;
+        if let Some(text) = hdr.dim_mzs.as_deref() {
+            self.write_header_variable("$DIMMZS", |w| w.write_string(6, text))?;
+        }
         self.write_header_variable("$DIMDSEP", |w| {
             w.write_i16(70, hdr.dim_decimal_separator as i16)
         })?;
@@ -831,7 +964,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$DIMLWD", |w| w.write_i16(70, hdr.dim_line_weight))?;
         self.write_header_variable("$DIMLWE", |w| w.write_i16(70, hdr.dim_ext_line_weight))?;
         self.write_header_variable("$DIMTFAC", |w| w.write_double(40, hdr.dim_tolerance_scale))?;
-        self.write_header_variable("$DIMTXSTY", |w| w.write_string(7, &hdr.dim_text_style_name))?;
+        let dim_text_style = style_name(&hdr.dim_text_style_name, hdr.dim_text_style_handle);
+        self.write_header_variable("$DIMTXSTY", |w| w.write_string(7, &dim_text_style))?;
         self.write_header_variable("$DIMLTYPE", |w| w.write_string(6, &hdr.dim_linetype_name))?;
         self.write_header_variable("$DIMLTEX1", |w| w.write_string(6, &hdr.dim_linetype1_name))?;
         self.write_header_variable("$DIMLTEX2", |w| w.write_string(6, &hdr.dim_linetype2_name))?;
@@ -1022,7 +1156,173 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             w.write_i16(70, hdr.paper_ucs_ortho_view)
         })?;
 
+        self.write_optional_header_variables(hdr, document)?;
+
         self.writer.write_section_end()?;
+        Ok(())
+    }
+
+    /// System variables the reader keeps that no always-written group covers. One is written when the DXF
+    /// source had it, when a DWG source of a version that stores it was read (the value is stated even when it
+    /// equals the native default), or when its value differs from the native default (an edit); so a file never
+    /// gains a variable it did not state and a stated one is never dropped.
+    fn write_optional_header_variables(
+        &mut self,
+        hdr: &crate::document::HeaderVariables,
+        document: &CadDocument,
+    ) -> Result<()> {
+        let d = crate::document::HeaderVariables::default();
+        let source = hdr.dxf_source_variables.as_ref();
+        let dwg = document.dwg_source_version;
+        let wanted = |name: &str, since: DxfVersion, differs: bool| {
+            differs
+                || source.is_some_and(|vars| vars.contains(name))
+                || (source.is_none() && dwg.is_some_and(|version| version >= since))
+        };
+        macro_rules! var {
+            ($name:literal, $since:ident, $differs:expr, $write:expr) => {
+                if wanted($name, DxfVersion::$since, $differs) {
+                    self.write_header_variable($name, $write)?;
+                }
+            };
+        }
+        macro_rules! point3 {
+            ($name:literal, $since:ident, $field:ident) => {
+                var!($name, $since, hdr.$field != d.$field, |w| {
+                    w.write_double(10, hdr.$field.x)?;
+                    w.write_double(20, hdr.$field.y)?;
+                    w.write_double(30, hdr.$field.z)
+                });
+            };
+        }
+        macro_rules! flag {
+            ($name:literal, $since:ident, $field:ident) => {
+                var!($name, $since, hdr.$field != d.$field, |w| w.write_i16(70, hdr.$field as i16));
+            };
+        }
+        macro_rules! bool290 {
+            ($name:literal, $since:ident, $field:ident) => {
+                var!($name, $since, hdr.$field != d.$field, |w| w.write_bool(290, hdr.$field));
+            };
+        }
+        macro_rules! int {
+            ($name:literal, $since:ident, $code:literal, $field:ident) => {
+                var!($name, $since, hdr.$field != d.$field, |w| w.write_i16($code, hdr.$field));
+            };
+        }
+        macro_rules! real {
+            ($name:literal, $since:ident, $code:literal, $field:ident) => {
+                var!($name, $since, hdr.$field != d.$field, |w| w.write_double($code, hdr.$field));
+            };
+        }
+        macro_rules! text {
+            ($name:literal, $since:ident, $field:ident) => {
+                var!($name, $since, hdr.$field != d.$field, |w| w.write_string(1, &hdr.$field));
+            };
+        }
+        point3!("$PINSBASE", AC1012, paper_space_insertion_base);
+        point3!("$PEXTMIN", AC1012, paper_space_extents_min);
+        point3!("$PEXTMAX", AC1012, paper_space_extents_max);
+        var!("$PLIMMIN", AC1012, hdr.paper_space_limits_min != d.paper_space_limits_min, |w| {
+            w.write_double(10, hdr.paper_space_limits_min.x)?;
+            w.write_double(20, hdr.paper_space_limits_min.y)
+        });
+        var!("$PLIMMAX", AC1012, hdr.paper_space_limits_max != d.paper_space_limits_max, |w| {
+            w.write_double(10, hdr.paper_space_limits_max.x)?;
+            w.write_double(20, hdr.paper_space_limits_max.y)
+        });
+        flag!("$LIMCHECK", AC1012, limit_check);
+        flag!("$DIMASO", AC1012, associate_dimensions);
+        flag!("$DIMSHO", AC1012, update_dimensions_while_dragging);
+        flag!("$USRTIMER", AC1012, user_timer);
+        real!("$TDUSRTIMER", AC1012, 40, user_elapsed_time);
+        flag!("$ATTREQ", AC1012, attribute_request);
+        flag!("$ATTDIA", AC1012, attribute_dialog);
+        flag!("$BLIPMODE", AC1012, blip_mode);
+        flag!("$DELOBJ", AC1012, delete_objects);
+        int!("$COORDS", AC1012, 70, coords_mode);
+        int!("$DRAGMODE", AC1012, 70, drag_mode);
+        int!("$ISOLINES", AC1012, 70, isolines);
+        int!("$TEXTQLTY", AC1012, 70, text_quality);
+        int!("$PICKSTYLE", AC1012, 70, pick_style);
+        int!("$OBSCOLOR", AC1018, 70, obscured_color);
+        int!("$OBSLTYPE", AC1018, 280, obscured_linetype);
+        int!("$INTERSECTIONCOLOR", AC1018, 70, intersection_color);
+        int!("$INTERSECTIONDISPLAY", AC1018, 280, intersection_display);
+        bool290!("$OLESTARTUP", AC1015, ole_startup);
+        bool290!("$XEDIT", AC1015, xedit);
+        bool290!("$EXTNAMES", AC1015, extended_names);
+        bool290!("$CAMERADISPLAY", AC1021, camera_display);
+        int!("$HIDETEXT", AC1018, 280, hide_text);
+        int!("$SORTENTS", AC1018, 280, sort_entities);
+        int!("$INDEXCTL", AC1018, 280, index_control);
+        int!("$HALOGAP", AC1018, 280, halo_gap);
+        int!("$ENDCAPS", AC1015, 280, end_caps);
+        int!("$JOINSTYLE", AC1015, 280, join_style);
+        int!("$DIMASSOC", AC1018, 280, dimension_associativity);
+        int!("$DIMAZIN", AC1015, 70, dim_alt_zero_suppression);
+        flag!("$DIMUPT", AC1012, dim_user_positioned_text);
+        real!("$DIMALTRND", AC1015, 40, dim_alt_rounding);
+        // A DWG header names the arrow blocks by handle; the DXF variable carries the block name.
+        let block_name = |name: &str, handle: Handle| -> String {
+            if !name.is_empty() || handle.is_null() {
+                return name.to_string();
+            }
+            document
+                .block_records
+                .iter()
+                .find(|record| record.handle == handle)
+                .map(|record| record.name.clone())
+                .unwrap_or_default()
+        };
+        for (name, since, value, default) in [
+            ("$DIMBLK", DxfVersion::AC1012, block_name(&hdr.dim_arrow_block, hdr.dim_arrow_block_handle), &d.dim_arrow_block),
+            ("$DIMBLK1", DxfVersion::AC1012, block_name(&hdr.dim_arrow_block1, hdr.dim_arrow_block1_handle), &d.dim_arrow_block1),
+            ("$DIMBLK2", DxfVersion::AC1012, block_name(&hdr.dim_arrow_block2, hdr.dim_arrow_block2_handle), &d.dim_arrow_block2),
+            ("$DIMLDRBLK", DxfVersion::AC1012, block_name(&hdr.dim_leader_arrow_block, hdr.dim_leader_arrow_block_handle), &d.dim_leader_arrow_block),
+        ] {
+            if wanted(name, since, value != *default)
+                && (!value.is_empty() || source.is_some() || dwg.is_some_and(|version| version <= DxfVersion::AC1014))
+            {
+                self.write_header_variable(name, |w| w.write_string(1, &value))?;
+            }
+        }
+        text!("$PROJECTNAME", AC1018, project_name);
+        var!("$STYLESHEET", AC1015, hdr.stylesheet != d.stylesheet, |w| w.write_string(1, &hdr.stylesheet));
+        text!("$MENU", AC1012, menu_name);
+        real!("$LENSLENGTH", AC1021, 40, lens_length);
+        real!("$CAMERAHEIGHT", AC1021, 40, camera_height);
+        real!("$LOFTANG1", AC1021, 40, loft_angle1);
+        real!("$LOFTANG2", AC1021, 40, loft_angle2);
+        real!("$LOFTMAG1", AC1021, 40, loft_magnitude1);
+        real!("$LOFTMAG2", AC1021, 40, loft_magnitude2);
+        int!("$LOFTNORMALS", AC1021, 280, loft_normals);
+        int!("$LOFTPARAM", AC1021, 70, loft_param);
+        var!("$TIMEZONE", AC1021, hdr.timezone != d.timezone, |w| w.write_i16(70, hdr.timezone as i16));
+        real!("$LATITUDE", AC1015, 40, latitude);
+        real!("$LONGITUDE", AC1015, 40, longitude);
+        real!("$NORTHDIRECTION", AC1015, 40, north_direction);
+        real!("$CHAMFERC", AC1012, 40, chamfer_length);
+        real!("$CHAMFERD", AC1012, 40, chamfer_angle);
+        real!("$FACETRES", AC1012, 40, facet_resolution);
+        int!("$PROXYGRAPHICS", AC1015, 70, proxy_graphics);
+        real!("$PSVPSCALE", AC1012, 40, viewport_scale_factor);
+        int!("$SHADEDGE", AC1012, 70, shade_edge);
+        int!("$SHADEDIF", AC1012, 70, shade_diffuse);
+        real!("$SHADOWPLANELOCATION", AC1021, 40, shadow_plane_location);
+        real!("$STEPSIZE", AC1021, 40, step_size);
+        real!("$STEPSPERSEC", AC1021, 40, steps_per_second);
+        int!("$TREEDEPTH", AC1012, 70, tree_depth);
+        int!("$USERI1", AC1012, 70, user_int1);
+        int!("$USERI2", AC1012, 70, user_int2);
+        int!("$USERI3", AC1012, 70, user_int3);
+        int!("$USERI4", AC1012, 70, user_int4);
+        int!("$USERI5", AC1012, 70, user_int5);
+        real!("$USERR1", AC1012, 40, user_real1);
+        real!("$USERR2", AC1012, 40, user_real2);
+        real!("$USERR3", AC1012, 40, user_real3);
+        real!("$USERR4", AC1012, 40, user_real4);
+        real!("$USERR5", AC1012, 40, user_real5);
         Ok(())
     }
 
@@ -1086,7 +1386,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     pub fn write_classes(&mut self, document: &CadDocument) -> Result<()> {
         self.writer.write_section_start("CLASSES")?;
 
-        for class in document.classes.iter() {
+        for class in Self::classes_to_write(document) {
             self.writer.write_string(0, "CLASS")?;
             self.writer.write_string(1, &class.dxf_name)?;
             self.writer.write_string(2, &class.cpp_class_name)?;
@@ -1103,6 +1403,55 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         self.writer.write_section_end()?;
         Ok(())
+    }
+
+    /// The CLASS records of the output. A document read from DXF keeps its CLASSES section as read (flags,
+    /// application names and instance counts included); the registry of default classes it also carries is not
+    /// written, only the registry classes that a written entity or object needs and the section lacked. Any
+    /// other document (DWG source, built in memory) writes its class registry.
+    fn classes_to_write(document: &CadDocument) -> Vec<&crate::classes::DxfClass> {
+        let Some(source) = document.classes.source_classes() else {
+            return document.classes.iter().collect();
+        };
+        let mut out: Vec<&crate::classes::DxfClass> = source.iter().collect();
+        let mut present: HashSet<String> = source.iter().map(|class| class.dxf_name.to_ascii_uppercase()).collect();
+        // Only records added after the file was read can need a class the section lacks: everything the file
+        // holds is declared as its own writer declared it (a DXF built-in such as MLINE has no class). Those
+        // records have no handle yet or one at or above the source's handle seed. Every name a record may be
+        // declared under counts: it is covered when the section has any of them.
+        let seed = document.header.source_handle_seed;
+        let added = |handle: Handle| handle.is_null() || seed.is_some_and(|seed| handle.value() >= seed);
+        let entity_names = document
+            .entities()
+            .filter(|entity| added(entity.common().handle))
+            .map(|entity| vec![std::borrow::Cow::Borrowed(crate::io::dwg::dwg_writer::entity_class_name(entity))]);
+        let object_names = document
+            .objects
+            .iter()
+            .filter(|(handle, _)| added(**handle))
+            .map(|(_, object)| crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names(object));
+        let field_names: Vec<Vec<std::borrow::Cow<str>>> = if document.version >= DxfVersion::AC1018
+            && document.fields.keys().any(|handle| added(*handle))
+        {
+            vec![vec!["FIELD".into()], vec!["FIELDLIST".into()]]
+        } else {
+            Vec::new()
+        };
+        for names in entity_names.chain(object_names).chain(field_names) {
+            // DXF declares some data-table classes with the ACDB prefix the DWG class table leaves off.
+            let covered = |name: &str| {
+                let upper = name.to_ascii_uppercase();
+                present.contains(&upper) || present.contains(&format!("ACDB{upper}"))
+            };
+            if names.is_empty() || names.iter().any(|name| covered(name)) {
+                continue;
+            }
+            if let Some(class) = names.iter().find_map(|name| document.classes.get_by_name(name)) {
+                present.insert(class.dxf_name.to_ascii_uppercase());
+                out.push(class);
+            }
+        }
+        out
     }
 
     /// Write the TABLES section
@@ -1539,7 +1888,23 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         // ... and the description as AcAecLayerStandard XDATA, the text being
         // the second of two strings.
-        if !layer.description.is_empty() || document.object_xdata.get(&layer.handle).is_some_and(|data| data.get_record("AcAecLayerStandard").is_some()) {
+        // A source record that still carries the layer's description is written as it was (it may have one
+        // string only).
+        let source_description = document
+            .object_xdata
+            .get(&layer.handle)
+            .and_then(|data| data.get_record("AcAecLayerStandard"))
+            .map(|record| {
+                record
+                    .values
+                    .iter()
+                    .filter_map(|value| if let XDataValue::String(text) = value { Some(text.as_str()) } else { None })
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string()
+            });
+        let description_unchanged = source_description.as_deref() == Some(layer.description.as_str());
+        if !description_unchanged && (!layer.description.is_empty() || source_description.is_some()) {
             let mut record = crate::xdata::ExtendedDataRecord::new("AcAecLayerStandard");
             record.values = vec![XDataValue::String(String::new()), XDataValue::String(layer.description.clone())];
             generated.push(record);
@@ -1821,9 +2186,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Write APPID table
     fn write_appid_table(&mut self, document: &CadDocument) -> Result<()> {
         let table_handle = document.app_ids.handle();
+        let unused = unused_default_app_ids(document);
+        let written = document
+            .app_ids
+            .iter()
+            .filter(|appid| !unused.contains(&appid.name().to_ascii_uppercase()))
+            .count();
         self.write_table_header(
             "APPID",
-            document.app_ids.len() + usize::from(self.loft_reference_appid.is_some()),
+            written + usize::from(self.loft_reference_appid.is_some()),
             table_handle,
             document,
         )?;
@@ -1842,6 +2213,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
         for appid in document.app_ids.iter() {
             if wrote_acad && appid.name().eq_ignore_ascii_case("ACAD") {
+                continue;
+            }
+            if unused.contains(&appid.name().to_ascii_uppercase()) {
                 continue;
             }
             self.write_appid_entry(appid, table_handle, document)?;
@@ -3121,10 +3495,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         code: i32,
         name_code: i32,
     ) -> Result<()> {
+        // Each connection is a code and its name, one after the other (92, 301, 93, 302, ...): the reference
+        // reader takes a name for the connection it has just read, so grouped codes lose all but the first.
         for (index, value) in values.iter().enumerate() {
             self.writer.write_i32(code + index as i32, value.code)?;
-        }
-        for (index, value) in values.iter().enumerate() {
             self.writer
                 .write_string(name_code + index as i32, &value.name)?;
         }
@@ -3474,7 +3848,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             DynamicBlockData::Representation(value) => {
                 self.writer.write_subclass(&object.cpp_class_name)?;
                 self.writer.write_i16(70, value.flags)?;
-                self.writer.write_handle(340, value.block)?;
+                // The purge preventer (AutoCAD's own DXF) has the version only, no block pointer.
+                if !is_unrestorable_assoc_object(&object.dxf_name) {
+                    self.writer.write_handle(340, value.block)?;
+                }
             }
             DynamicBlockData::ProxyNode(value) => {
                 self.write_dynamic_eval_dxf(value)?;
@@ -3993,7 +4370,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_i16(67, 1)?;
         }
 
-        self.writer.write_string(8, &common.layer)?;
+        // The DWG reader names an entity on a viewport-override layer by its base layer and keeps the handle;
+        // the DXF names the override record ("0 @ 1").
+        let override_name = common
+            .layer_handle
+            .and_then(|handle| self.layer_names.get(&handle))
+            .filter(|name| name.starts_with(&format!("{} @ ", common.layer)));
+        self.writer.write_string(8, override_name.unwrap_or(&common.layer))?;
 
         if let Some(graphics) = common.graphic_data.as_deref() {
             if self.dxf_version >= DxfVersion::AC1024 {
@@ -4045,6 +4428,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if self.dxf_version >= DxfVersion::AC1018 && !common.transparency.is_by_layer() {
             self.writer
                 .write_i32(440, common.transparency.to_dxf_value())?;
+        }
+
+        // Material (code 347, R2007+), only when the entity carries its own (the flags say "handle follows").
+        if self.dxf_version >= DxfVersion::AC1021 && common.material_flags == 0b11 {
+            if let Some(handle) = common.material_handle.filter(|handle| {
+                !handle.is_null() && (self.valid_handles.is_empty() || self.valid_handles.contains(handle))
+            }) {
+                self.writer.write_handle(347, handle)?;
+            }
         }
 
         if self.dxf_version >= DxfVersion::AC1024 {
@@ -4259,11 +4651,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if polyline.thickness != 0.0 {
             self.writer.write_double(39, polyline.thickness)?;
         }
-        if polyline.start_width != 0.0 {
-            self.writer.write_double(40, polyline.start_width)?;
+        // The default widths of the record. Once the widths live on the vertices the polyline's own are zero;
+        // the defaults the source stated are still written, so a second write is the first.
+        let (default_start, default_end) = if polyline.start_width != 0.0 || polyline.end_width != 0.0 {
+            (polyline.start_width, polyline.end_width)
+        } else {
+            polyline.source_widths.unwrap_or((0.0, 0.0))
+        };
+        if default_start != 0.0 {
+            self.writer.write_double(40, default_start)?;
         }
-        if polyline.end_width != 0.0 {
-            self.writer.write_double(41, polyline.end_width)?;
+        if default_end != 0.0 {
+            self.writer.write_double(41, default_end)?;
         }
         self.write_normal(polyline.normal)?;
 
@@ -4707,8 +5106,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i16(74, spline.fit_points.len() as i16)?;
 
         // Knot / control-point / fit tolerances (round-trip the stored values).
-        self.writer.write_double(42, spline.knot_tolerance)?;
-        self.writer.write_double(43, spline.control_tolerance)?;
+        // A DWG fit-point record (scenario 2) stores no tolerances; the reference then keeps its initialisers.
+        let record_without_tolerances = spline.dwg_scenario == Some(2) && spline.knot_tolerance == 0.0 && spline.control_tolerance == 0.0;
+        let (knot_tolerance, control_tolerance) = if record_without_tolerances {
+            (1e-7, 1e-7)
+        } else {
+            (spline.knot_tolerance, spline.control_tolerance)
+        };
+        self.writer.write_double(42, knot_tolerance)?;
+        self.writer.write_double(43, control_tolerance)?;
         self.writer.write_double(44, spline.fit_tolerance)?;
 
         // Start / end tangents (only when set).
@@ -4802,9 +5208,16 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         } else {
             type_flags
         };
-        // Bit 0x20 (block shared by several dimensions) has no typed field; it is carried from the source word.
+        // Bit 0x20 (the geometry block is an anonymous dimension block) has no typed field. A DXF source word
+        // carries it; a record without one (read from DWG, built in memory) has it exactly when it has a block,
+        // as every AutoCAD dimension does.
         let source = base.dxf_source.as_ref();
-        let type_flags = type_flags | (source.and_then(|s| s.raw_flags).unwrap_or(0) & 0x20);
+        let block_bit = match source.and_then(|s| s.raw_flags) {
+            Some(raw) => raw & 0x20,
+            None if base.block_name.is_empty() => 0,
+            None => 0x20,
+        };
+        let type_flags = type_flags | block_bit;
         self.writer.write_i16(70, type_flags)?;
         self.writer.write_double(42, base.actual_measurement)?;
         // DXF angles are in degrees; internal representation is radians.
@@ -4835,7 +5248,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_string(1, text)?;
         }
         // A zero factor is the unset value of a record that has no such field (an older DWG), not a spacing.
-        if r2000 && base.line_spacing_factor > 0.0 && (base.line_spacing_factor - 1.0).abs() > 1e-10 {
+        if r2000
+            && base.line_spacing_factor > 0.0
+            && ((base.line_spacing_factor - 1.0).abs() > 1e-10
+                || source.map_or_else(|| self.stated_by_dwg(DxfVersion::AC1015), |s| s.line_spacing_factor.is_some()))
+        {
             self.writer.write_double(41, base.line_spacing_factor)?;
         }
         // Normal vector (extrusion direction) — only write if not default (0,0,1)
@@ -5121,7 +5538,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     }
 
     fn write_hatch_gradient(&mut self, hatch: &Hatch) -> Result<()> {
-        if !hatch.gradient_color.enabled {
+        // A pattern hatch of an R2004+ drawing still carries its (disabled) gradient definition, which AutoCAD
+        // writes with group 450 = 0; it is kept when the model has one.
+        let gradient = &hatch.gradient_color;
+        let stored_definition =
+            self.dxf_version >= DxfVersion::AC1018 && (!gradient.colors.is_empty() || !gradient.name.is_empty());
+        if !gradient.enabled && !stored_definition {
             return Ok(());
         }
         // A gradient the reader restored from the round-trip data of a pre-R2004 save is carried by that data
@@ -5129,8 +5551,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if self.dxf_version < DxfVersion::AC1018 && hatch.gradient_recovery_source.is_some() {
             return Ok(());
         }
-        let gradient = &hatch.gradient_color;
-        self.writer.write_i32(450, 1)?;
+        self.writer.write_i32(450, i32::from(gradient.enabled))?;
         self.writer.write_i32(451, gradient.reserved)?;
         self.writer.write_double(460, gradient.angle)?;
         self.writer.write_double(461, gradient.shift)?;
@@ -5641,11 +6062,70 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_i16(61, viewport.grid_major)?;
         }
 
+        self.write_viewport_extra_groups(viewport)?;
+
         // R2004+: per-viewport ShadePlot mode, independent of render mode.
         if self.dxf_version >= DxfVersion::AC1018 {
             self.writer.write_i16(170, viewport.shade_plot_mode)?;
         }
 
+        Ok(())
+    }
+
+    /// The VIEWPORT groups beyond the geometry: sheet style, UCS references, plot/background/visual style and
+    /// sun objects, lighting and the ambient colour. Each is written when the DXF source had it or the value
+    /// differs from a new viewport's, so a source without the group never gains one.
+    fn write_viewport_extra_groups(&mut self, viewport: &Viewport) -> Result<()> {
+        let source = viewport.source.as_deref();
+        let has = |code: usize| source.is_some_and(|source| source.contains(code));
+        let defaults = Viewport::new();
+        let valid = |this: &Self, handle: Handle| {
+            !handle.is_null() && (this.valid_handles.is_empty() || this.valid_handles.contains(&handle))
+        };
+        let dwg_record = self.stated_by_dwg(DxfVersion::AC1015)
+            && viewport.source.as_deref().map_or(true, |source| source.dxf_codes.is_none());
+        let dwg_lighting = dwg_record && self.stated_by_dwg(DxfVersion::AC1021);
+        if self.dxf_version >= DxfVersion::AC1015 && (!viewport.style_sheet.is_empty() || has(1) || dwg_record) {
+            self.writer.write_string(1, &viewport.style_sheet)?;
+        }
+        if self.dxf_version >= DxfVersion::AC1015 && (viewport.ucs_at_origin || has(74)) {
+            self.writer.write_i16(74, i16::from(viewport.ucs_at_origin))?;
+        }
+        if self.dxf_version >= DxfVersion::AC1015 && (viewport.ucs_ortho_type != 0 || has(79)) {
+            self.writer.write_i16(79, viewport.ucs_ortho_type)?;
+        }
+        for (code, handle) in [
+            (345, viewport.ucs_handle),
+            (346, viewport.base_ucs_handle),
+            (332, viewport.background_handle),
+            (333, viewport.shade_plot_handle),
+            (348, viewport.visual_style_handle),
+            (361, viewport.sun_handle),
+        ] {
+            if self.dxf_version >= DxfVersion::AC1015 && valid(self, handle) {
+                self.writer.write_handle(code, handle)?;
+            }
+        }
+        if self.dxf_version >= DxfVersion::AC1021 {
+            if viewport.brightness != defaults.brightness || has(141) {
+                self.writer.write_double(141, viewport.brightness)?;
+            }
+            if viewport.contrast != defaults.contrast || has(142) {
+                self.writer.write_double(142, viewport.contrast)?;
+            }
+            if viewport.ambient_color != defaults.ambient_color || has(63) || has(421) {
+                self.writer.write_color(63, viewport.ambient_color)?;
+                if let Some(true_color) = viewport.ambient_color.to_true_color_value() {
+                    self.writer.write_i32(421, true_color)?;
+                }
+            }
+            if viewport.default_lighting != defaults.default_lighting || has(292) || dwg_lighting {
+                self.writer.write_bool(292, viewport.default_lighting)?;
+            }
+            if viewport.default_lighting_type != defaults.default_lighting_type || has(282) || dwg_lighting {
+                self.writer.write_i16(282, viewport.default_lighting_type)?;
+            }
+        }
         Ok(())
     }
 
@@ -5976,12 +6456,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             .write_i16(75, if leader.hookline_enabled { 1 } else { 0 })?;
 
         // Text height
-        if keep(40, leader.text_height == defaults.text_height) {
+        // An R2010+ DWG leader stores no box size; the native 2.5 is not a stated value.
+        let no_box = !source.is_dxf() && self.dwg_source.is_some_and(|version| version >= DxfVersion::AC1024);
+        if !no_box && keep(40, leader.text_height == defaults.text_height) {
             self.writer.write_double(40, leader.text_height)?;
         }
 
         // Text width
-        if keep(41, leader.text_width == defaults.text_width) {
+        if !no_box && keep(41, leader.text_width == defaults.text_width) {
             self.writer.write_double(41, leader.text_width)?;
         }
 
@@ -6240,7 +6722,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 ObjectType::Group(group) => self.write_group(group)?,
                 ObjectType::MLineStyle(mlinestyle) => self.write_mlinestyle(mlinestyle)?,
                 ObjectType::ImageDefinition(imagedef) => self.write_image_definition(imagedef)?,
-                ObjectType::UnderlayDefinition(def) => self.write_underlay_definition(def)?,
+                ObjectType::UnderlayDefinition(def) => self.write_underlay_definition(def, document)?,
                 ObjectType::PlotSettings(plotsettings) => self.write_plot_settings(plotsettings)?,
                 ObjectType::MultiLeaderStyle(style) => self.write_multileader_style(style)?,
                 ObjectType::TableStyle(style) => self.write_table_style(style)?,
@@ -6266,14 +6748,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 ObjectType::BlockVisibilityParameter(obj) => {
                     self.write_block_visibility_parameter(obj)?
                 }
-                ObjectType::DynamicBlock(obj) => {
-                    // The purge preventer is unrestorable (see
-                    // is_unrestorable_assoc_object) and gets audit-skipped.
-                    if is_unrestorable_assoc_object(&obj.dxf_name) {
-                        continue;
-                    }
-                    self.write_dynamic_block_object_dxf(obj)?
-                }
+                ObjectType::DynamicBlock(obj) => self.write_dynamic_block_object_dxf(obj)?,
                 ObjectType::Associative(obj) => {
                     // Unrestorable associative-framework objects are not
                     // written (see is_unrestorable_assoc_object); they were
@@ -7800,7 +8275,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_string(1, &layout.plot_page_name)?;
             self.writer.write_string(2, &layout.plot_printer_name)?;
             self.writer.write_string(4, &layout.paper_size)?;
-            if !layout.plot_view_name.is_empty() {
+            // The DWG of R13..R2000 stores the plot view name (empty or not); later ones do not.
+            if !layout.plot_view_name.is_empty() || self.dwg_source.is_some_and(|v| v <= DxfVersion::AC1015) {
                 self.writer.write_string(6, &layout.plot_view_name)?;
             }
             self.writer.write_string(7, &layout.plot_style_sheet)?;
@@ -8126,12 +8602,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_underlay_definition(
         &mut self,
         def: &crate::objects::UnderlayDefinition,
+        document: &CadDocument,
     ) -> Result<()> {
         self.writer.write_string(0, def.entity_name())?;
         self.writer.write_handle(5, def.handle)?;
-        if !def.reactors.is_empty() {
+        // A document read from DWG keeps the reactor list on the side map (the owning dictionary is one).
+        let reactors = document
+            .reactors_by_handle
+            .get(&def.handle)
+            .filter(|handles| !handles.is_empty())
+            .unwrap_or(&def.reactors);
+        if !reactors.is_empty() {
             self.writer.write_string(102, "{ACAD_REACTORS")?;
-            for reactor in &def.reactors {
+            for reactor in reactors {
+                if !self.valid_handles.is_empty() && !self.valid_handles.contains(reactor) {
+                    continue;
+                }
                 self.writer.write_handle(330, *reactor)?;
             }
             self.writer.write_string(102, "}")?;
@@ -8860,16 +9346,22 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Block owner handle
         self.writer.write_handle(330, table.block_owner_handle)?;
 
-        // Allocate new unique sort handles to avoid conflicts with entity handles.
-        // Sort entries by original sort_handle to preserve relative draw order,
-        // then assign sequential new handles so ascending order is maintained.
+        // A sort handle is a sort key (AutoCAD itself often uses the entity's own handle), so an entry keeps the
+        // one it has. Only a missing or repeated key gets a new handle, allocated in key order so the relative
+        // draw order is kept.
         let entries: Vec<_> = table.entries().collect();
         let mut sorted_indices: Vec<usize> = (0..entries.len()).collect();
         sorted_indices.sort_by_key(|&i| entries[i].sort_handle.value());
 
         let mut new_handles = vec![Handle::NULL; entries.len()];
+        let mut used = HashSet::new();
         for &idx in &sorted_indices {
-            new_handles[idx] = self.allocate_handle();
+            let key = entries[idx].sort_handle;
+            new_handles[idx] = if !key.is_null() && used.insert(key) {
+                key
+            } else {
+                self.allocate_handle()
+            };
         }
 
         // Write entries in original order with new unique handles
@@ -9048,40 +9540,65 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_handle(330, obj.owner)?;
         self.writer.write_subclass("AcDbMaterial")?;
         self.writer.write_string(1, &obj.name)?;
-        // Built-in materials (ByLayer / ByBlock / Global) are written in the
-        // minimal form BricsCAD itself exports; their full default field set
-        // is rejected by BricsCAD's audit (issue #51).
-        if matches!(
+        // Built-in materials (ByLayer / ByBlock / Global) of a document that did not come from DXF are written
+        // in the minimal form BricsCAD itself exports (their full default field set is rejected by BricsCAD's
+        // audit, issue #51); a value that differs from the default is still written. A material read from DXF
+        // writes the groups its source record had, plus those whose value differs from the native default.
+        let builtin = matches!(
             obj.name.to_ascii_uppercase().as_str(),
             "BYLAYER" | "BYBLOCK" | "GLOBAL"
-        ) {
-            self.writer.write_i16(72, obj.diffuse_map.source as i16)?;
-            self.writer.write_i32(94, obj.channel_flags)?;
-            return Ok(());
-        }
+        );
+        let gate = MaterialGate { source: obj.dxf_source.as_deref(), minimal: builtin };
+        let defaults = Material::new();
         if !obj.description.is_empty() {
             self.writer.write_string(2, &obj.description)?;
         }
-        self.write_material_dxf_color(&obj.ambient_color, 70, 40, 90)?;
-        self.write_material_dxf_color(&obj.diffuse_color, 71, 41, 91)?;
-        self.write_material_dxf_map(&obj.diffuse_map, 42, 72, 3, 73, 74, 75, 43)?;
-        self.write_material_dxf_color(&obj.specular_color, 76, 45, 92)?;
-        self.writer.write_double(44, obj.specular_gloss_factor)?;
-        self.write_material_dxf_map(&obj.specular_map, 46, 77, 4, 78, 79, 170, 47)?;
-        self.write_material_dxf_map(&obj.reflection_map, 48, 171, 6, 172, 173, 174, 49)?;
-        self.writer.write_double(140, obj.opacity_percent)?;
-        self.write_material_dxf_map(&obj.opacity_map, 141, 175, 7, 176, 177, 178, 142)?;
-        self.write_material_dxf_map(&obj.bump_map, 143, 179, 8, 270, 271, 272, 144)?;
-        self.writer.write_double(145, obj.refraction_index)?;
-        self.write_material_dxf_map(&obj.refraction_map, 146, 273, 9, 274, 275, 276, 147)?;
-        self.writer.write_double(148, obj.translucence)?;
-        self.writer
-            .write_i32(90, obj.self_illumination.round() as i32)?;
-        self.writer.write_double(149, obj.self_illumination)?;
-        self.writer.write_double(468, obj.reflectivity)?;
-        self.writer.write_i32(93, obj.illumination_model)?;
-        self.writer.write_i32(94, obj.channel_flags)?;
-        self.writer.write_i16(282, obj.mode as i16)?;
+        self.write_material_dxf_color(&obj.ambient_color, &defaults.ambient_color, 70, 40, 90, Some(&gate))?;
+        self.write_material_dxf_color(&obj.diffuse_color, &defaults.diffuse_color, 71, 41, 91, Some(&gate))?;
+        self.write_material_dxf_map(&obj.diffuse_map, &gate, 42, 72, 3, 73, 74, 75, 43)?;
+        self.write_material_dxf_color(&obj.specular_color, &defaults.specular_color, 76, 45, 92, Some(&gate))?;
+        if gate.writes(44, obj.specular_gloss_factor != defaults.specular_gloss_factor) {
+            self.writer.write_double(44, obj.specular_gloss_factor)?;
+        }
+        self.write_material_dxf_map(&obj.specular_map, &gate, 46, 77, 4, 78, 79, 170, 47)?;
+        self.write_material_dxf_map(&obj.reflection_map, &gate, 48, 171, 6, 172, 173, 174, 49)?;
+        if gate.writes(140, obj.opacity_percent != defaults.opacity_percent) {
+            self.writer.write_double(140, obj.opacity_percent)?;
+        }
+        self.write_material_dxf_map(&obj.opacity_map, &gate, 141, 175, 7, 176, 177, 178, 142)?;
+        self.write_material_dxf_map(&obj.bump_map, &gate, 143, 179, 8, 270, 271, 272, 144)?;
+        if gate.writes(145, obj.refraction_index != defaults.refraction_index) {
+            self.writer.write_double(145, obj.refraction_index)?;
+        }
+        self.write_material_dxf_map(&obj.refraction_map, &gate, 146, 273, 9, 274, 275, 276, 147)?;
+        if gate.writes(148, obj.translucence != defaults.translucence) {
+            self.writer.write_double(148, obj.translucence)?;
+        }
+        // Group 90 is the self-illumination integer unless it is the first one of an RGB ambient colour. It is not
+        // written at the default: ACadSharp maps every group 90 to the ambient colour, the last one winning.
+        let source_has_illumination = obj.dxf_source.as_deref().is_some_and(|source| {
+            source.contains(90) && obj.ambient_color.flag != 1
+        });
+        if source_has_illumination || obj.self_illumination != defaults.self_illumination {
+            self.writer
+                .write_i32(90, obj.self_illumination.round() as i32)?;
+        }
+        if gate.writes(149, obj.self_illumination != defaults.self_illumination) {
+            self.writer.write_double(149, obj.self_illumination)?;
+        }
+        if gate.writes(468, obj.reflectivity != defaults.reflectivity) {
+            self.writer.write_double(468, obj.reflectivity)?;
+        }
+        if gate.writes(93, obj.illumination_model != defaults.illumination_model) {
+            self.writer.write_i32(93, obj.illumination_model)?;
+        }
+        // Built-in materials always carry the channel flags; the others when the source or an edit has them.
+        if builtin && obj.dxf_source.is_none() || gate.writes(94, obj.channel_flags != defaults.channel_flags) {
+            self.writer.write_i32(94, obj.channel_flags)?;
+        }
+        if gate.writes(282, obj.mode != defaults.mode) {
+            self.writer.write_i16(282, obj.mode as i16)?;
+        }
         // Advanced properties (460-465, 290, 293, 270-273 and the normal map)
         // are not part of the MATERIAL body: the reference application rejects
         // them here ("Unexpected DXF group code: 460") and stores them in the
@@ -9093,13 +9610,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_material_dxf_color(
         &mut self,
         value: &MaterialColor,
+        default: &MaterialColor,
         flag_code: i32,
         factor_code: i32,
         rgb_code: i32,
+        gate: Option<&MaterialGate>,
     ) -> Result<()> {
-        self.writer.write_i16(flag_code, value.flag as i16)?;
-        self.writer.write_double(factor_code, value.factor)?;
-        if value.flag == 1 {
+        let writes = |code: i32, differs: bool| gate.is_none_or(|gate| gate.writes(code as usize, differs));
+        if writes(flag_code, value.flag != default.flag) {
+            self.writer.write_i16(flag_code, value.flag as i16)?;
+        }
+        if writes(factor_code, value.factor != default.factor) {
+            self.writer.write_double(factor_code, value.factor)?;
+        }
+        if value.flag == 1 && (value.rgb.is_some() || gate.is_none_or(|gate| gate.source.is_none())) {
             self.writer
                 .write_i32(rgb_code, value.rgb.unwrap_or_default())?;
         }
@@ -9110,12 +9634,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_i16(277, value.mode)?;
         match value.mode {
             0 => {
-                self.write_material_dxf_color(&value.color1, 278, 460, 95)?;
-                self.write_material_dxf_color(&value.color2, 279, 461, 96)?;
+                self.write_material_dxf_color(&value.color1, &MaterialColor::default(), 278, 460, 95, None)?;
+                self.write_material_dxf_color(&value.color2, &MaterialColor::default(), 279, 461, 96, None)?;
             }
             1 => {
-                self.write_material_dxf_color(&value.color1, 280, 465, 97)?;
-                self.write_material_dxf_color(&value.color2, 281, 466, 98)?;
+                self.write_material_dxf_color(&value.color1, &MaterialColor::default(), 280, 465, 97, None)?;
+                self.write_material_dxf_color(&value.color2, &MaterialColor::default(), 281, 466, 98, None)?;
             }
             2 => match &value.procedural {
                 Some(MaterialProceduralValue::Bool(item)) => {
@@ -9153,6 +9677,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     fn write_material_dxf_map(
         &mut self,
         value: &MaterialMap,
+        gate: &MaterialGate,
         blend_code: i32,
         source_code: i32,
         file_code: i32,
@@ -9161,22 +9686,35 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         auto_transform_code: i32,
         matrix_code: i32,
     ) -> Result<()> {
+        let default = MaterialMap::default();
         // Field order follows the DXF specification: blend factor, file
         // name, source, projection, tiling, auto-transform, matrix. The
         // file name is only written when set - BricsCAD's audit rejects
         // materials with an empty map file name (issue #51).
-        self.writer.write_double(blend_code, value.blend_factor)?;
+        if gate.writes(blend_code as usize, value.blend_factor != default.blend_factor) {
+            self.writer.write_double(blend_code, value.blend_factor)?;
+        }
         if !value.file_name.is_empty() {
             self.writer.write_string(file_code, &value.file_name)?;
         }
-        self.writer.write_i16(source_code, value.source as i16)?;
-        self.writer
-            .write_i16(projection_code, value.projection as i16)?;
-        self.writer.write_i16(tiling_code, value.tiling as i16)?;
-        self.writer
-            .write_i16(auto_transform_code, value.auto_transform as i16)?;
-        for item in value.transform {
-            self.writer.write_double(matrix_code, item)?;
+        if gate.writes(source_code as usize, value.source != default.source) {
+            self.writer.write_i16(source_code, value.source as i16)?;
+        }
+        if gate.writes(projection_code as usize, value.projection != default.projection) {
+            self.writer
+                .write_i16(projection_code, value.projection as i16)?;
+        }
+        if gate.writes(tiling_code as usize, value.tiling != default.tiling) {
+            self.writer.write_i16(tiling_code, value.tiling as i16)?;
+        }
+        if gate.writes(auto_transform_code as usize, value.auto_transform != default.auto_transform) {
+            self.writer
+                .write_i16(auto_transform_code, value.auto_transform as i16)?;
+        }
+        if gate.writes(matrix_code as usize, value.transform != default.transform) {
+            for item in value.transform {
+                self.writer.write_double(matrix_code, item)?;
+            }
         }
         if value.source == 2 {
             if let Some(texture) = &value.texture {
@@ -9820,14 +10358,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
             for value in &record.values {
                 match value {
+                    // A DWG string keeps its UTF-16 terminator; a NUL is not part of a DXF string.
                     XDataValue::String(s) => {
-                        self.writer.write_string(1000, s)?;
+                        self.writer.write_string(1000, s.trim_end_matches('\0'))?;
                     }
                     XDataValue::ControlString(s) => {
-                        self.writer.write_string(1002, s)?;
+                        self.writer.write_string(1002, s.trim_end_matches('\0'))?;
                     }
                     XDataValue::LayerName(s) => {
-                        self.writer.write_string(1003, s)?;
+                        self.writer.write_string(1003, s.trim_end_matches('\0'))?;
                     }
                     XDataValue::BinaryData(data) => {
                         self.writer.write_binary(1004, data)?;
@@ -10197,11 +10736,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Leader line color
         self.write_color_i32(91, mleader.line_color)?;
 
-        // Leader line type handle (code 341; use ByLayer if null or ByBlock)
+        // Leader line type handle (code 341; ByLayer if null, ByBlock is kept as the source states it)
         {
             let h = mleader
                 .line_type_handle
-                .filter(|h| *h != Handle::NULL && *h != self.byblock_linetype_handle)
+                .filter(|h| *h != Handle::NULL)
                 .unwrap_or(self.bylayer_linetype_handle);
             if h != Handle::NULL {
                 self.writer.write_handle(341, h)?;
@@ -11722,8 +12261,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
         }
 
+        // A style read from a binary R2010+ file states what it overrides in the property-flag layout, not in the
+        // legacy bits below, and a cell that overrides nothing has no style groups.
+        let modern_style = cell
+            .source_style_type
+            .is_some()
+            .then_some(cell.style.as_ref())
+            .flatten()
+            .filter(|s| !s.legacy_override_bits);
         // Cell style: only the overridden properties when the cell says which.
-        if let Some(style) = cell.style.as_ref().filter(|s| s.override_flags != 0) {
+        if let Some(style) = modern_style {
+            self.write_modern_cell_style_overrides(style)?;
+        } else if let Some(style) = cell.style.as_ref().filter(|s| s.override_flags != 0) {
             let f = style.override_flags;
             if f & 0x01 != 0 {
                 self.writer.write_i16(170, style.alignment as i16)?;
@@ -11780,6 +12329,54 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
         }
 
+        Ok(())
+    }
+
+    /// The legacy cell-style groups for a style read from a binary R2010+ file: only the properties it overrides.
+    fn write_modern_cell_style_overrides(&mut self, style: &crate::entities::CellStyle) -> Result<()> {
+        use crate::entities::table::{BorderPropertyFlags as B, CellEdgeFlags, CellStylePropertyFlags as P};
+        let p = style.overridden();
+        if p.contains(P::ALIGNMENT) {
+            self.writer.write_i16(170, style.alignment as i16)?;
+        }
+        if p.contains(P::BACKGROUND_COLOR) {
+            self.writer.write_bool(283, !style.fill_enabled)?;
+            if style.fill_enabled {
+                self.writer.write_color(63, style.background_color)?;
+            }
+        }
+        if p.contains(P::CONTENT_COLOR) {
+            self.writer.write_color(64, style.content_color)?;
+        }
+        if p.contains(P::TEXT_STYLE) {
+            let name = style
+                .text_style_handle
+                .and_then(|handle| self.text_style_names.get(&handle).cloned())
+                .unwrap_or_else(|| style.text_style_name.clone());
+            if !name.is_empty() {
+                self.writer.write_string(7, &name)?;
+            }
+        }
+        if p.contains(P::TEXT_HEIGHT) {
+            self.writer.write_double(140, style.text_height)?;
+        }
+        for (edge, (color_code, weight_code, visibility_code), border) in [
+            (CellEdgeFlags::TOP, (69, 279, 289), &style.top_border),
+            (CellEdgeFlags::RIGHT, (65, 275, 285), &style.right_border),
+            (CellEdgeFlags::BOTTOM, (66, 276, 286), &style.bottom_border),
+            (CellEdgeFlags::LEFT, (68, 278, 288), &style.left_border),
+        ] {
+            if !style.applied_border_edges.contains(edge) {
+                continue;
+            }
+            if border.override_flags.contains(B::COLOR) {
+                self.writer.write_color(color_code, border.color)?;
+            }
+            if border.override_flags.intersects(B::LINE_WEIGHT | B::INVISIBILITY) {
+                self.writer.write_i16(weight_code, border.line_weight.value())?;
+                self.writer.write_bool(visibility_code, !border.invisible)?;
+            }
+        }
         Ok(())
     }
 

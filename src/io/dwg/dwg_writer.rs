@@ -737,7 +737,7 @@ fn prepare_roundtrip_records(document: &mut std::borrow::Cow<'_, CadDocument>) {
 }
 
 /// The DXF class name an entity is declared under in the CLASSES section.
-fn entity_class_name(entity: &crate::entities::EntityType) -> &str {
+pub(crate) fn entity_class_name(entity: &crate::entities::EntityType) -> &str {
     match entity {
         crate::entities::EntityType::Surface(surface) => surface.kind.dxf_name(),
         crate::entities::EntityType::Extended(entity) => entity.class_name(),
