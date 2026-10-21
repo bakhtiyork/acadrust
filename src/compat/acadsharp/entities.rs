@@ -1563,7 +1563,10 @@ fn collect_entity_part(
             vec![
                 ("ConstantWidth", number(value.constant_width)),
                 ("Elevation", number(value.elevation)),
-                ("Flags", enum_value(if value.is_closed { 1 } else { 0 })),
+                (
+                    "Flags",
+                    enum_value(i64::from(value.is_closed) | (i64::from(value.plinegen) << 7)),
+                ),
                 ("IsClosed", bool_value(value.is_closed)),
                 ("Normal", vec3(value.normal)),
                 ("Thickness", number(value.thickness)),
@@ -1601,7 +1604,10 @@ fn collect_entity_part(
                 ("Style", text_style(doc, &value.style)),
                 (
                     "Value",
-                    text_source_value(&value.value, value.source.as_deref()),
+                    dwg_legacy_replacement(
+                        doc,
+                        text_source_value(&value.value, value.source.as_deref()),
+                    ),
                 ),
                 (
                     "VerticalAlignment",
@@ -2292,6 +2298,35 @@ fn text_source_tag<'a>(
         .unwrap_or(tag)
 }
 
+/// Pre-R2007 DWG strings are decoded through the drawing's code page. A byte sequence the code page cannot
+/// decode becomes U+FFFD natively (the WHATWG decoders restore an ASCII byte that follows an invalid lead
+/// byte), but .NET's DBCS decoders, which ACadSharp uses, substitute one '?' for the lead byte and that
+/// following ASCII byte together.
+fn dwg_legacy_replacement(doc: &CadDocument, value: Value) -> Value {
+    match value {
+        Value::String(text)
+            if doc.dwg_source_version.is_some()
+                && doc.version < crate::types::DxfVersion::AC1021
+                && text.contains('\u{FFFD}') =>
+        {
+            let mut replaced = String::with_capacity(text.len());
+            let mut chars = text.chars().peekable();
+            while let Some(c) = chars.next() {
+                if c == '\u{FFFD}' {
+                    replaced.push('?');
+                    if chars.peek().is_some_and(char::is_ascii) {
+                        chars.next();
+                    }
+                } else {
+                    replaced.push(c);
+                }
+            }
+            Value::String(replaced)
+        }
+        other => other,
+    }
+}
+
 fn text_source_value(value: &str, source: Option<&crate::entities::text::TextSource>) -> Value {
     if let Some(source) = source.filter(|s| s.decoded_value.as_deref() == Some(value)) {
         // .NET's default encoding is UTF-8; preserve native legacy fallback and
@@ -2591,7 +2626,10 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
                 ("SecondPoint", vec3(value.second_point)),
                 ("AngleVertex", vec3(value.angle_vertex)),
                 ("DefinitionPoint", vec3(value.definition_point)),
-                ("Measurement", number(value.measurement_radians())),
+                (
+                    "Measurement",
+                    super::dimension_geometry::angular2_measurement(value),
+                ),
                 (
                     "Offset",
                     number(value.second_point.distance(&value.definition_point)),
@@ -2648,6 +2686,7 @@ fn collect_dimension(doc: &CadDocument, value: &Dimension, out: &mut Vec<Value>)
                 -999,
                 "AcDbArcDimension",
                 vec![
+                    ("ObjectName", Value::String("ARC_DIMENSION".into())),
                     (
                         "Flags",
                         enum_value(dimension_flags(
@@ -2940,7 +2979,7 @@ fn collect_viewport(doc: &CadDocument, value: &crate::entities::Viewport, out: &
         .find(|b| b.handle == value.common.owner_handle);
     let id = block
         .and_then(|b| {
-            b.entity_handles
+            super::tables::view_entity_handles(doc, b)
                 .iter()
                 .filter(|h| matches!(doc.get_entity(**h), Some(EntityType::Viewport(_))))
                 .position(|h| *h == value.common.handle)

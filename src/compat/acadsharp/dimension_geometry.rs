@@ -26,12 +26,14 @@ use serde_json::{json, Value};
 
 /// CSMath uses exact coordinate equality, even for numerically computed
 /// intersection points. Keep that quirk out of native geometric predicates.
-pub(super) fn angular2_center(value: &DimensionAngular2Ln) -> Value {
+/// `Err` is the exception the reference's `Center` getter throws; a NaN
+/// vector is its "no exact intersection" result.
+fn angular2_center_point(value: &DimensionAngular2Ln) -> Result<Vector3, &'static str> {
     let first = value.angle_vertex - value.definition_point;
     let second = value.second_point - value.first_point;
     if first == Vector3::ZERO || second == Vector3::ZERO {
         // Activator.CreateInstance wraps the Line3D constructor's exception.
-        return json!("!throws:TargetInvocationException");
+        return Err("!throws:TargetInvocationException");
     }
     let u = first / first.length();
     let v = second / second.length();
@@ -46,11 +48,49 @@ pub(super) fn angular2_center(value: &DimensionAngular2Ln) -> Value {
     let denominator = a * c - b * b;
     let p = value.definition_point + u * ((b * e - c * d) / denominator);
     let q = value.first_point + v * ((a * e - b * d) / denominator);
-    if p == q {
-        vec3(p)
+    Ok(if p == q {
+        p
     } else {
-        json!(["NaN", "NaN", "NaN"])
+        Vector3::new(f64::NAN, f64::NAN, f64::NAN)
+    })
+}
+
+pub(super) fn angular2_center(value: &DimensionAngular2Ln) -> Value {
+    match angular2_center_point(value) {
+        Ok(center) if center.x.is_nan() => json!(["NaN", "NaN", "NaN"]),
+        Ok(center) => vec3(center),
+        Err(thrown) => json!(thrown),
     }
+}
+
+/// `DimensionAngular2Line.Measurement`: the angle between the two direction
+/// vectors, replaced by its supplement when the dimension arc point is not in
+/// the sector between them (judged with one-sided cross-product signs, not an
+/// intersection of the actual lines).
+pub(super) fn angular2_measurement(value: &DimensionAngular2Ln) -> Value {
+    const EPSILON: f64 = 1e-12;
+    let v1 = value.second_point - value.first_point;
+    let v2 = value.definition_point - value.angle_vertex;
+    let (l1, l2) = (v1.length(), v2.length());
+    if l1 <= EPSILON || l2 <= EPSILON {
+        return json!("!throws:InvalidOperationException");
+    }
+    let mut angle = (v1.dot(&v2) / (l1 * l2)).acos();
+    let center = match angular2_center_point(value) {
+        Ok(center) => center,
+        Err(thrown) => return json!(thrown),
+    };
+    let arc = value.dimension_arc - center;
+    // NaN lengths are not "zero", so a NaN center falls through to NaN signs.
+    if arc.length() <= EPSILON {
+        return number(angle);
+    }
+    let dot1 = v1.cross(&arc).dot(&value.base.normal);
+    let dot2 = arc.cross(&v2).dot(&value.base.normal);
+    if (dot1 < 0.0 && dot2 > 0.0) || (dot1 > 0.0 && dot2 < 0.0) {
+        angle = std::f64::consts::PI - angle;
+    }
+    number(angle)
 }
 
 /// Arc measurement is endpoint-based, with the reference's ratio-based

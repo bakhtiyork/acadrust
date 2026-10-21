@@ -181,6 +181,16 @@ impl PendingVertex {
     }
 }
 
+/// Put `items` in the order of the owner's owned-object list. An item that names
+/// the owner but is absent from a non-empty list is stale data, not part of it.
+fn order_listed<T>(items: &mut Vec<T>, order: &[u64], handle: impl Fn(&T) -> u64) {
+    let rank: HashMap<u64, usize> = order.iter().enumerate().map(|(i, h)| (*h, i)).collect();
+    if !rank.is_empty() {
+        items.retain(|item| rank.contains_key(&handle(item)));
+    }
+    items.sort_by_key(|item| rank.get(&handle(item)).copied().unwrap_or(usize::MAX));
+}
+
 /// The child handles an R2004+ polyline lists, in drawing order. Records
 /// arrive in handle order, so a vertex inserted later would otherwise land
 /// at the end of the outline.
@@ -2186,11 +2196,7 @@ impl DwgDocumentBuilder {
         for (poly_handle, mut entity) in pending.polylines {
             if let Some(mut verts) = pending.vertices.remove(&poly_handle) {
                 if let Some(order) = pending.vertex_order.get(&poly_handle) {
-                    let rank: HashMap<u64, usize> =
-                        order.iter().enumerate().map(|(i, h)| (*h, i)).collect();
-                    verts.sort_by_key(|v| {
-                        rank.get(&v.handle().value()).copied().unwrap_or(usize::MAX)
-                    });
+                    order_listed(&mut verts, order, |v| v.handle().value());
                 }
                 match &mut entity {
                     EntityType::Polyline2D(ref mut e) => {
@@ -7724,6 +7730,19 @@ mod tests {
     use crate::classes::DxfClass;
 
     #[test]
+    fn owned_list_orders_and_limits_polyline_vertices() {
+        let handle = |v: &u64| *v;
+        // Listed items follow the list; a stale owner-only item is dropped.
+        let mut items = vec![30, 10, 99, 20];
+        order_listed(&mut items, &[10, 20, 30], handle);
+        assert_eq!(items, vec![10, 20, 30]);
+        // Without a list the owner-derived members stay as found.
+        let mut items = vec![30, 10, 99, 20];
+        order_listed(&mut items, &[], handle);
+        assert_eq!(items, vec![30, 10, 99, 20]);
+    }
+
+    #[test]
     fn unknown_object_type_name_uses_class_dxf_name() {
         let mut document = CadDocument::new();
         document.classes.clear();
@@ -8356,8 +8375,12 @@ fn map_dimension_common(
     base.flip_arrow1 = common.flip_arrow1;
     base.flip_arrow2 = common.flip_arrow2;
     base.actual_measurement = common.actual_measurement;
-    base.insertion_point =
-        crate::types::Vector3::new(common.insertion_point.x, common.insertion_point.y, 0.0);
+    // The elevation stored once in the record is the Z of points 11, 12 and 16.
+    base.insertion_point = crate::types::Vector3::new(
+        common.insertion_point.x,
+        common.insertion_point.y,
+        common.text_middle_point.z,
+    );
     base.style_name = maps.dimstyle_name(common.dimstyle_handle);
     base.block_name = maps.block_name(common.block_handle);
 }

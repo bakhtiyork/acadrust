@@ -857,8 +857,8 @@ fn class_dxf_hatch_context_boundary(
                 center: fields.point2(section, 10),
                 major_axis_endpoint: fields.point2(section, 11),
                 minor_axis_ratio: fields.f64(section, 40),
-                start_angle: fields.f64(section, 50),
-                end_angle: fields.f64(section, 51),
+                start_angle: fields.f64(section, 50).to_radians(),
+                end_angle: fields.f64(section, 51).to_radians(),
                 counter_clockwise: fields.bool(section, 73),
             })),
             4 => {
@@ -16615,8 +16615,12 @@ impl<'a> SectionReader<'a> {
                     11 => edge.major_axis_endpoint.x = p.as_double().unwrap_or(0.0),
                     21 => edge.major_axis_endpoint.y = p.as_double().unwrap_or(0.0),
                     40 => edge.minor_axis_ratio = p.as_double().unwrap_or(1.0),
-                    50 => edge.start_angle = p.as_double().unwrap_or(0.0),
-                    51 => edge.end_angle = p.as_double().unwrap_or(std::f64::consts::TAU),
+                    50 => edge.start_angle = p.as_double().unwrap_or(0.0).to_radians(),
+                    51 => {
+                        edge.end_angle = p
+                            .as_double()
+                            .map_or(std::f64::consts::TAU, f64::to_radians)
+                    }
                     73 => edge.counter_clockwise = p.as_i16().unwrap_or(1) != 0,
                     _ => {
                         self.reader.push_back(p);
@@ -21113,6 +21117,7 @@ impl<'a> SectionReader<'a> {
                     if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i32()) {
                         ensure_content(c);
                         let value = &mut c.contents.last_mut().unwrap().value;
+                        value.dxf_long = Some(v);
                         if (value.flags & 1) == 0 {
                             value.numeric_value = v as f64;
                         }

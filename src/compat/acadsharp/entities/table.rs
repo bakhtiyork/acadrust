@@ -441,7 +441,10 @@ fn content(c: &CellContent, source: Source) -> Value {
 }
 
 fn cad_value(v: &CellValue, metadata: bool, dxf: bool) -> Value {
-    let value = if v.flags & 1 != 0 {
+    let value = if let Some(long) = v.dxf_long.filter(|_| dxf && v.value_type == CellValueType::Unknown) {
+        // readCadValue stores group 91 whatever the 93 flags say.
+        integer(long as i64)
+    } else if v.flags & 1 != 0 {
         Value::Null
     } else {
         match v.value_type {
@@ -627,5 +630,26 @@ fn modern_border(result: &mut Value, b: &CellBorder) {
         ("Type", integer(b.border_type as i64)),
     ] {
         result[k] = v;
+    }
+}
+
+#[cfg(test)]
+mod r4_c1_tests {
+    use super::*;
+
+    #[test]
+    fn dxf_group_91_is_the_value_of_an_unknown_typed_cell_whatever_the_flags() {
+        let mut value = CellValue::new();
+        value.flags = 3;
+        value.dxf_long = Some(0);
+        assert_eq!(cad_value(&value, false, true)["Value"], 0);
+        value.dxf_long = Some(7);
+        assert_eq!(cad_value(&value, false, true)["Value"], 7);
+        // Without a group 91 the reference never sets a value.
+        value.dxf_long = None;
+        assert_eq!(cad_value(&value, false, true)["Value"], Value::Null);
+        // A flagged DWG value stays empty.
+        value.dxf_long = Some(7);
+        assert_eq!(cad_value(&value, true, false)["Value"], Value::Null);
     }
 }

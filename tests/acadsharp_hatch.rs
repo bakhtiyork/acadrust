@@ -286,3 +286,19 @@ fn legacy_roundtrip_gradient_recovery_remains_native_only() {
         );
     }
 }
+
+#[test]
+fn dxf_elliptic_edge_angles_are_degrees_in_the_file_and_radians_in_the_model() {
+    // 91 paths, 92 flags, 93 edges, 72 edge type (3 = ellipse), 10/20 centre,
+    // 11/21 major axis end, 40 ratio, 50/51 start/end angle, 73 direction.
+    let doc = dxf("91\n1\n92\n1\n93\n1\n72\n3\n10\n1\n20\n2\n11\n3\n21\n0\n40\n0.5\n50\n90\n51\n472.5\n73\n1\n97\n0\n75\n0\n76\n1\n98\n0\n");
+    let path = &native(&doc).paths[0];
+    let BoundaryEdge::EllipticArc(edge) = &path.edges[0] else {
+        panic!("elliptic edge");
+    };
+    assert!((edge.start_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    // Not normalised: 472.5 degrees, like the reference.
+    assert!((edge.end_angle - 472.5_f64.to_radians()).abs() < 1e-12);
+    let p = projected(&doc);
+    assert!((p["Paths"][0]["Edges"][0]["EndAngle"].as_f64().unwrap() - 472.5_f64.to_radians()).abs() < 1e-9);
+}

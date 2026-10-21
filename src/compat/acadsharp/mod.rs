@@ -25,6 +25,8 @@ mod palette;
 mod registration;
 mod registration_order;
 #[cfg(test)]
+mod r4_c1_tests;
+#[cfg(test)]
 mod r4_c3_tests;
 mod stream;
 mod tables;
