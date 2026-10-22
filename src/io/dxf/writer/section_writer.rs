@@ -139,6 +139,11 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
     /// Set of all handles that will exist in the output DXF.
     /// Used to filter reactor/xdictionary references to non-existent objects.
     valid_handles: HashSet<Handle>,
+    /// The built-in `ByBlock` material, which an entity with material flag 1 (ByBlock) names in group 347.
+    by_block_material: Option<Handle>,
+    /// Objects the output states besides or instead of the document's own: the carriers of the modern cell styles
+    /// of table styles, which the document is not changed for.
+    carriers: std::rc::Rc<crate::objects::TableStyleCarriers>,
     /// DWG version the document was read from (None for a DXF source or a document built in memory): a field
     /// the DWG record stores is stated even when its value is the native default.
     dwg_source: Option<DxfVersion>,
@@ -249,6 +254,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             writing_paper_space: false,
             paper_viewport_ids: HashMap::new(),
             valid_handles: HashSet::new(),
+            by_block_material: None,
+            carriers: Default::default(),
             dwg_source: None,
             layer_names: HashMap::new(),
             bylayer_linetype_handle: Handle::NULL,
@@ -279,6 +286,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // dictionary entries behind.
         for (h, obj) in document.objects.iter() {
             match obj {
+                ObjectType::Material(material) if material.name.eq_ignore_ascii_case("ByBlock") => {
+                    self.by_block_material = Some(*h);
+                }
                 ObjectType::Unknown {
                     raw_dxf_codes,
                     type_name,
@@ -297,6 +307,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
             set.insert(*h);
         }
+        set.extend(self.carriers.objects.keys().copied());
         // Entity handles (from all block records); capture *Model_Space.
         self.block_record_names.clear();
         for br in document.block_records.iter() {
@@ -496,6 +507,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.dwg_source.is_some_and(|version| version >= since)
     }
 
+    /// State `carriers` in the output as objects of the document.
+    pub(crate) fn set_carriers(&mut self, carriers: crate::objects::TableStyleCarriers) {
+        self.carriers = std::rc::Rc::new(carriers);
+    }
+
     pub fn set_version(&mut self, version: DxfVersion) {
         self.dxf_version = Self::writable_version(version);
     }
@@ -626,13 +642,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             };
             self.write_header_variable("$ACADMAINTVER", |w| w.write_i32(90, maintenance))?;
         } else if self.dxf_version >= DxfVersion::AC1015 {
-            // A DWG source keeps the release byte of its file header on the document, not in the header.
-            let maintenance = if hdr.maintenance_version == 0 && hdr.dxf_source_variables.is_none() && document.dwg_source_version.is_some() {
-                i32::from(document.maintenance_version)
-            } else {
-                hdr.maintenance_version
-            };
-            self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, maintenance as i16))?;
+            // The DWG reader states the file-header byte as the variable where it is one (R2004 to R2013); the
+            // byte of another version is not written as the variable.
+            self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, hdr.maintenance_version as i16))?;
         }
         self.write_header_variable("$DWGCODEPAGE", |w| w.write_string(3, &hdr.code_page))?;
 
@@ -1411,7 +1423,14 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     pub fn write_classes(&mut self, document: &CadDocument) -> Result<()> {
         self.writer.write_section_start("CLASSES")?;
 
-        for class in Self::classes_to_write(document) {
+        let mut classes = Self::classes_to_write(document);
+        // The class of a carrier the document does not declare (a source's own CLASSES section is as it was read).
+        if let (None, Some(class)) = (document.classes.source_classes(), self.carriers.class.as_ref()) {
+            if !classes.iter().any(|written| written.dxf_name.eq_ignore_ascii_case(&class.dxf_name)) {
+                classes.push(class);
+            }
+        }
+        for class in classes {
             self.writer.write_string(0, "CLASS")?;
             self.writer.write_string(1, &class.dxf_name)?;
             self.writer.write_string(2, &class.cpp_class_name)?;
@@ -4466,6 +4485,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }) {
                 self.writer.write_handle(347, handle)?;
             }
+        } else if self.dxf_version >= DxfVersion::AC1021 && common.material_flags == 1 {
+            // A DWG says "ByBlock" in two bits; AutoCAD's DXF names the built-in ByBlock material.
+            if let Some(handle) = self.by_block_material {
+                self.writer.write_handle(347, handle)?;
+            }
         }
 
         if self.dxf_version >= DxfVersion::AC1024 {
@@ -6687,7 +6711,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             .copied()
             .filter(valid)
             .collect();
-        let xdictionary = document.extension_dictionary_handle(handle).filter(valid);
+        let xdictionary = self
+            .carriers
+            .extension_dictionaries
+            .get(&handle)
+            .copied()
+            .or_else(|| document.extension_dictionary_handle(handle))
+            .filter(valid);
         self.pending_attachments = Some((reactors, xdictionary));
     }
 
@@ -6735,8 +6765,27 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Write remaining objects (skip the root dictionary already written).
         // `objects` is a HashMap: iterate in handle order so the same
         // document writes the same bytes on every call.
-        let mut remaining: Vec<(&Handle, &ObjectType)> = document.objects.iter().collect();
+        // The carriers of table styles replace or join the document's objects.
+        let carriers = std::rc::Rc::clone(&self.carriers);
+        let mut remaining: Vec<(&Handle, &ObjectType)> = document
+            .objects
+            .iter()
+            .filter(|(handle, _)| !carriers.objects.contains_key(handle))
+            .chain(carriers.objects.iter())
+            .collect();
         remaining.sort_by_key(|(handle, _)| handle.value());
+        self.write_object_records(document, remaining, root_handle)?;
+
+        self.writer.write_section_end()?;
+        Ok(())
+    }
+
+    fn write_object_records(
+        &mut self,
+        document: &CadDocument,
+        remaining: Vec<(&Handle, &ObjectType)>,
+        root_handle: Handle,
+    ) -> Result<()> {
         for (handle, object) in remaining {
             if *handle == root_handle {
                 continue;
@@ -6816,8 +6865,6 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
             self.write_object_xdata(document, *handle, object)?;
         }
-
-        self.writer.write_section_end()?;
         Ok(())
     }
 
@@ -7930,6 +7977,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                                 self.writer.write_double(30, row.point.z)?;
                             }
                             DataTableCellType::ObjectId => self.writer.write_handle(331, row.handle)?,
+                            DataTableCellType::HardOwnerId => self.writer.write_handle(360, row.handle)?,
                             _ => unreachable!("DATATABLE validated above"),
                         }
                     }
@@ -8229,7 +8277,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             // are therefore filtered out of valid_handles and never written).
             // Writing dangling references causes CAD programs to report audit
             // errors.
-            if !objects.contains_key(handle)
+            if !(objects.contains_key(handle) || self.carriers.objects.contains_key(handle))
                 || (!self.valid_handles.is_empty() && !self.valid_handles.contains(handle))
             {
                 continue;
@@ -12219,7 +12267,34 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 let anchor_range = merged_range.filter(|range| {
                     range.top_row == row_index && range.left_col == column_index
                 });
-                self.write_table_cell(cell, anchor_range, merged_range.is_some())?;
+                // A table the DXF reader completed from its TABLECONTENT object states its cell overrides as the
+                // legacy entity did: the object's modern styles do not map back to the legacy groups.
+                let legacy = table
+                    .dxf_legacy
+                    .0
+                    .as_ref()
+                    .and_then(|legacy| legacy.rows.get(row_index))
+                    .and_then(|legacy| legacy.cells.get(column_index));
+                match legacy {
+                    Some(legacy) => {
+                        let mut view = cell.clone();
+                        view.style = legacy.style.clone();
+                        view.source_style_type = legacy.source_style_type;
+                        // The items too, while the cell still shows what the legacy entity showed (the legacy
+                        // block cell has a block pointer and a value of its own; the completed cell has the
+                        // pointer only).
+                        let shown = |cell: &TableCell| {
+                            cell.contents
+                                .first()
+                                .map(|content| (content.content_type, content.value.display().to_string()))
+                        };
+                        if shown(cell) == shown(legacy) {
+                            view.contents = legacy.contents.clone();
+                        }
+                        self.write_table_cell(&view, anchor_range, merged_range.is_some())?;
+                    }
+                    None => self.write_table_cell(cell, anchor_range, merged_range.is_some())?,
+                }
             }
         }
 
@@ -12253,11 +12328,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         let merge_height = merged_range.map_or(cell.merge_height, |range| range.row_count() as i32);
         self.writer.write_i16(175, merge_width as i16)?;
         self.writer.write_i16(176, merge_height as i16)?;
+        // Group 91 (177 before R2007) is the override word of the cell's legacy style: the bits its groups imply
+        // and the ones no group states.
+        let flag = cell
+            .style
+            .as_ref()
+            .filter(|style| style.legacy_override_bits)
+            .map_or(cell.flag, |style| style.override_flags);
         if self.dxf_version >= DxfVersion::AC1021 {
-            self.writer.write_i32(91, cell.flag)?;
+            self.writer.write_i32(91, flag)?;
             self.writer.write_i32(92, cell.state.bits() as i32)?;
         } else {
-            self.writer.write_i16(177, cell.flag as i16)?;
+            self.writer.write_i16(177, flag as i16)?;
         }
 
         // Virtual edge flag
@@ -12298,11 +12380,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_handle(340, handle)?;
             }
 
-            if self.dxf_version >= DxfVersion::AC1021
-                && content.content_type == TableCellContentType::Value
-            {
+            // A block cell states the value of its own after the block pointer (the second item).
+            let value_item = if content.content_type == TableCellContentType::Value {
+                Some(content)
+            } else {
+                cell.contents
+                    .get(1)
+                    .filter(|item| item.content_type == TableCellContentType::Value)
+                    .filter(|_| cell.cell_type == crate::entities::table::CellType::Block)
+            };
+            if let Some(item) = value_item.filter(|_| self.dxf_version >= DxfVersion::AC1021) {
                 self.writer.write_string(301, "CELL_VALUE")?;
-                self.write_field_cell_value_dxf(&content.value)?;
+                self.write_field_cell_value_dxf(&item.value)?;
                 self.writer.write_string(304, "ACVALUE_END")?;
             }
 

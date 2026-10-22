@@ -1118,7 +1118,12 @@ impl DataTableCellType {
     pub(crate) fn has_native_codec(self) -> bool {
         matches!(
             self,
-            Self::Integer | Self::Double | Self::Text | Self::Point | Self::ObjectId
+            Self::Integer
+                | Self::Double
+                | Self::Text
+                | Self::Point
+                | Self::ObjectId
+                | Self::HardOwnerId
         )
     }
 }

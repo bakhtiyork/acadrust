@@ -92,7 +92,11 @@ pub(super) fn new_header() -> crate::document::HeaderVariables {
 }
 
 fn maintenance(doc: &CadDocument) -> i32 {
-    if doc.header.maintenance_version != 0
+    // ACadSharp's DWG reader does not copy the file header's maintenance byte into the header variable (the native
+    // model states it there, as the DXF does).
+    let from_file_header_byte = doc.dwg_source_version.is_some()
+        && (DxfVersion::AC1018..DxfVersion::AC1032).contains(&doc.version);
+    if (doc.header.maintenance_version != 0 && !from_file_header_byte)
         || doc
             .header
             .dxf_source_variables

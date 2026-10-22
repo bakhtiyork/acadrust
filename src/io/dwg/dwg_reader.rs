@@ -1377,7 +1377,18 @@ impl<R: Read + Seek> DwgReader<R> {
                     info.acad_maintenance_version,
                     crate::io::dxf::code_page::encoding_from_dwg_code_page(info.code_page),
                 ) {
-                    Ok(header_vars) => document.header = header_vars,
+                    Ok(header_vars) => {
+                        document.header = header_vars;
+                        // $ACADMAINTVER of a DXF (R2004-R2013) is the maintenance byte of the DWG file header; the
+                        // header section of a DWG does not state it. Not so for R2000: AutoCAD's sample_AC1015.dwg
+                        // has byte 15 where its DXF of the same drawing states 20, so that byte is no evidence.
+                        if document.header.maintenance_version == 0
+                            && (crate::types::DxfVersion::AC1018..crate::types::DxfVersion::AC1032)
+                                .contains(&dxf_version)
+                        {
+                            document.header.maintenance_version = i32::from(info.acad_maintenance_version);
+                        }
+                    }
                     Err(e) if !failsafe => return Err(e),
                     Err(e) => report_read_error(
                         &mut self.notifications,

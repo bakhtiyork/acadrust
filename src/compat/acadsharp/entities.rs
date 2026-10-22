@@ -194,7 +194,7 @@ pub(super) fn common(
         ),
         ("LineTypeScale", number(common.linetype_scale)),
         ("LineWeight", enum_value(common.line_weight.value() as i64)),
-        ("Material", optional_handle(common.material_handle)),
+        ("Material", optional_handle(material_handle(doc, common))),
         ("ObjectName", Value::String(object_name.to_string())),
         ("ObjectType", enum_value(object_type)),
         // DwgReaderConfiguration.IgnoreProxyGraphics defaults to true; the
@@ -4095,4 +4095,16 @@ mod tests {
             assert_eq!(metadata["props"]["SubclassMarker"], rendered["props"]["SubclassMarker"]);
         }
     }
+}
+
+/// The material handle ACadSharp reports. A DXF names the built-in ByBlock material in group 347 where a DWG has the
+/// flag "ByBlock" (which ACadSharp's DWG reader does not read); the native model keeps the flag for both.
+fn material_handle(doc: &CadDocument, common: &EntityCommon) -> Option<Handle> {
+    if common.material_handle.is_some() || common.material_flags != 1 || doc.dwg_source_version.is_some() {
+        return common.material_handle;
+    }
+    doc.objects.iter().find_map(|(handle, object)| match object {
+        crate::objects::ObjectType::Material(material) if material.name.eq_ignore_ascii_case("ByBlock") => Some(*handle),
+        _ => None,
+    })
 }

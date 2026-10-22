@@ -1143,6 +1143,18 @@ impl TableCell {
     }
 
     /// Returns true if this cell spans multiple cells.
+    /// Group 91 (177 before R2007) of a legacy cell is the override word of its style: the bits its groups imply
+    /// (set as the groups are read) and the ones no group states. Those go onto the style, as a DWG cell stores
+    /// them; the word is not kept apart.
+    pub(crate) fn state_untied_override_bits(&mut self) {
+        let untied = std::mem::take(&mut self.flag) & !LEGACY_TIED_OVERRIDE_BITS;
+        if untied != 0 {
+            let style = self.style.get_or_insert_with(CellStyle::new);
+            style.override_flags |= untied;
+            style.legacy_override_bits = true;
+        }
+    }
+
     pub fn is_merged(&self) -> bool {
         self.merge_width > 1 || self.merge_height > 1
     }
@@ -1559,6 +1571,26 @@ pub struct Table {
     pub dwg_r2010_unknown_bit: Option<bool>,
     pub dwg_unknown_long2: i32,
     pub dwg_unknown_short: i16,
+    /// The columns, rows and base style as the legacy DXF entity stated them, kept when a table read from DXF
+    /// was completed from its TABLECONTENT and TABLEGEOMETRY objects (`restore_table_roundtrip`). Compatibility
+    /// provenance, not CAD data: the view of a reader that knows the legacy entity only (the oracle's DXF reader)
+    /// is projected from it, and the DXF writer states the legacy cells from it. Not in the native dump.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub(crate) dxf_legacy: DxfLegacyView,
+}
+
+/// The legacy state of a table completed from its objects (see [`Table::dxf_legacy`]). It takes part in equality:
+/// the DXF writer states the legacy cells from it, so two tables that differ in it write different files.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DxfLegacyView(pub Option<Box<TableLegacyView>>);
+
+/// What the legacy `ACAD_TABLE` entity of a DXF stated, before the objects completed it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableLegacyView {
+    pub columns: Vec<TableColumn>,
+    pub rows: Vec<TableRow>,
+    pub base_style: Option<CellStyle>,
+    pub base_style_type: Option<i32>,
 }
 
 fn visit_table_value_handles(value: &mut CellValue, visit: &mut impl FnMut(&mut Handle)) {
@@ -1836,6 +1868,7 @@ impl Table {
             dwg_r2010_unknown_bit: None,
             dwg_unknown_long2: 0,
             dwg_unknown_short: 38,
+            dxf_legacy: DxfLegacyView(None),
         }
     }
 
@@ -2260,6 +2293,234 @@ impl Default for TableBuilder {
     }
 }
 
+/// The key of the extension-dictionary record that links a table to its TABLECONTENT and TABLEGEOMETRY objects.
+const ROUNDTRIP_RECORD_KEY: &str = "ACAD_XREC_ROUNDTRIP";
+/// The first entry (group 102) of that record.
+const ROUNDTRIP_TABLE_MARKER: &str = "ACAD_ROUNDTRIP_2008_TABLE_ENTITY";
+
+/// What the round-trip record of one table names: the content object (group 360), the geometry object (361) and
+/// the break ranges (count 90, then position 10, first row 90, last row 90 for each).
+struct TableRoundtrip {
+    content: Handle,
+    geometry: Option<Handle>,
+    break_ranges: Vec<TableBreakRange>,
+}
+
+fn table_roundtrip(document: &crate::document::CadDocument, table: Handle) -> Option<TableRoundtrip> {
+    use crate::objects::{ObjectType, XRecordValue};
+    let dictionary = document.extension_dictionary_handle(table)?;
+    let ObjectType::Dictionary(dictionary) = document.objects.get(&dictionary)? else {
+        return None;
+    };
+    let ObjectType::XRecord(record) = document.objects.get(&dictionary.get(ROUNDTRIP_RECORD_KEY)?)? else {
+        return None;
+    };
+    let mut entries = record.entries.iter();
+    if entries.next()?.value.as_string() != Some(ROUNDTRIP_TABLE_MARKER) {
+        return None;
+    }
+    let mut content = None;
+    let mut geometry = None;
+    let mut breaks = Vec::new();
+    let mut counts = Vec::new();
+    let mut position = Vector3::ZERO;
+    let mut rows = Vec::new();
+    for entry in entries {
+        match (entry.code, &entry.value) {
+            (360, XRecordValue::Handle(handle)) => content = Some(*handle),
+            (361, XRecordValue::Handle(handle)) => geometry = Some(*handle),
+            (90, value) => match value.as_i32() {
+                Some(value) if counts.is_empty() => counts.push(value),
+                Some(value) => rows.push(value),
+                None => {}
+            },
+            (10, value) => {
+                if let Some((x, y, z)) = value.as_point3d() {
+                    position = Vector3::new(x, y, z);
+                }
+            }
+            _ => {}
+        }
+        if rows.len() == 2 {
+            breaks.push(TableBreakRange {
+                position,
+                start_row: rows[0],
+                end_row: rows[1],
+            });
+            rows.clear();
+        }
+    }
+    if counts.first().copied() != Some(breaks.len() as i32) {
+        return None;
+    }
+    Some(TableRoundtrip {
+        content: content?,
+        geometry,
+        break_ranges: breaks,
+    })
+}
+
+/// Complete the tables of a document read from DXF.
+///
+/// A DXF states a table as the legacy `ACAD_TABLE` entity (cell values and a few overrides) and keeps the rest of
+/// what an R2010+ DWG holds in the entity record itself in objects: TABLECONTENT (cell contents with their formats,
+/// cell styles, custom data, row and column styles) and TABLEGEOMETRY (cell geometry), linked from the
+/// `ACAD_XREC_ROUNDTRIP` record of the entity's extension dictionary, which also states the break ranges. The typed
+/// data goes onto the entity here, so a table reads the same from DXF as from DWG; the objects stay, as in a DWG.
+/// A table whose cell grid differs from its content object's (the legacy cells were edited without it) is left as
+/// read.
+pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocument) {
+    use crate::entities::EntityType;
+    use crate::objects::{DataObjectData, ObjectType};
+    if !document.entities().any(|entity| matches!(entity, EntityType::Table(_))) {
+        return;
+    }
+    // Before R2010 the entity record holds the legacy cells only, as the DXF does.
+    let mut work = std::collections::HashMap::new();
+    if document.version >= crate::types::DxfVersion::AC1024 {
+        for entity in document.entities() {
+            let EntityType::Table(table) = entity else {
+                continue;
+            };
+            let Some(link) = table_roundtrip(document, table.common.handle) else {
+                continue;
+            };
+            let Some(ObjectType::TableContent(content)) = document.objects.get(&link.content) else {
+                continue;
+            };
+            let same_grid = content.rows.len() == table.rows.len()
+                && content.columns.len() == table.columns.len()
+                && content
+                    .rows
+                    .iter()
+                    .zip(&table.rows)
+                    .all(|(a, b)| a.cells.len() == b.cells.len());
+            if !same_grid {
+                continue;
+            }
+            let geometry = link.geometry.and_then(|handle| match document.objects.get(&handle) {
+                Some(ObjectType::DataObject(object)) => match &object.data {
+                    DataObjectData::TableGeometry(geometry) => Some(geometry.clone()),
+                    _ => None,
+                },
+                _ => None,
+            });
+            work.insert(table.common.handle, (content.clone(), geometry, link.break_ranges));
+        }
+    }
+    for entity in document.entities_mut_keep_raw() {
+        let EntityType::Table(table) = entity else {
+            continue;
+        };
+        if let Some((content, geometry, break_ranges)) = work.remove(&table.common.handle) {
+            table.restore_modern_content(&content, geometry.as_ref(), break_ranges);
+        } else {
+            // A table of the legacy layout: a block cell also keeps its block pointer in the cell itself, as a
+            // pre-R2010 DWG record states it.
+            for cell in table.rows.iter_mut().flat_map(|row| row.cells.iter_mut()) {
+                if cell.cell_type == CellType::Block {
+                    cell.value_handle = cell.contents.first().and_then(|content| content.block_handle);
+                }
+            }
+        }
+    }
+}
+
+impl Table {
+    /// Put the typed data of a TABLECONTENT object (`content`), a TABLEGEOMETRY object and the break ranges of the
+    /// round-trip record on a table read from its legacy DXF form, as an R2010+ DWG holds them in the entity.
+    /// `content` has the same cell grid as the table.
+    pub(crate) fn restore_modern_content(
+        &mut self,
+        content: &Table,
+        geometry: Option<&crate::objects::TableGeometry>,
+        break_ranges: Vec<TableBreakRange>,
+    ) {
+        self.dxf_legacy = DxfLegacyView(Some(Box::new(TableLegacyView {
+            columns: self.columns.clone(),
+            rows: self.rows.clone(),
+            base_style: self.base_style.clone(),
+            base_style_type: self.base_style_type,
+        })));
+        self.name = content.name.clone();
+        self.description = content.description.clone();
+        self.base_style = content.base_style.clone();
+        self.base_style_type = content.base_style_type;
+        self.break_ranges = break_ranges;
+        for (column, from) in self.columns.iter_mut().zip(&content.columns) {
+            column.name = from.name.clone();
+            column.style = from.style.clone();
+            column.source_style_type = from.source_style_type;
+            column.custom_data = from.custom_data;
+            column.custom_data_items = from.custom_data_items.clone();
+            column.style_id = from.style_id;
+        }
+        let columns = self.columns.len();
+        for (row_index, (row, from)) in self.rows.iter_mut().zip(&content.rows).enumerate() {
+            row.style = from.style.clone();
+            row.source_style_type = from.source_style_type;
+            row.custom_data = from.custom_data;
+            row.custom_data_items = from.custom_data_items.clone();
+            row.style_id = from.style_id;
+            for (column_index, (cell, from)) in row.cells.iter_mut().zip(&from.cells).enumerate() {
+                cell.tooltip = from.tooltip.clone();
+                cell.custom_data = from.custom_data;
+                cell.custom_data_items = from.custom_data_items.clone();
+                cell.has_linked_data = from.has_linked_data;
+                cell.data_link_handle = from.data_link_handle;
+                cell.data_link_rows = from.data_link_rows;
+                cell.data_link_columns = from.data_link_columns;
+                cell.data_link_unknown = from.data_link_unknown;
+                cell.style = from.style.clone();
+                cell.source_style_type = from.source_style_type;
+                cell.style_id = from.style_id;
+                // The entity states one effective content item per cell (the legacy cell has a block pointer
+                // and a value of its own; the pointer is the item). A cell with a single content in the
+                // content object has that item. An empty cell, and a cell with several items (the entity states
+                // the first), keep the legacy item, whose format is the cell's own content format.
+                cell.contents.truncate(1);
+                let single = from.contents.len() == 1 && cell.contents.len() == 1;
+                if single {
+                    cell.contents = from.contents.clone();
+                } else if let (Some(item), Some(style)) = (cell.contents.first_mut(), cell.style.as_ref()) {
+                    item.format_has_data = true;
+                    item.format_override_flags = style.content_format_override_flags;
+                    item.format_property_flags = style.content_property_flags;
+                    item.format_value_data_type = style.value_data_type;
+                    item.format_value_unit_type = style.value_unit_type;
+                    item.value_format = style.value_format.clone();
+                    item.color = style.content_color;
+                    item.text_style_handle = style.text_style_handle;
+                    item.text_height = style.text_height;
+                    item.rotation = style.rotation;
+                    item.scale = style.scale;
+                    item.alignment = style.alignment;
+                }
+                // The geometry object states every item of a cell; the entity's cached geometry is that of the
+                // effective item, which the object does not carry for a cell with several.
+                if from.contents.len() > 1 {
+                    continue;
+                }
+                let Some(geometry) = geometry.and_then(|g| g.cells.get(row_index * columns + column_index)) else {
+                    continue;
+                };
+                cell.geometry_data_flag = geometry.geometry_data_flag;
+                cell.geometry_width_with_gap = geometry.width_with_gap;
+                cell.geometry_height_with_gap = geometry.height_with_gap;
+                cell.geometry_handle = (!geometry.table_geometry.is_null()).then_some(geometry.table_geometry);
+                cell.geometry_flags = geometry.geometry.len() as i32;
+                for (index, value) in geometry.geometry.iter().enumerate() {
+                    if let Some(item) = cell.contents.get_mut(index) {
+                        item.geometry = Some(value.clone());
+                    }
+                }
+                cell.geometries = geometry.geometry.clone();
+                cell.geometry = cell.geometries.first().cloned();
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -2457,6 +2718,9 @@ mod tests {
         assert!(!flags.contains(CellStateFlags::LINKED));
     }
 }
+
+/// The bits of a legacy cell's override word that a group of the cell states (see [`cell_override_bit`]).
+const LEGACY_TIED_OVERRIDE_BITS: i32 = 0x3FFF;
 
 pub fn legacy_override_properties(flags: i32) -> CellStylePropertyFlags {
     let mut properties = CellStylePropertyFlags::NONE;

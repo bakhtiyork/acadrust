@@ -228,6 +228,19 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5a-4 ATTRIB/ATTDEF embedded text | The default direction (1,0,0) of an unrotated embedded MTEXT read from a DWG is no stated direction (`dwg_x_direction` None). | The DXF object states group 11 only for a rotated text. |
 | R5a-4 TABLE | The DWG reader names the block of an ACAD_TABLE (`block_name`) from its block record; a cell style without a background colour (`None`) has no fill. | The DXF names the block (group 2); `Color::None` was read as a fill. |
 | R5a-4 compat view | `CadHeader.MultiLeaderStyle.TextTop/BottomAttachment` of a DWG before R2010 are ACadSharp's defaults; a block's DXF word keeps bit 1 whatever its name. | Keeps the ACadSharp view (G1 45/49) while the native model changed. |
+| R5a-5 carriers without a copy | `plan_table_style_carriers` computes the CELLSTYLEMAP objects, the changed extension dictionaries and round-trip records of the table styles with modern cell styles and the handles they take, without changing the document; the DXF writer states them beside the document's objects (`SectionWriter::carriers`: objects, extension dictionary lookup, valid handles, CLASSES, handle seed). `store_table_style_carriers` (the DWG writer's copy) is the plan applied. | The DXF writer copied the whole document (`to_mut`) for any style with modern cell styles. |
+| R5a-5 DXF TABLE completion | After a DXF of R2010 or later is read, a table whose `ACAD_XREC_ROUNDTRIP` record (first entry the string `ACAD_ROUNDTRIP_2008_TABLE_ENTITY`) names a TABLECONTENT object (360) of the same cell grid takes from it the name, description, base style, column and row styles and custom data, and per cell the tooltip, custom data, links, style, style id and, for a cell with one item, that item; from the TABLEGEOMETRY object (361) the cell geometry; from the record's groups 90/10/90/90 the break ranges. A cell with no or several items keeps its legacy item, whose format is the cell's own content format. The objects stay, as in a DWG. The legacy rows, columns and base style are kept in `Table::dxf_legacy` (compat provenance, excluded from the native dump, see EXCLUDED_FIELDS; it takes part in `PartialEq`, since the writer states legacy cells from it; the R5a-5 review removed an always-equal `PartialEq`) so that the ACadSharp view of the table is still the oracle DXF reader's, and the DXF writer states the legacy cell styles and items from it while the cell still shows what the legacy entity showed. | An R2010+ DWG holds the table content in the entity record; the DXF read had the legacy cells only (791 rows per cell in each R2013+ DWG). AutoCAD's own DXF carries the rest in TABLECONTENT and TABLEGEOMETRY. |
+| R5a-5 legacy cell word | A legacy cell's override word is group 91 (R2007+) or 177 (before): the writer states the style's `override_flags` when the style has legacy bits, else `cell.flag`; the reader reads 177 as unsigned 16 bits and puts the bits no cell group states (above bit 13) on the cell's style instead of keeping the word apart. | A DWG cell states the word on its style; AutoCAD's DXF has `91 = 262176`, the reader dropped bit 18 and the writer wrote `cell.flag` (0). |
+| R5a-5 legacy block cell | Pre-R2010 DXF: the CELL_VALUE after a block pointer (340) is an item of its own (as in a DWG record), the writer states it from the second item, and the block pointer is also the cell's `value_handle` (set by a pass after the read, as the DWG record has it). A DWG reader derives `TableCell::cell_type` Block from a block item for the R2010+ record too (the TABLECONTENT reader of the DXF does), and a pre-R2007 DWG text cell has no formatted value. A typed cell value keeps group 91 as its number only (`dxf_long` is for a value of unknown type). | The two readers disagreed on the cell type, the item list, the pointer copy, the formatted value and the second number of the same cell. |
+| R5a-5 material ByBlock | An entity whose material flag is ByBlock writes group 347 naming the built-in `ByBlock` material (R2007+); the DXF reader gives an entity whose 347 names that material the flag and no handle. The ACadSharp view reports the handle for a DXF source (the oracle's DXF reader keeps the reference). | A DWG states "ByBlock" in two bits and no handle; AutoCAD's DXF has `347 = 97`. The writer dropped the flag. |
+| R5a-5 `$ACADMAINTVER` | A DWG of R2004 to R2013 states the maintenance byte of its file header as `header.maintenance_version`, which is what the DXF variable is (AutoCAD's DXF of the samples: 104, 50, 226, 125, equal to the bytes). Not R2000: sample_AC1015.dwg has byte 15 where AutoCAD's DXF of it states 20 (R5a-5 review); an R2000 DWG has no `$ACADMAINTVER` in the model, and the DXF writer no longer writes the file-header byte as the variable (it writes the header's value). The ACadSharp view for a DWG source is unchanged (its constants). | The DWG header section has no such variable; the byte lived on the document only, so the DXF read had a number the DWG read lacked. |
+| R5a-5 DATATABLE | A column of hard-owned handles (cell type 6, DXF group 360, DWG hard-ownership handle) has a codec in the DWG reader, the DXF reader and both writers; types 7 to 9 stay unsupported (the record is kept raw). The two tests that used type 6 as the unsupported example now use 7. | AutoCAD's R2004 files hold two such tables; the DWG kept them as `Unknown` and the DXF writer dropped them. |
+| R5a-5 application names | `ExtendedData::get_record` and the DXF reader's `AcadAnnotative` test compare application names without regard to case (a DWG before R2000 stores them in upper case). Upstream PR candidate. | The layer description, layer transparency and the annotative flag of an R14 drawing were lost on a DXF round trip. |
+| R5a-5 layout dictionary | The DWG writer's repair of the layout dictionary (rename sync) treats a key that differs from the layout name in case only as in sync. | An R14 DWG keys its layouts in upper case; the repair rewrote and reordered them. |
+| R5a-5 R13/R14 leader colour | (R5a-5 review) The by-block colour of an R13/R14 LEADER record is DXF group 77: the DWG reader also states it as `override_color`, the DXF reader of an R13/R14 file also as `byblock_color`. | RR-042 accepted the colour as lost; the group carries it. |
+| R5a-5 R13/R14 records | A DWG before R2007 leaves DIMFXL and DIMJOGANG at the model defaults (1.0, 45 degrees) like a DXF without the groups; an R13/R14 viewport has the world UCS axes; the DXF reader restores the view parameters of an R13/R14 viewport from its MVIEW extended data (as the DWG reader). | The DWG reader's zero placeholders and the missing restore made the same drawing differ after DXF. |
+| R5a-5 annotation scale | The DXF reader reflects the `CANNOSCALE` entry of the variable dictionary into the header (`current_annotation_scale`, `annotation_scale_value`), as the DWG reader does. | AutoCAD's DXF has no header variable for it; the header said 1:1 for a drawing in 1:100. |
+| R5a-5 `acad-dump acis-same` | New command `acis-same <sab.hex> <sat.txt>` (`acis::sab_matches_sat`): exit 0 when the binary ACIS data and the SAT text parse and print the same SAT text. | Lets the gate verify a SAB written as SAT (RR-035) without a second converter. |
 
 
 ## ACadSharp differential dump
@@ -419,6 +432,7 @@ Counts, cells of 96 passing (ASCII + binary, 48 samples each):
 | after the R5a-3 review | 44 (24 + 20) | 68 (34 + 34) | 92 (46 + 46; all exact) |
 | after R5a-4 | 70 (37 + 33; 4 exact, 66 allowed) | 68 (34 + 34; the same cells, no cell with more unexplained rows) | 92 (46 + 46; all exact) |
 | after the R5a-4 review (RR-033 narrowed, RR-034, carrier handle chosen by the writer) | 70 (37 + 33; 4 exact, 66 allowed) | 68 (34 + 34) | 92 (46 + 46; all exact) |
+| after R5a-5 | 83 (45 + 38; 4 exact, 79 allowed) | 68 (34 + 34; the same cells, no cell with more unexplained rows) | 92 (46 + 46; all exact) |
 
 (The numbers recorded before this job, RR 44 / RC 60 / idem 92, compared the compat view for RR and idem and are not
 comparable.) No cell passes less than before in any check, and no cell has more unexplained RC rows.
@@ -444,7 +458,7 @@ Open, listed by cause (RR unless noted). Nothing here is allow-listed.
   declares an R12 document as R13 (`writable_version`, issue #68), so owners (group 330) the R12 source lacks appear,
   the second unnamed shape-file STYLE comes back with another handle and `$HANDSEED` grows on every pass (the idem failure; cause not traced), polyline widths move
   from the polyline to its vertices, and viewports/layouts/MLEADERSTYLE/TABLESTYLE the R13 structure adds differ.
-* **DWG-sourced, 18 of 44 cells (9 samples; R5a-4 closed the other 26, see below).** AecObjects (2 cells, 3,527
+* **DWG-sourced, 18 of 44 cells (9 samples; R5a-4 closed the other 26, see below; R5a-5 closed 13 of the 18; the causes (1) to (5) below are those before R5a-5, see its section at the end for what is left).** AecObjects (2 cells, 3,527
   rows each), sample_AC1014 (116), sample_AC1015 (72), sample_AC1018 (76), sample_AC1021 (49), sample_AC1024 (806),
   sample_AC1027, sample_AC1032 and sample_base/sample_base (792 each). The rows left, by cause:
   (1) modern TABLE (entity and object, every cell of the nine except AecObjects: 791 rows in each R2013+ cell, 36-50 in
@@ -556,3 +570,79 @@ G4-491..493 `$DIMLTYPE`/`$DIMLTEX1`/`$DIMLTEX2` (ACadSharp reads the handles and
 Open: see the DWG-sourced bullet above. UNVERIFIED: AutoCAD's acceptance of a THUMBNAILIMAGE with a PNG; a CELLSTYLEMAP
 object in an R2000 DXF; `$ACADMAINTVER` of a DWG R2018 file is written as 377 (RR-033 accepts it).
 
+### R5a-5: the remaining DWG-sourced losses
+
+Gate G4 after the job: **RR 83 / 96** (ASCII 45, binary 38; 70 before), **RC 68 / 96** (the same cells; none has more
+unexplained rows, the R2010+ DWG cells have fewer: 48 -> 46, the R2007 ones 6 -> 4, AC1014 68 -> 62), **idem 92 / 96**.
+G1 45 / 49 with an identical `rs-gap.tsv`. Of the 18 DWG-sourced cells that failed RR, 13 pass: AC1014, AC1015 and
+AC1018 ASCII, AC1021, AC1024, AC1027, AC1032 and sample_base ASCII and binary. Still failing, all DWG-sourced: AecObjects
+(2 cells, 3,525 rows) and AC1014, AC1015, AC1018 binary (3 cells, 13, 2 and 1 rows).
+
+RR rows over the nine samples' ASCII cells before the job (comparer rows no rule accepts; the binary cells repeat
+them), per family: modern TABLE 3,382 (791 in each of AC1027, AC1032 and sample_base, 793 AC1024, 50 each AC1018,
+AC1015 and AC1014, 36 AC1021); AEC unknown objects and what hangs on them 3,527 (AecObjects); ACIS written as SAT 36
+(12 each in AC1018, AC1021, AC1024); DIMSTYLE fields of a pre-R2007 DWG 38; the rest of AC1014 52 (viewports 18,
+dictionary order 7, VX table and entries 7, TOLERANCE and LEADER 11, preview, universal dates, layer description and
+transparency, annotative flags, DATATABLE 2) and of AC1015 11 (VX table, DATATABLE, dates); `$ACADMAINTVER` 5 and POINT
+`material_flags` 5 (one row per cell of AC1015 to AC1032). After: the three R2013+ cells and AC1024 pass through RR-035
+and RR-048 (one cell with several items), the older ones through the rules below, AecObjects and the three binary cells
+keep the rows listed under "Open".
+
+Fixes (R = reader, W = writer): see the R5a-5 rows of "Behaviour changes" above. Reader: DXF TABLE completion, legacy
+cell word, legacy block cell, material ByBlock, annotation scale, R13/R14 viewport restore, application names; DWG
+reader: `$ACADMAINTVER`, cell type, formatted value, DIMSTYLE and viewport defaults, DATATABLE type 6. Writer: carriers
+without a copy, legacy cell word and items, material 347, DATATABLE type 6, layout dictionary case.
+
+New RR rules (Tools/g4-rr-allowlist.json; each has a reason that cites the DXF group or version and a self-test example):
+RR-035 ACIS: binary on the input, SAT on the output, verified equal by `acad-dump acis-same` (Solid3D, Region, Body;
+AC1018, AC1021, AC1024; AutoCAD's own DXF of those versions holds SAT, from R2013 the ACDSDATA section holds SAB);
+RR-036 R14 `$TDUCREATE/$TDUUPDATE`; RR-037 R14 preview (no THUMBNAILIMAGE before R2000); RR-038..041 the VX table of R13 to
+R2000 (no DXF table); RR-042/043/047 the R13/R14 LEADER and TOLERANCE values with no group; RR-044/045 the 16-bit
+cell word of R2000 to R2004 (`177`); RR-046 the R2010 TABLE bit; RR-048 the cached geometry and resolved text style of the
+effective item of a cell whose TABLECONTENT object lists several items (found through the entity's round-trip record by
+the new relation `table_cell_cache_of_multi_item_cell`; single-item cells are compared in full). New relations:
+`acis_sab_as_sat`, `input_type_output_absent`, `input_set_output_clear`, `table_cell_cache_of_multi_item_cell`;
+`type` and `property` of a rule may be lists, and a rule may name the record `key`. New RC rules (RC only, D-b rows):
+G4-495 `Point.Material` null -> the ByBlock material (new relation `null_to_named_object`), G4-496 / G4-497 a block
+cell's `Type` and empty `Contents` in a DXF read. The comparer's `--self-test` of both lists passes (48 and 485 rules).
+R5a-5 review: G4-495 limited to R2007+ sources; G4-496 narrowed from `output_const` (any number -> 2) to `const_pair`
+0 -> 2 for R2010+ sources; G4-497 narrowed from any list -> [] to a list of block items only (new relation
+`items_with_member_to_empty`), R2010+ sources; RR-042 no longer accepts `byblock_color` (group 77 carries it, now
+fixed); G4-052 pairs (20, 15) and (0, 10) replaced by (20, 0) (the R2000 and R14 file-header bytes are no longer
+written as `$ACADMAINTVER`).
+
+Measured (item 0): peak memory footprint of `acad-dump write-dxf` (`/usr/bin/time -l`, debug build), before -> after:
+sample_AC1014.dwg (the largest gate DWG, 1.3 MB) 23.43 -> 23.17 MB, sample_AC1024.dwg 22.51 -> 19.84 MB,
+sample_AC1032.dwg 18.53 -> 17.43 MB, `PIER CAP REINFORCEMENT.dwg` (26.5 MB) 1,406,388,000 -> 1,409,255,000 bytes (the
+file has no table style with modern cell styles, so neither build copies the document; the difference is noise).
+`CadDocument::clone` shares the entities (Arc), so the copy was cheap in memory for entity-heavy drawings; the objects,
+tables and side maps were copied, and the document is no longer copied at all.
+
+Open (DWG-sourced):
+
+* **AecObjects, 2 cells, 3,525 rows each** (892 `Unknown` objects and what hangs on them: dictionary entries, reactors,
+  owners, extension dictionaries). They have no DXF form. Carrying the verbatim DWG record in a proxy object (the way the
+  fork carries registered-class objects: `ACAD_PROXY_OBJECT`, class 499, a private envelope) closes the RR rows but two
+  (a BLOCK marker and a dictionary owner that point at no record: 3,527 -> 2), and was tried and **not adopted**: the
+  oracle's DXF reader then reads 883 proxy objects, 321 dictionaries and 160 dictionary entries ACadSharp's DWG reader
+  never saw, and four AEC objects (Wall, AecWallStyle, AecCleanupGroup, AecBinRecord) change their type, which no RC rule
+  may allow; RC unexplained rows would go from 21 to about 1,370. AutoCAD's acceptance of such proxies is UNVERIFIED too.
+  The `CANNOSCALE` row of this drawing is fixed (DXF reader).
+* **AC1014, AC1015, AC1018 binary (3 cells)**: the binary DXF of an R2000/R2004 drawing is written as R2010 (writer
+  policy, see "Open" above), so `doc/version` differs, plus the knock-ons of the R2010 form (VX control handle,
+  `value_handle` of a block cell, AC1014: dimension style `dimfit`/`dimblk_name`, viewport scale, and the R14 leader's
+  `byblock_color`, which an R2010 DXF carries in group 77 as `override_color` only). The ASCII cells of the same samples pass.
+* **Tables**: a cell with several items keeps only the effective item's cache out of DXF (RR-048); a DWG table whose
+  TABLECONTENT / TABLEGEOMETRY objects are missing has no carrier (the writer does not create them: the modern data of
+  the entity record is then lost in DXF). Cell styles are written to the legacy groups from the legacy snapshot
+  of a completed table only; a table built in memory derives its legacy groups from the modern style.
+
+Review doubts: the DWG writer states its own maintenance byte (0, 25, 30, 29 for R2004 to R2013), not the header's, so a
+DWG to DWG round trip (G5) now differs in `maintenance_version`; a table completed from TABLECONTENT keeps its legacy
+snapshot, so an edit of a cell style after a DXF read does not reach the legacy groups (and the TABLECONTENT object is
+written as read, so an edit of the entity does not reach it either); the ACadSharp view looks up the ByBlock material
+per entity (a scan of the objects for each ByBlock entity of a DXF source).
+UNVERIFIED: the VX table, the preview and `$TDUCREATE` rules for AC1014 rest on AutoCAD's R2000 DXF, the DXF reference's
+TABLES list and the oracle (there is no R14 DXF in the fixtures); AutoCAD's acceptance of `91` = the style word in R2007+
+legacy cells, of the second CELL_VALUE of a block cell and of the carriers is not checked; the DATATABLE group of types
+7 to 9. Upstream PR candidates: case-insensitive application names; layout dictionary repair; legacy cell word.

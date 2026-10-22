@@ -6462,6 +6462,9 @@ impl<'a> SectionReader<'a> {
                             DataTableCellType::ObjectId => {
                                 value.handle = fields.handle(section, 331)
                             }
+                            DataTableCellType::HardOwnerId => {
+                                value.handle = fields.handle(section, 360)
+                            }
                             _ => unreachable!("cell type checked above"),
                         }
                         rows.push(value);
@@ -11097,7 +11100,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 1001 => {
-                    if pair.value_string == "AcadAnnotative" {
+                    if pair.value_string.eq_ignore_ascii_case("AcadAnnotative") {
                         ds.annotative = self.read_annotative_xdata(pair)?;
                     }
                 }
@@ -21129,7 +21132,8 @@ impl<'a> SectionReader<'a> {
                 }
                 // ── Cells ──
                 171 => {
-                    if let Some(c) = cur.take() {
+                    if let Some(mut c) = cur.take() {
+                        c.state_untied_override_bits();
                         cells.push(c);
                     }
                     in_value = false;
@@ -21170,8 +21174,9 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 177 => {
+                    // A 16-bit word of override bits, not a signed number.
                     if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i16()) {
-                        c.flag = v as i32;
+                        c.flag = i32::from(v as u16);
                     }
                 }
                 178 => {
@@ -21253,7 +21258,11 @@ impl<'a> SectionReader<'a> {
                     if let (Some(c), Some(v)) = (cur.as_mut(), pair.as_i32()) {
                         ensure_content(c);
                         let value = &mut c.contents.last_mut().unwrap().value;
-                        value.dxf_long = Some(v);
+                        // Only a value of unknown type keeps the group (it is its value); a typed one has it as
+                        // its number.
+                        if value.value_type == CellValueType::Unknown {
+                            value.dxf_long = Some(v);
+                        }
                         if (value.flags & 1) == 0 {
                             value.numeric_value = v as f64;
                         }
@@ -21287,6 +21296,11 @@ impl<'a> SectionReader<'a> {
                 301 => {
                     if let Some(c) = cur.as_mut() {
                         ensure_content(c);
+                        // The value after a block pointer (group 340) is the cell's own value, an item of its
+                        // own as in a pre-R2010 DWG record.
+                        if c.contents.last().is_some_and(|content| content.content_type == TableCellContentType::Block) {
+                            c.contents.push(CellContent::new());
+                        }
                         let content = c.contents.last_mut().unwrap();
                         if content.field_handle.is_none() {
                             content.content_type = TableCellContentType::Value;
@@ -21506,7 +21520,8 @@ impl<'a> SectionReader<'a> {
                 }
             }
         }
-        if let Some(c) = cur.take() {
+        if let Some(mut c) = cur.take() {
+            c.state_untied_override_bits();
             cells.push(c);
         }
 
@@ -22663,7 +22678,7 @@ impl<'a> SectionReader<'a> {
                     }
                 }
                 1001 => {
-                    if pair.value_string == "AcadAnnotative" {
+                    if pair.value_string.eq_ignore_ascii_case("AcadAnnotative") {
                         ts.annotative = self.read_annotative_xdata(pair)?;
                     }
                 }

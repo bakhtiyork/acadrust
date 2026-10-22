@@ -898,7 +898,7 @@ pub fn read_class_object_data(
                         DataTableCellType::Double => value.real = reader.read_bit_double(),
                         DataTableCellType::Text => value.text = reader.read_variable_text(),
                         DataTableCellType::Point => value.point = reader.read_3bit_double(),
-                        DataTableCellType::ObjectId => {
+                        DataTableCellType::ObjectId | DataTableCellType::HardOwnerId => {
                             value.handle = Handle::from(reader.read_handle());
                         }
                         _ => return None,

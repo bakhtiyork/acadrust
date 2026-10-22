@@ -2835,10 +2835,13 @@ pub fn read_viewport(
     let width = reader.read_bit_double();
     let height = reader.read_bit_double();
     if version.r13_14_only() {
+        // The record has no UCS: its axes are the world axes, as in a viewport made in memory.
         return ViewportData {
             center,
             width,
             height,
+            ucs_x_axis: Vector3::new(1.0, 0.0, 0.0),
+            ucs_y_axis: Vector3::new(0.0, 1.0, 0.0),
             ..Default::default()
         };
     }
@@ -3665,6 +3668,15 @@ fn read_table_cell(reader: &mut DwgMergedReader, version: DwgVersion) -> TableCe
         }
         cell.geometry = cell.geometries.first().cloned();
     }
+    // An R2010+ cell has no type of its own; the legacy cell type is its content's (as the DXF reader of a
+    // TABLECONTENT object derives it).
+    if cell
+        .contents
+        .iter()
+        .any(|content| content.content_type == TableCellContentType::Block)
+    {
+        cell.cell_type = crate::entities::table::CellType::Block;
+    }
     cell
 }
 
@@ -3798,7 +3810,11 @@ fn read_table_cell_data(
             // Text: the string is inline only before R2007.
             if value_handle == 0 && dxf_version < DxfVersion::AC1021 {
                 let text = reader.read_variable_text();
-                cell.contents.push(CellContent::text(&text));
+                let mut content = CellContent::text(&text);
+                // A record before R2007 states the text only: it has no formatted value, as a DXF of that
+                // version has none either.
+                content.value.formatted_value.clear();
+                cell.contents.push(content);
             }
         }
         2 => {

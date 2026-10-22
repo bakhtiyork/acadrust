@@ -909,6 +909,40 @@ pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadD
     }
 }
 
+/// The carriers of the modern cell styles of the table styles of a document, as objects an output states besides
+/// or instead of the document's own (see [`plan_table_style_carriers`]).
+#[derive(Debug, Default)]
+pub(crate) struct TableStyleCarriers {
+    /// Objects the output holds under their handle: new ones (the carriers) and changed copies of the document's
+    /// (the extension dictionary that gains an entry, a record whose rows are rewritten).
+    pub objects: std::collections::HashMap<Handle, crate::objects::ObjectType>,
+    /// The extension dictionary of an object that has none in the document.
+    pub extension_dictionaries: std::collections::HashMap<Handle, Handle>,
+    /// The CELLSTYLEMAP class, when the document does not declare it.
+    pub class: Option<crate::classes::DxfClass>,
+    /// The handle allocator after the plan took fresh handles; `None` when it took none.
+    pub next_handle: Option<u64>,
+}
+
+impl TableStyleCarriers {
+    /// The highest handle the carriers use.
+    pub fn max_handle(&self) -> u64 {
+        self.objects.keys().map(|handle| handle.value()).max().unwrap_or(0)
+    }
+
+    /// Put the carriers into the document itself.
+    fn apply(self, document: &mut crate::document::CadDocument) {
+        document.objects.extend(self.objects);
+        document.xdic_by_handle.extend(self.extension_dictionaries);
+        if let Some(class) = self.class {
+            document.classes.add_or_update(class);
+        }
+        if let Some(next) = self.next_handle {
+            document.set_handle_allocator(next);
+        }
+    }
+}
+
 pub(crate) fn store_table_style_roundtrip(document: &mut crate::document::CadDocument) {
     if document.version >= crate::types::DxfVersion::AC1024 {
         return;
@@ -917,13 +951,25 @@ pub(crate) fn store_table_style_roundtrip(document: &mut crate::document::CadDoc
 }
 
 /// Write the carriers of the modern cell styles of every table style that has them, for an output of
-/// `version`: the `CELLSTYLEMAP` object in the style's extension dictionary and, before R2007, the
-/// `ACAD_XREC_ROUNDTRIP` record with the legacy rows' data types. A DWG before R2010 and every DXF need
-/// them; an R2010+ DWG keeps the styles in the TABLESTYLE record.
+/// `version`, into the document: see [`plan_table_style_carriers`].
 pub(crate) fn store_table_style_carriers(
     document: &mut crate::document::CadDocument,
     version: crate::types::DxfVersion,
 ) {
+    if let Some(carriers) = plan_table_style_carriers(document, version) {
+        carriers.apply(document);
+    }
+}
+
+/// The carriers of the modern cell styles of every table style that has them, for an output of `version`: the
+/// `CELLSTYLEMAP` object in the style's extension dictionary and, before R2007, the `ACAD_XREC_ROUNDTRIP` record
+/// with the legacy rows' data types. A DWG before R2010 and every DXF need them; an R2010+ DWG keeps the styles in
+/// the TABLESTYLE record. The document is not changed: a writer that states the carriers does so without copying
+/// the document. `None` when no table style has modern cell styles.
+pub(crate) fn plan_table_style_carriers(
+    document: &crate::document::CadDocument,
+    version: crate::types::DxfVersion,
+) -> Option<TableStyleCarriers> {
     use crate::objects::{
         CellStyleMap, DataObject, DataObjectData, ObjectType, XRecordEntry, XRecordValue,
     };
@@ -951,44 +997,115 @@ pub(crate) fn store_table_style_carriers(
             _ => None,
         })
         .collect();
+    if styles.is_empty() {
+        return None;
+    }
     // Objects are created in handle order so the output is deterministic.
     styles.sort_by_key(|style| style.0);
-    // Handles in use, computed once when a carrier first needs a new handle; every handle created after that
-    // is added to it.
-    let mut used: Option<std::collections::HashSet<u64>> = None;
+    let mut plan = TableStyleCarriers::default();
+    // The allocator, as `CadDocument::allocate_handle` keeps it, and the handles in use (computed once, when a
+    // carrier first needs a handle in a gap of the handle space).
+    struct Handles {
+        next: u64,
+        allocated: bool,
+        used: Option<std::collections::HashSet<u64>>,
+    }
+    impl Handles {
+        fn fresh(&mut self) -> Handle {
+            let handle = Handle::new(self.next);
+            self.next += 1;
+            self.allocated = true;
+            if let Some(used) = self.used.as_mut() {
+                used.insert(handle.value());
+            }
+            handle
+        }
+    }
+    let mut handles = Handles {
+        next: document.next_handle().max(document.header.handle_seed),
+        allocated: false,
+        used: None,
+    };
+    // The object under `handle` as the output holds it: the plan's copy, the document's, or a new one.
+    macro_rules! working {
+        ($handle:expr) => {
+            match plan.objects.entry($handle) {
+                std::collections::hash_map::Entry::Occupied(entry) => Some(entry.into_mut()),
+                std::collections::hash_map::Entry::Vacant(entry) => document
+                    .objects
+                    .get(&$handle)
+                    .map(|object| entry.insert(object.clone())),
+            }
+        };
+    }
     for (handle, cells, row_types, kept_map_handle) in styles {
-        let dictionary = document.ensure_extension_dictionary(handle);
-        if let Some(used) = used.as_mut() {
+        let dictionary = match document.extension_dictionary_handle(handle) {
+            Some(dictionary) => dictionary,
+            None => {
+                let dictionary = handles.fresh();
+                let mut object = crate::objects::Dictionary::new();
+                object.handle = dictionary;
+                object.owner = handle;
+                object.hard_owner = true;
+                plan.objects.insert(dictionary, ObjectType::Dictionary(object));
+                plan.extension_dictionaries.insert(handle, dictionary);
+                dictionary
+            }
+        };
+        if let Some(used) = handles.used.as_mut() {
             used.insert(dictionary.value());
         }
-        let existing = match document.objects.get(&dictionary) {
+        let existing = match working!(dictionary) {
             Some(ObjectType::Dictionary(entries)) => entries.get(CELL_STYLE_MAP_KEY),
             _ => None,
         };
-        match existing.and_then(|map| document.objects.get_mut(&map)) {
+        let existing_map = match existing {
+            Some(map) => working!(map).filter(|object| {
+                matches!(object, ObjectType::DataObject(DataObject { data: DataObjectData::CellStyleMap(_), .. }))
+            }),
+            None => None,
+        };
+        match existing_map {
             Some(ObjectType::DataObject(DataObject {
                 data: DataObjectData::CellStyleMap(map),
                 ..
             })) => map.cells = cells,
             _ => {
-                // The map takes its type code from the CELLSTYLEMAP class;
-                // without it the writer leaves the map out.
-                if !document.classes.contains("CELLSTYLEMAP") {
-                    if let Some(class) = crate::classes::default_classes()
+                // The map takes its type code from the CELLSTYLEMAP class; without it the writer leaves the
+                // map out.
+                if !document.classes.contains("CELLSTYLEMAP") && plan.class.is_none() {
+                    plan.class = crate::classes::default_classes()
                         .into_iter()
-                        .find(|class| class.dxf_name == "CELLSTYLEMAP")
-                    {
-                        document.classes.add_or_update(class);
-                    }
+                        .find(|class| class.dxf_name == "CELLSTYLEMAP");
                 }
                 // The handle the map was read under (DXF, a DWG before R2010); for a style read from an R2010+
                 // DWG, which keeps the cell styles in the record and has no map, a handle in a gap of the
                 // handle space after the style, so that the written file keeps the handle seed it states.
-                let map = if !kept_map_handle.is_null() && !document.objects.contains_key(&kept_map_handle) {
+                let map = if !kept_map_handle.is_null()
+                    && !document.objects.contains_key(&kept_map_handle)
+                    && !plan.objects.contains_key(&kept_map_handle)
+                {
                     kept_map_handle
                 } else {
-                    let used = used.get_or_insert_with(|| document.used_handle_values());
-                    document.allocate_handle_in_gap(handle, used)
+                    let used_handles = handles.used.get_or_insert_with(|| {
+                        let mut used = document.used_handle_values();
+                        used.extend(plan.objects.keys().map(|handle| handle.value()));
+                        used
+                    });
+                    // First free handle after the style below the allocator, else a fresh one.
+                    let mut candidate = handle.value().saturating_add(1);
+                    let mut found = None;
+                    while candidate < handles.next {
+                        if used_handles.insert(candidate) {
+                            found = Some(Handle::new(candidate));
+                            break;
+                        }
+                        candidate += 1;
+                    }
+                    match found {
+                        Some(map) => map,
+                        None => handles.fresh(),
+                    }
                 };
                 let mut object = DataObject::new(DataObjectData::CellStyleMap(CellStyleMap {
                     cells,
@@ -996,10 +1113,8 @@ pub(crate) fn store_table_style_carriers(
                 object.handle = map;
                 object.owner = dictionary;
                 object.reactors = vec![dictionary];
-                document.objects.insert(map, ObjectType::DataObject(object));
-                if let Some(ObjectType::Dictionary(entries)) =
-                    document.objects.get_mut(&dictionary)
-                {
+                plan.objects.insert(map, ObjectType::DataObject(object));
+                if let Some(ObjectType::Dictionary(entries)) = working!(dictionary) {
                     entries.entries.retain(|(name, _)| name != CELL_STYLE_MAP_KEY);
                     entries.add_entry(CELL_STYLE_MAP_KEY, map);
                 }
@@ -1008,11 +1123,44 @@ pub(crate) fn store_table_style_carriers(
         if !with_row_types {
             continue;
         }
-        let record = document.ensure_xrecord(handle, ROUNDTRIP_RECORD_KEY);
-        if let Some(used) = used.as_mut() {
-            used.insert(record.value());
-        }
-        let Some(ObjectType::XRecord(record)) = document.objects.get_mut(&record) else {
+        // The round-trip record of the extension dictionary: the document's, or a new one under a fresh handle.
+        let named = match working!(dictionary) {
+            Some(ObjectType::Dictionary(entries)) => entries
+                .entries
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(ROUNDTRIP_RECORD_KEY))
+                .map(|(_, record)| *record),
+            _ => None,
+        };
+        let existing_record = match named {
+            Some(record) => working!(record)
+                .filter(|object| matches!(object, ObjectType::XRecord(_)))
+                .map(|_| record),
+            None => None,
+        };
+        let record = match existing_record {
+            Some(record) => record,
+            None => {
+                let record = handles.fresh();
+                let mut object = crate::objects::XRecord::named(ROUNDTRIP_RECORD_KEY);
+                object.handle = record;
+                object.owner = dictionary;
+                plan.objects.insert(record, ObjectType::XRecord(object));
+                if let Some(ObjectType::Dictionary(entries)) = working!(dictionary) {
+                    if let Some((_, target)) = entries
+                        .entries
+                        .iter_mut()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(ROUNDTRIP_RECORD_KEY))
+                    {
+                        *target = record;
+                    } else {
+                        entries.add_entry(ROUNDTRIP_RECORD_KEY, record);
+                    }
+                }
+                record
+            }
+        };
+        let Some(ObjectType::XRecord(record)) = plan.objects.get_mut(&record) else {
             continue;
         };
         let start = record
@@ -1048,6 +1196,8 @@ pub(crate) fn store_table_style_carriers(
         let at = start.unwrap_or(record.entries.len());
         record.entries.splice(at..at, group);
     }
+    plan.next_handle = handles.allocated.then_some(handles.next);
+    Some(plan)
 }
 
 // ============================================================================
@@ -1260,5 +1410,74 @@ mod tests {
     fn test_border_type_enum() {
         assert_eq!(TableBorderType::from(1), TableBorderType::Single);
         assert_eq!(TableBorderType::from(2), TableBorderType::Double);
+    }
+
+    /// A document with a table style that has modern cell styles (one with an extension dictionary already, one
+    /// without) and a table style whose carriers exist.
+    fn document_with_modern_styles(version: crate::types::DxfVersion) -> crate::document::CadDocument {
+        use crate::objects::{NamedTableCellStyle, ObjectType};
+        let mut doc = crate::document::CadDocument::with_version(version);
+        for name in ["R5A5-A", "R5A5-B"] {
+            let mut style = TableStyle::new(name);
+            style.handle = doc.allocate_handle();
+            let mut cell = NamedTableCellStyle::default();
+            cell.id = 1;
+            cell.name = "_TITLE".into();
+            style.modern_overrides = vec![(1, cell)];
+            let handle = style.handle;
+            doc.objects.insert(handle, ObjectType::TableStyle(style));
+            if name == "R5A5-A" {
+                doc.ensure_extension_dictionary(handle);
+            }
+        }
+        // A gap in the handle space.
+        doc.allocate_handle();
+        doc.allocate_handle();
+        doc
+    }
+
+    #[test]
+    fn the_carrier_plan_is_what_storing_the_carriers_does_and_leaves_the_document_alone() {
+        use crate::types::DxfVersion;
+        for version in [DxfVersion::AC1018, DxfVersion::AC1021, DxfVersion::AC1032] {
+            let doc = document_with_modern_styles(version);
+            let before = (doc.objects.len(), doc.next_handle(), doc.header.handle_seed, doc.xdic_by_handle.len());
+            let plan = plan_table_style_carriers(&doc, version).expect("styles with modern cell styles");
+            assert_eq!(
+                before,
+                (doc.objects.len(), doc.next_handle(), doc.header.handle_seed, doc.xdic_by_handle.len()),
+                "{version:?}: planning changes nothing"
+            );
+            // Storing is the plan applied.
+            let mut stored = doc.clone();
+            store_table_style_carriers(&mut stored, version);
+            for (handle, object) in &plan.objects {
+                assert_eq!(stored.objects.get(handle), Some(object), "{version:?}: object {handle:?}");
+            }
+            for (owner, dictionary) in &plan.extension_dictionaries {
+                assert_eq!(stored.extension_dictionary_handle(*owner), Some(*dictionary));
+            }
+            assert_eq!(stored.objects.len(), doc.objects.len() + plan.objects.keys().filter(|h| !doc.objects.contains_key(h)).count());
+            if let Some(next) = plan.next_handle {
+                assert_eq!(stored.next_handle(), next);
+                assert!(plan.max_handle() < next);
+            }
+            // The output is the same whether the carriers are stated by the writer or stored in the document
+            // first (a stored document plans the same objects again).
+            let written = crate::io::dxf::DxfWriter::new(&doc).write_to_vec().expect("write");
+            let written_stored = crate::io::dxf::DxfWriter::new(&stored).write_to_vec().expect("write");
+            assert_eq!(
+                String::from_utf8_lossy(&written),
+                String::from_utf8_lossy(&written_stored),
+                "{version:?}: the writer states the carriers without copying the document"
+            );
+            assert!(String::from_utf8_lossy(&written).contains("CELLSTYLEMAP"));
+        }
+    }
+
+    #[test]
+    fn a_document_without_modern_cell_styles_has_no_carriers() {
+        let doc = crate::document::CadDocument::new();
+        assert!(plan_table_style_carriers(&doc, doc.version).is_none());
     }
 }
