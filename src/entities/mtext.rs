@@ -141,6 +141,11 @@ pub struct MText {
     pub line_spacing_factor: f64,
     /// Line spacing style (DXF 73): AtLeast (1) or Exactly (2).
     pub line_spacing_style: LineSpacingStyle,
+    /// The line spacing style word of a DWG record when it is neither 1 nor 2 (`line_spacing_style` holds the
+    /// default for it). Provenance: never part of equality.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(default, skip))]
+    pub source_line_spacing_style: crate::objects::SourceWord,
     /// Normal vector
     pub normal: Vector3,
     /// Background fill flags (BL 90): bit 0x01 = use background fill color,
@@ -228,6 +233,7 @@ impl MText {
             drawing_direction: DrawingDirection::LeftToRight,
             line_spacing_factor: 1.0,
             line_spacing_style: LineSpacingStyle::AtLeast,
+            source_line_spacing_style: crate::objects::SourceWord::default(),
             normal: Vector3::UNIT_Z,
             background_fill_flags: 0,
             background_scale: 1.5,

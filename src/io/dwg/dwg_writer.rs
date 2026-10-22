@@ -435,7 +435,16 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
                 if let Some(ObjectType::UnderlayDefinition(definition)) =
                     document.objects.get(&underlay.definition_handle)
                 {
-                    if !definition.reactors.contains(&underlay.common.handle) {
+                    // A definition read from DWG keeps its reactors in the document map, not in its own list.
+                    let own = if definition.reactors.is_empty() {
+                        document
+                            .reactors_by_handle
+                            .get(&underlay.definition_handle)
+                            .map_or(&definition.reactors, |saved| saved)
+                    } else {
+                        &definition.reactors
+                    };
+                    if !own.contains(&underlay.common.handle) {
                         underlay_reactors
                             .push((underlay.definition_handle, underlay.common.handle));
                     }
@@ -502,11 +511,15 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
         }
     }
     for (definition, reactor) in underlay_reactors {
-        if let Some(ObjectType::UnderlayDefinition(definition)) =
-            output.objects.get_mut(&definition)
-        {
-            if !definition.reactors.contains(&reactor) {
-                definition.reactors.push(reactor);
+        if let Some(ObjectType::UnderlayDefinition(object)) = output.objects.get_mut(&definition) {
+            // The own list wins over the document map when it is not empty, so it must hold every reactor.
+            if object.reactors.is_empty() {
+                if let Some(saved) = output.reactors_by_handle.get(&definition) {
+                    object.reactors = saved.clone();
+                }
+            }
+            if !object.reactors.contains(&reactor) {
+                object.reactors.push(reactor);
             }
         }
     }
@@ -857,14 +870,17 @@ fn prepare_legacy_document(document: &mut CadDocument) {
     // application does; only older versions drop it.
     let keep_mleader_style = document.version >= DxfVersion::AC1018
         && document.classes.get_by_name("MLEADERSTYLE").is_some();
+    // A file of this very version that has the dictionaries is valid for it: they stay (as they do for the tables).
+    let source_has_them = document.dwg_source_version == Some(document.version);
     let root_handle = document.header.named_objects_dict_handle;
     let mut obsolete = Vec::new();
     if let Some(ObjectType::Dictionary(root)) = document.objects.get_mut(&root_handle) {
         root.entries.retain(|(name, handle)| {
-            let remove = (name == "ACAD_MLEADERSTYLE"
-                && document.version < DxfVersion::AC1021
-                && !keep_mleader_style)
-                || (name == "ACAD_TABLESTYLE" && document.version < DxfVersion::AC1018);
+            let remove = !source_has_them
+                && ((name == "ACAD_MLEADERSTYLE"
+                    && document.version < DxfVersion::AC1021
+                    && !keep_mleader_style)
+                    || (name == "ACAD_TABLESTYLE" && document.version < DxfVersion::AC1018));
             if remove {
                 obsolete.push(*handle);
             }
@@ -913,6 +929,24 @@ fn reconciled_classes(
         "SCALE",
     ];
 
+    use crate::objects::ObjectType;
+    // The records of a fixed class are written under fixed type codes, which the census by class number does not
+    // see: they are counted here, by the objects the document has.
+    let fixed_count = |name: &str| -> Option<i32> {
+        let count = |wanted: fn(&ObjectType) -> bool| document.objects.values().filter(|object| wanted(object)).count() as i32;
+        match name.to_ascii_uppercase().as_str() {
+            "LAYOUT" => Some(count(|object| matches!(object, ObjectType::Layout(_)))),
+            "ACDBPLACEHOLDER" => Some(count(|object| matches!(object, ObjectType::PlaceHolder(_)))),
+            "DICTIONARYVAR" => Some(count(|object| matches!(object, ObjectType::DictionaryVariable(_)))),
+            "ACDBDICTIONARYWDFLT" => Some(count(|object| matches!(object, ObjectType::DictionaryWithDefault(_)))),
+            "PLOTSETTINGS" => Some(count(|object| matches!(object, ObjectType::PlotSettings(_)))),
+            "SCALE" => Some(count(|object| matches!(object, ObjectType::Scale(_)))),
+            _ => None,
+        }
+    };
+    // A file of this very version that declares a class live without instances is valid for it: it stays so.
+    let source_is_valid = document.dwg_source_version == Some(document.version);
+
     document
         .classes
         .iter()
@@ -921,10 +955,15 @@ fn reconciled_classes(
             if let Some(&count) = instance_counts.get(&class.class_number) {
                 class.instance_count = count;
                 class.was_zombie = false;
+            } else if let Some(count) = fixed_count(&class.dxf_name).filter(|_| counts_complete) {
+                class.instance_count = count;
+                class.was_zombie = false;
             } else if counts_complete {
+                let declared_live_unused = source_is_valid && class.instance_count == 0 && !class.was_zombie;
                 class.instance_count = 0;
                 if class.dwg_version == 0
                     && class.maintenance_version == 0
+                    && !declared_live_unused
                     && !FIXED_CLASSES
                         .iter()
                         .any(|name| class.dxf_name.eq_ignore_ascii_case(name))
@@ -979,8 +1018,11 @@ fn uses_paged_format(version: DxfVersion) -> bool {
 /// dictionary, causing IntelliCAD (and other CAD apps) to report
 /// "null object id" for every object.
 ///
-/// Also updates EXTMIN/EXTMAX from the computed model-space extents so that
-/// "Zoom Extents" works correctly when the file is first opened.
+/// Also fills EXTMIN/EXTMAX from the computed model-space extents when the
+/// header has none (the 1e20 / -1e20 defaults), so that "Zoom Extents" works
+/// when a new drawing is first opened. Extents the header already holds are
+/// the drawing's own (AutoCAD keeps them until the next zoom or regen) and
+/// are written as they are.
 fn prepare_header(
     document: &CadDocument,
     handle_map: &[(u64, u32)],
@@ -1230,12 +1272,20 @@ fn prepare_header(
 
     // ── Correct HANDSEED ──
     let max_handle = handle_map.iter().map(|&(ha, _)| ha).max().unwrap_or(0);
-    if h.handle_seed <= max_handle {
-        h.handle_seed = max_handle + 1;
-    }
+    // A document read from a file keeps the seed its source stated unless a handle at or above it is written: the
+    // native seed advances while the reader moves default objects off handles of the source, and writing it back
+    // would grow it with every round trip.
+    h.handle_seed = match h.source_handle_seed {
+        Some(source) => source.max(max_handle + 1),
+        None if h.handle_seed <= max_handle => max_handle + 1,
+        None => h.handle_seed,
+    };
 
-    // ── Update model-space extents ──
-    if let Some(ref ext) = extents {
+    // ── Fill unset model-space extents ──
+    let extents_unset = h.model_space_extents_min.x > h.model_space_extents_max.x
+        || h.model_space_extents_min.y > h.model_space_extents_max.y
+        || h.model_space_extents_min.z > h.model_space_extents_max.z;
+    if let (true, Some(ext)) = (extents_unset, extents) {
         h.model_space_extents_min = ext.min;
         h.model_space_extents_max = ext.max;
     }

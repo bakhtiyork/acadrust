@@ -19,6 +19,14 @@ pub use section_writer::SectionWriter;
 pub use stream_writer::{value_type_for_code, DxfStreamWriter, DxfStreamWriterExt};
 pub use text_writer::DxfTextWriter;
 
+/// The native default application IDs a document read from a file never registered and nothing uses
+/// (see `section_writer::unused_default_app_ids`); the DWG writer leaves them out of its APPID table too.
+pub(crate) fn unused_default_app_ids(
+    document: &crate::document::CadDocument,
+) -> std::collections::HashSet<String> {
+    section_writer::unused_default_app_ids(document)
+}
+
 /// Angles are radians in the model and degrees in DXF. A plain `to_degrees` followed by the reader's `to_radians`
 /// can come back one unit in the last place away; this picks the degree value (the plain one first, then its
 /// neighbours) that reads back as exactly the stored radians, when one exists.

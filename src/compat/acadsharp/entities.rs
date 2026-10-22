@@ -433,6 +433,10 @@ fn dimension_attachment_point(
     {
         return 0;
     }
+    // ACadSharp keeps the word of the record as it is, also when it is no attachment point (0).
+    if let Some(raw) = base.source_attachment_point.0 {
+        return i64::from(raw);
+    }
     let current = base.attachment_point as i16;
     let Some(source) = base.dxf_source.as_ref() else {
         return i64::from(current);

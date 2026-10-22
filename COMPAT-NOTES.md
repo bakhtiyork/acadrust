@@ -247,6 +247,22 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5a-6 polyline vertex widths | A VERTEX of a 2D polyline states group 40/41 when its width differs from the default width of the POLYLINE record, and also a zero width read from a file that stated it (`source_widths` set). It stated them when non-zero only. | A vertex without the groups inherits the record's default width: an explicit zero next to a non-zero default came back as the default (AutoCAD-style R12 sample: polyline 0.2/0.1, three vertices with 0/0). A vertex built in memory with width 0 still means the default. Upstream PR candidate. |
 | R5a-6 binary DXF strings | The binary DXF reader decodes a string that is not UTF-8, in a file with no declared code page, byte per byte as Latin-1 (what the text reader does); it replaced the bytes with U+FFFD. The bytes of such a TEXT/ATTRIB/ATTDEF string stay with the pair (`undecoded_text_bytes`), as the text reader keeps them, so the ACadSharp view still shows the U+FFFD that ACadSharp decodes (G1 unchanged). | An R12 binary file without `$DWGCODEPAGE` lost its non-ASCII text on the read (sample_AC1009_binary.dxf: one TEXT, `0xD8`), and the text reader kept it. Upstream PR candidate. |
 | R5a-7 R13/R14 dynamic block name | The DWG reader finds the `AcDbDynamicBlockTrueName` application case-insensitively, so a dynamic block down-saved to R13/R14 (applications are upper case there: `ACDBDYNAMICBLOCKTRUENAME`) gets its public name back for its anonymous `*U` record, as in R2000+ files. | The lookup compared the exact spelling: in sample_AC1014.dwg the record stayed `*U17` where the record's own extended data and ACadSharp name it `my-dynamic-block`. Genuine reader bug (the spelling of application names in R13/R14); upstream-PR candidate. |
+| R5b DWG extended data order | The DWG writer keeps the place of an application's EED block when it merges a modelled value into it (layer description, annotative flag; the writer encodes the merged record into the retained raw block in its position) instead of dropping the raw block and writing the application after all the others. | A DIMSTYLE with `AcadAnnotative` between two other applications came back with the annotative block last (800 DimensionStyle and 638 Layer ExtendedData rows over the 288 cells). Upstream-PR candidate. |
+| R5b layer transparency block | A retained `AcCmTransparency` value that still decodes to the layer's transparency is written as it was (the DXF writer does so since R5a); the DWG writer wrote the explicit opaque value 33554687 over a packed zero. | Every layer of a read file changed its extended data; same rule as the DXF writer. Upstream-PR candidate. |
+| R5b header extents | The DWG writer writes the header's `EXTMIN`/`EXTMAX` as the document holds them and computes them from the model space entities only when the header has none (the 1e20 / -1e20 defaults). It recomputed them always, and an entity with an unbounded box (a ray) wrote +-1e10. | AutoCAD keeps the extents until the next zoom; 326 rows (89 / 95 cells). |
+| R5b TABLE style types | A row, column, cell or table style that the source stated without data (`data flags` 0) is written with the style type it had (`source_style_type`, `base_style_type`: column 3, row 2, cell 1, table 4); the DWG writer wrote 0. The DXF writer already used them. | ACadSharp's `CellStyle.Type` came back 0 for every column and row override of a modern TABLE. |
+| R5b underlay definition reactors | `prepare_database_references` adds the underlay entity to the reactors of its definition on top of the reactors the DWG reader keeps in the document map (a definition read from DWG has an empty own list), instead of replacing them with the underlay alone. | The reactor of the owning dictionary (`ACAD_PDFDEFINITIONS`) was lost on every write of a drawing with a PDF underlay (68 rows). Upstream-PR candidate. |
+| R5b referenced bit | The DWG writer writes the "referenced" bit (64 of the DXF group 70) of LAYER, STYLE, LTYPE and APPID records from the source flags; the pre-R2007 records state it, the writer wrote 0. | AutoCAD's R2000/R2004 files carry it (about 300 rows of Layer, TextStyle, LineType and AppId Flags in the baseline: 214 AppId, 95 Layer). Upstream-PR candidate. |
+| R5b style dictionaries of a same-version source | `prepare_legacy_document` leaves `ACAD_TABLESTYLE` and `ACAD_MLEADERSTYLE` in the root dictionary when the document was read from a DWG of the very version it is written as. | The profile drops them before R2004 / R2007, but a file of that version that has them is valid for it: sample_AC1015.dwg lost the dictionaries, the style objects and the references of the MULTILEADERs to the style. The drop is upstream's (commit 66af2cc used the same same-version rule for MLEADERSTYLE); it is not what AutoCAD does: AutoCAD's own R14/R2000/R2004 saves of the sample drawing (sample_AC1014/15/18.dwg) keep both dictionaries and their objects, so a down-save from another version still loses them (open, owner decision). |
+| R5b viewport grid bits | The VIEWPORT status word carries the grid behaviour bits (18..21) before R2007 too when the document was read from a DWG of the same version (the writer cleared them for every version before R2007). | The R2000 sample states them (status 819232); 98 rows. AutoCAD states them in its R2000 and R2004 down-saves too (sample_AC1015/18.dwg, from the R2018 drawing), so clearing them for any other source is not AutoCAD's behaviour either; the R2007+-only rule is pinned by the R3-VP test `acadsharp_viewports::dwg_version_controls_lighting_grid_and_full_status_projection` (open, owner decision). |
+| R5b unused default application ids | The DWG writer leaves out of the APPID table the default applications (`AcadAnnotative`, `AcCmTransparency`, `AcAecLayerStandard`) of a document whose source did not register them and nothing uses (`unused_default_app_ids`, shared with the DXF writer; annotative styles and raw EED blocks count as use). | Every DWG read added up to three application records the file never had; they took handles (a default dictionary of ACadSharp's read moved) and grew the table. |
+| R5b handle seed | The DWG writer writes `HANDSEED` as `max(seed of the source file, highest written handle + 1)` for a document read from a file (`source_handle_seed`), as the DXF writer does. | The native seed advances when the reader moves a default application id off the handle of a record of the file; writing it back grew the seed by one with every round trip (a test builds the case). |
+| R5b anonymous block markers | The BLOCK marker of an anonymous block is written with the number the file stated (`Block::source_name`, "*U7") while the native name is AutoCAD's numbering on reopening; the table record keeps the bare "*U". A down-saved dynamic block definition the file stated anonymous (`source_flags & 1`, public name in `AcDbDynamicBlockTrueName`) is written as stated: bare "*U" and anonymous bit, its extended data untouched. | ACadSharp names a record after its BLOCK marker, so the markers' numbering decided its names (400 BlockRecord and Block Name rows), and the anonymous flag of the dynamic definition was lost. |
+| R5b class instance counts | The DWG writer counts the objects of the fixed classes (LAYOUT, ACDBPLACEHOLDER, DICTIONARYVAR, ACDBDICTIONARYWDFLT, PLOTSETTINGS, SCALE: written under fixed type codes, so the census by class number never saw them) and states that number; a file of the version being written that declares a class live without instances keeps it live. | The R2004+ class records stated 0 instances for LAYOUT and PLACEHOLDER (AutoCAD states the object counts: LAYOUT 4, SCALE 33 in sample_AC1018/32.dwg) and zombie for classes the source declared live. AutoCAD's down-saves declare such classes live too (EXACXREFPANELOBJECT, 0 instances, in sample_AC1018.dwg), so the same-version condition is narrower than AutoCAD; upstream marks them zombie for an AUDIT reason that could not be checked here. |
+| R5b legacy TABLESTYLE alignment word | `RowCellStyle` keeps an alignment word of a legacy DWG record outside 1..9 in `source_alignment` (provenance, not equality; the typed `alignment` stays the default MiddleCenter) and the ACadSharp view shows the word. | ACadSharp writes 0 for a style it read from an R2010+ file and reads 0 back; the view showed 5. Same pattern, for the view only: `MText::source_line_spacing_style` (a style word neither 1 nor 2) and `DimensionBase::source_attachment_point` (a word outside 1..9). |
+| R5b GEODATA civil trailer | The R2009 GEODATA record (version 1) reads its civil trailer only when the object's main data has a byte or more left (`DwgMergedReader::main_remaining_bits`: up to the string stream of an R2007+ record, up to the handles before); a record that ends after the mesh (ACadSharp writes none) was dropped whole with a truncation error. The ACadSharp view shows `ScaleEstimationMethod` 1 for a DWG record of that layout (ACadSharp's R2009 branch never reads it and keeps the class default `None` = 1). | Genuine reader bug (an optional trailer treated as required); upstream-PR candidate. |
+| R5b acad-dump named colors | `acad-dump write-dwg` drops the name of a named (color book) color before R2004 and writes the color index, as ACadSharp does; the library keeps refusing such a write (issue #132, `Named color on entity ... requires DWG R2004 or later`). | 32 round trips (16 samples x R14 / R2000) could not write at all, where ACadSharp writes the index. The refusal is upstream's decision (tests `issue132*`); the tool makes the downgrade explicit instead of changing it. |
+| R5b synthesized BLOCK markers | A BLOCK marker the document does not hold (every block of a document read from DXF, or built in memory) is written with the record's full name ("*Paper_Space0", "*D3"); it was written with the bare table-record name ("*Paper_Space", "*D"). | AutoCAD's markers state the full name (ACadSharp's dumps of sample_AC1014..AC1032.dwg: Block "*Paper_Space0", "*D3"). ACadSharp names a record after its marker, so it threw `An item with the same key has already been added. Key: *Paper_Space` on every fork DWG written from a DXF with two or more layouts: 144 of the 288 G5 cells (24 DXF samples x 6 versions; 132 counted as mismatches without rows, 12 R14 cells as `same-failure` passes), whose fork -> C# rows were never compared. Upstream-PR candidate. |
 
 
 ## ACadSharp differential dump
@@ -808,3 +824,107 @@ Open:
 * UNVERIFIED: the R14 viewport values against an AutoCAD-written R14 DXF; that AutoCAD opens the fork's DXF with the TABLE legacy groups
   at defaults.
 
+
+## R5b DWG round trips (gate G5)
+
+Job R5b-1 (2026-10-22): tooling, baseline and the first writer/reader fixes. Fork tree at 740e8d2 plus this job's
+working-tree changes; CadKit `Tools/roundtrip-report.sh --impl rust --dwg`, `Tools/g5-roundtrip.py`.
+
+### What G5 measures, and what it cannot
+
+For each of the 48 gate samples and each version V (AC1014, AC1015, AC1018, AC1024, AC1027, AC1032; 288 cells) both
+implementations write the sample (`write-dwg --version V --pin`) and read the files. A cell is judged in four directions:
+C# reference (R = C# reads C#'s own DWG), C# -> fork (the fork reads C#'s DWG; compat dump = R), fork -> C# (C# reads the
+fork's DWG = R) and fork -> fork (the fork reads its own DWG; compat dump = R). The comparator is `cadcore-dump diff-json`
+(exact under DUMP-FORMAT's rules; no allow-list). `same-failure` (both fail at the same step: write, or read) passes;
+`better` (C# fails, the fork does it; decision D-a) is reported and not counted as a pass. Diagnostic columns, not part
+of G5: the native round trip (the fork's native dump of the source against that of its re-read DWG, no rules, only the values
+`--pin` overwrites left out) and the bytes.
+
+**R carries ACadSharp's own losses.** The reference dump R is what ACadSharp reads back from its own file. Where its writer or
+reader loses data the fork keeps, a faithful fork can never equal R. The driver therefore attributes every differing row of a
+reader direction with D, the committed C# dump of the source: `fork-differs` (R equals D, the fork's side does not: a fork
+defect), `csharp-lost` (the fork's side equals D and R does not: ACadSharp's round trip lost it) and `both-differ`.
+The attribution is exact only in the 42 cells whose source version is V: elsewhere a value ACadSharp converts for V and the
+fork keeps counts as `csharp-lost`. In those 42 cells, after the review fix of the synthesized BLOCK markers (before it C# could
+not read any fork DWG written from DXF), fork -> C# has 27,944 differing rows: 6,401 `csharp-lost`, 20,646 `fork-differs`, 897
+both. The csharp-lost rows of the DWG sources are ACadSharp losses (checked by hand, sample_AC1032.dwg and
+BLOCKFLIPPARAMETER.dwg at AC1032: VISUALSTYLE and DIMASSOC objects are skipped by its DWG writer, `DwgObjectWriter.Objects.cs`
+`skipEntry`, and the reactors to them go with them; LAYOUT writes `MinLimits` twice, `writeLayout`; TABLE and TABLESTYLE top
+borders carry the edge flag of the right border, `TableStyle.CellStyle.cs` `TopBorder = new(CellEdgeFlags.Right)`; SHAPE is
+written only with `WriteShapes` and dynamic block data only with `WriteDynamicBlockData`, both false by default; 3DSOLID,
+REGION, BODY and surfaces are not written; `$PSTYLEMODE` is written only when the read flag equals 1 while the reader stores
+0x2000). Every reader direction cell of a DWG source has such rows, so fork -> C# and fork -> fork cannot pass as specified
+(equality with R) and G5 needs the redefinition G4 got in R5a-2/3. But the rows of the DXF sources are mostly `fork-differs`
+(all 20,646): fork DWG writer differences from DXF input (TABLE rows 8,208, class table 3,549, cell styles, BLOCK/ENDBLK and
+MULTILEADER colours, hatch seed points, materials) mixed with ACadSharp DXF-reader losses where the fork's file has more than D
+(VISUALSTYLE objects that D lacks). Not worked yet. The counts below are the gate as specified.
+
+### Counts
+
+| | baseline | final |
+|---|---|---|
+| C# reference (ACadSharp reads its own DWG) | 256 match, 12 better, 20 error (AC1014: ACadSharp throws reading its own R14 file) | the same (C# is untouched) |
+| C# -> fork | 135 / 288 (AC1014 0, AC1015 0, AC1018 3, AC1024 44, AC1027 44, AC1032 44), 32 better | **204 / 288** (0, 25, 44, 45, 45, 45), 32 better |
+| fork -> C# | 2 / 288 (both fail like C#, AC1014), 14 better | 0 / 288, 32 better (review: the 12 AC1014 `same-failure` cells were C# failing on the fork's bare paper-space markers; it now reads them: `better`) |
+| fork -> fork | 0 / 288, 16 better | 0 / 288, 32 better |
+| native round trip (diagnostic) | 0 exact | 2 exact (sample_AC1015.dwg and sample_AC1032.dwg at their own version) |
+| bytes | 0 identical | 0 identical |
+
+`better` cells: the 12 R12 sources (`sample_AC1009_ascii.dxf`, `_binary.dxf` x 6 versions: ACadSharp's DWG writer throws
+`KeyNotFoundException: 'Standard'`, the fork writes), AC1014 cells where ACadSharp cannot read its own file (20), and the R14
+fork files C# reads while it fails on its own (12, DXF sources).
+
+Differing rows by attribution (fork -> C#, all cells): baseline 34,663 = 19,989 fork-differs + 14,498 csharp-lost + 176 both;
+agent's final 33,645 = 17,419 + 15,085 + 1,141; after the review fix 153,410 = 113,547 + 32,330 + 7,533 (the 144 DXF-source
+cells now reach the comparison). In the 21 same-version cells of DWG sources fork-differs went **995 -> 12 rows** (left: class
+instance counts, the multi-line attribute tag/value of sample_AC1015/sample_AC1032 (see open), a dangling layer handle, MTEXT
+`\U+00B0` that the fork decodes); the 21 same-version cells of DXF sources had no rows before the review fix and have 20,634
+fork-differs rows now. In the other 246 cells D is another version: there `fork-differs` and `csharp-lost` both include
+version-driven values; read them as indications, not as lists of defects. For C# -> fork: 876 rows (786 fork-differs) -> 269
+(179).
+
+Largest families before -> after (fork-differs rows, fork -> C#): DimensionStyle ExtendedData 800 -> 0, Layer ExtendedData
+638 -> 0, BlockRecord/Block Name 400 -> 0, AppIdsTable/AppId 73 -> 0, header ModelSpaceExtMin/Max 326 -> 0, PdfUnderlayDefinition
+Reactors 68 -> 0, TableEntity Columns 96 -> 0, Layer/AppId Flags ~300 -> 0, HandleSeed 49 -> 13; C# -> fork: TableStyle cell
+style 330 -> 0 (110 cells), MText LineSpacingStyle 180 -> 0, dimension AttachmentPoint 55 -> 0, GeoData 6 -> 0.
+
+### Fixes (R = reader, W = writer, V = ACadSharp view; rows in "Behaviour changes" above)
+
+W extended data order, layer transparency packed zero, header extents, TABLE style types, underlay definition reactors,
+referenced bit, style dictionaries of a same-version source, viewport grid bits, unused default application ids, handle seed,
+anonymous block markers and stated-anonymous dynamic definitions, class instance counts; R+V legacy TABLESTYLE alignment word,
+MTEXT line spacing style word, dimension attachment point word; R GEODATA civil trailer, V its scale estimation; tool: named
+colours before R2004; review: W synthesized BLOCK markers (`synthesized_block_markers_state_the_full_name`). Tests (25 new): `tests/r5b_dwg_roundtrip.rs` (15 synthetic round trips at every affected version),
+`tests/r5b_dwg_read.rs` (5: the ACadSharp view and the application table), `tests/acad_dump_write_dwg.rs` (3: the
+`write-dwg` contract), and 2 unit tests in `io/dwg/dwg_stream_readers/object_reader/objects.rs` (the alignment word, the
+GEODATA trailer). Each test of a fix fails with that fix reverted (checked one by one); two tests guard behaviour kept
+(layer transparency change, unset header extents).
+
+### Open families (none has an allow-list)
+
+* **csharp-lost rows** (above): not fixable in the writer. Evidence that the fork is right: a fork file of the source version
+  read by ACadSharp equals D (e.g. dynamic-blocks/BLOCKFLIPPARAMETER.dwg at AC1032: all 66 remaining differences from R are
+  csharp-lost; ACadSharp's own file reads without VisualStyle, dictionaries, TABLE rows, block parameters).
+* **Cross-version conversion** (246 cells; the largest rows): TABLE rows between the legacy and the R2010+ layout
+  (`TableEntity.Rows` 6,741, 12 cells: R14/R2000/R2004 -> R2010+), class table (the fork writes the pre-R2013 profile with its
+  own numbering and drops unused classes; `ClassNumber`, `DxfClass`, `classes.<order>`), DICTIONARY hard-owner flag (R14 -> R2000,
+  715 rows), CanScale/IsExplodable (R14..R2004 -> R2007+ defaults, 243 rows), MULTILEADER attachments, materials, XRecord and
+  dictionary objects that exist in one profile only. The AutoCAD-saved samples are the evidence for these: the six
+  `sample_ACxxxx.dwg` are one drawing saved at six versions, so the right result of `sample_AC1032.dwg` at V is the dump of
+  `sample_V.dwg` (not R). A first look (AC1032 -> AC1018, 807 rows): 181 TABLE row rows (empty merged cells have no content in
+  the fork's legacy layout), 148 XRecord objects and 56 dictionaries that exist only in AutoCAD's R2004 file, 34 AppId and 19
+  Layer referenced-bit rows (R2007+ does not state the bit, so there is nothing to write), classes. Not worked in this job.
+* **R14 (AC1014) files written by ACadSharp**: the fork's R14 reader drops `ACAD_PLOTSTYLENAME` (ACDBDICTIONARYWDFLT /
+  ACDBPLACEHOLDER written under class codes its class table does not state): 26 cells.
+* **AecObjects** (5 cells): `Cannot encode custom entity AEC_WALL ... compatible raw DWG data is required` at every version but
+  the source's; also G4's two failing cells.
+* **Multi-line attributes**: R2000/R2010 files keep the attribute as `TAG_001...`; the fork merges and writes one attribute
+  (Tag `MULTI_LINE_ATT_001` -> `MULTI_LINE_ATT`, Value moved). Design question, not changed.
+* **Named colours before R2004**: the library refuses the write (upstream, issue #132); only the tool downgrades.
+* **ACadSharp view differences left**: MTEXT / dimension words are shown as stated only for files read from DWG
+  (`source_*` words); the DXF reader folds the same words (not needed by any round trip).
+* UNVERIFIED: that AutoCAD opens the fork's pre-R2007 files with the referenced bit and the viewport grid bits, the R2000 file
+  with `ACAD_TABLESTYLE` (a file that already had it); G8 (speed/memory) was not re-run: the reader changes are two 4-byte
+  provenance words (MText, DimensionBase), one 4-byte word per legacy row style and one comparison in the GEODATA reader;
+  the writer gained one pass over the entities to find unused default application ids (shared with the DXF writer).

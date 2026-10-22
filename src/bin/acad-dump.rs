@@ -1,5 +1,7 @@
 use acadrust::compat::acadsharp::{new_document, read_document_file, write_document, write_file};
+use acadrust::io::dwg::DwgWriter;
 use acadrust::io::dxf::DxfWriter;
+use acadrust::types::DxfVersion;
 use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
@@ -35,6 +37,98 @@ fn write_dxf(args: &[std::ffi::OsString]) -> i32 {
         };
         writer.write_to_file(paths[1]).map_err(|e| e.to_string())
     });
+    match written {
+        Ok(Ok(())) => 0,
+        Ok(Err(error)) => {
+            eprintln!("write failed: {error}");
+            1
+        }
+        Err(_) => {
+            eprintln!("write failed: Panic: writer panicked");
+            1
+        }
+    }
+}
+
+/// Julian date of the pinned instants (2000-01-01 00:00:00), as `--pin` of AcadDump writes it.
+const PINNED_JULIAN: f64 = 2451544.5;
+
+/// `write-dwg <in.dwg|in.dxf> <out.dwg> [--version ACxxxx] [--pin]`: failsafe read as `dump` does, optionally change
+/// the document version, optionally pin the volatile header and summary values (create/update dates, editing
+/// times, fingerprint and version GUIDs) as AcadDump's `--pin` does, then write the document as DWG. Exit 0 on
+/// success, 1 on a read/write failure (stderr `read failed: ...`/`write failed: ...`), 2 on a usage error.
+fn write_dwg(args: &[std::ffi::OsString]) -> i32 {
+    let usage = || {
+        eprintln!("usage: acad-dump write-dwg <in.dwg|in.dxf> <out.dwg> [--version ACxxxx] [--pin]");
+        2
+    };
+    let mut version = None;
+    let mut pin = false;
+    let mut paths = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--version" && i + 1 < args.len() {
+            i += 1;
+            match args[i].to_str().and_then(DxfVersion::parse) {
+                Some(parsed) if args[i].to_str().is_some_and(|name| name.starts_with("AC")) => version = Some(parsed),
+                _ => return usage(),
+            }
+        } else if arg == "--pin" {
+            pin = true;
+        } else if arg.to_string_lossy().starts_with("--") {
+            return usage();
+        } else {
+            paths.push(arg);
+        }
+        i += 1;
+    }
+    if paths.len() != 2 {
+        return usage();
+    }
+    let mut document = match read_document_file(Path::new(paths[0])) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("read failed: {error}");
+            return 1;
+        }
+    };
+    if let Some(version) = version {
+        document.version = version;
+    }
+    // The library refuses to write a named (color book) color before R2004, where the format has no room for the
+    // name (issue #132). ACadSharp writes the entity's color index and drops the name; this tool does the same
+    // before writing, so the round trip compares what is left.
+    if document.version < DxfVersion::AC1018 {
+        for entity in document.entities_mut() {
+            let drop_name = |common: &mut acadrust::entities::EntityCommon| {
+                common.color_name = None;
+                common.color_book_handle = None;
+            };
+            drop_name(entity.common_mut());
+            if let acadrust::EntityType::Insert(insert) = entity {
+                for attribute in &mut insert.attributes {
+                    drop_name(&mut attribute.common);
+                }
+            }
+        }
+    }
+    if pin {
+        let header = &mut document.header;
+        header.create_date_julian = PINNED_JULIAN;
+        header.update_date_julian = PINNED_JULIAN;
+        header.universal_create_date_julian = PINNED_JULIAN;
+        header.universal_update_date_julian = PINNED_JULIAN;
+        header.total_editing_time = 0.0;
+        header.user_elapsed_time = 0.0;
+        // The raw pairs retained from a DWG header would otherwise win over the pinned values.
+        header.dwg_timestamps = None;
+        header.fingerprint_guid = "00000000-0000-0000-0000-000000000000".into();
+        header.version_guid = "00000000-0000-0000-0000-000000000000".into();
+        document.summary_info.created_date_julian = Some(PINNED_JULIAN);
+        document.summary_info.modified_date_julian = Some(PINNED_JULIAN);
+    }
+    let written = std::panic::catch_unwind(|| DwgWriter::write_to_file(paths[1], &document).map_err(|e| e.to_string()));
     match written {
         Ok(Ok(())) => 0,
         Ok(Err(error)) => {
@@ -118,6 +212,9 @@ fn run() -> Result<(), String> {
     }
     if args.len() > 1 && args[1] == "acis-same" {
         std::process::exit(acis_same(&args));
+    }
+    if args.len() > 1 && args[1] == "write-dwg" {
+        std::process::exit(write_dwg(&args));
     }
     if args.len() > 1 && args[1] == "write-dxf" {
         std::process::exit(write_dxf(&args));

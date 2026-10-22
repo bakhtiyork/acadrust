@@ -57,7 +57,8 @@ pub(super) fn properties(doc: &CadDocument, text: &MText) -> Vec<(&'static str, 
     } else if dwg.is_some_and(|v| v < DxfVersion::AC1015) {
         0
     } else {
-        text.line_spacing_style as i16
+        // ACadSharp keeps the word of the record as it is, also when it is no style (0).
+        text.source_line_spacing_style.0.unwrap_or(text.line_spacing_style as i16)
     };
     let recovered = text.background_from_xdata;
     let fill_present = !recovered
