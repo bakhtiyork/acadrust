@@ -228,10 +228,13 @@ fn pattern_hatch_is_clipped_to_its_boundary() {
 }
 
 #[test]
-fn documents_carrying_ac1009_are_still_written_as_r13_by_default() {
+fn documents_carrying_ac1009_are_written_as_r12() {
     let doc = CadDocument::with_version(DxfVersion::AC1009);
     let text = String::from_utf8(DxfWriter::new(&doc).write_to_vec().unwrap()).unwrap();
-    assert_eq!(header_version(&pairs(&text)), "AC1012");
+    let pairs = pairs(&text);
+    assert_eq!(header_version(&pairs), "AC1009");
+    assert!(!pairs.contains(&(2, "OBJECTS".into())));
+    assert!(!pairs.contains(&(2, "CLASSES".into())));
 }
 
 #[test]
@@ -255,10 +258,16 @@ fn an_r12_file_round_trips_as_genuine_r12() {
 }
 
 #[test]
-fn binary_r12_is_rejected() {
+fn binary_r12_reads_back() {
     let doc = sample_document();
-    let result = DxfWriter::new_binary(&doc)
+    let bytes = DxfWriter::new_binary(&doc)
         .with_version(DxfVersion::AC1009)
-        .write_to_vec();
-    assert!(result.is_err());
+        .write_to_vec()
+        .expect("binary R12 write");
+    assert!(bytes.starts_with(b"AutoCAD Binary DXF\r\n\x1a\0"));
+    // R12 binary DXF has one-byte group codes: after the sentinel comes code 0, then the string SECTION
+    assert_eq!(&bytes[22..30], b"\0SECTION");
+    let read = DxfReader::from_reader(Cursor::new(bytes)).unwrap().read().unwrap();
+    assert_eq!(read.version, DxfVersion::AC1009);
+    assert!(read.layers.get("My_Layer").is_some());
 }

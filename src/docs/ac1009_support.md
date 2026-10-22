@@ -152,5 +152,8 @@ graphs. Native entity availability and native string/index limits are checked
 by the R12 codecs. Support for a version does not imply lossless conversion
 from a newer version.
 
-DXF export of an R12 document currently promotes the output to R13 or later;
-it is not an AC1009 DXF writer. See `tests/issue68.rs`.
+DXF export of an AC1009 document is an AC1009 file (text or binary, written by
+the section writer in its R12 mode: tables and blocks without handles, no CLASSES or OBJECTS, one-byte binary
+group codes), so an R12 file reads back unchanged. An entity R12 lacks is converted on its own by
+`src/io/dxf/writer/r12.rs`; the explicit `with_version(AC1009)` of a document of another version goes through that
+converter as a whole. See `tests/issue68.rs` and `COMPAT-NOTES.md` (R5a-6).

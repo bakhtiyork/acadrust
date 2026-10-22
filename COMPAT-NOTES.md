@@ -241,6 +241,11 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5a-5 R13/R14 records | A DWG before R2007 leaves DIMFXL and DIMJOGANG at the model defaults (1.0, 45 degrees) like a DXF without the groups; an R13/R14 viewport has the world UCS axes; the DXF reader restores the view parameters of an R13/R14 viewport from its MVIEW extended data (as the DWG reader). | The DWG reader's zero placeholders and the missing restore made the same drawing differ after DXF. |
 | R5a-5 annotation scale | The DXF reader reflects the `CANNOSCALE` entry of the variable dictionary into the header (`current_annotation_scale`, `annotation_scale_value`), as the DWG reader does. | AutoCAD's DXF has no header variable for it; the header said 1:1 for a drawing in 1:100. |
 | R5a-5 `acad-dump acis-same` | New command `acis-same <sab.hex> <sat.txt>` (`acis::sab_matches_sat`): exit 0 when the binary ACIS data and the SAT text parse and print the same SAT text. | Lets the gate verify a SAB written as SAT (RR-035) without a second converter. |
+| R5a-6 binary DXF version | `DxfWriter` writes binary DXF at the version of the document (or the requested one), as it writes the text form: R13, R14, R2000 and R2004 files are binary R13, R14, R2000 and R2004, strings in the declared code page. It promoted every binary file before R2007 to R2010 (`output_version`, "BricsCAD rejects the older binary headers"). | Binary DXF exists for every version from R10 (R13 and later with two-byte group codes); the promotion was a policy, not a format constraint, and lost the version, the R2007+ defaults it implied and the code page of the file. UNVERIFIED: BricsCAD's acceptance of binary R2000 and R2004 (the reason the promotion was added; no BricsCAD here). |
+| R5a-6 R12 DXF writer | An `AC1009` document is written as an R12 file, text or binary (`DxfWriter::write_r12`): the section writer in its R12 mode (`SectionWriter::set_r12`) behind `R12Stream`, which drops groups 100, 102, 105, 330 and 360. Sections HEADER, TABLES, BLOCKS, ENTITIES (no CLASSES, OBJECTS, ACDSDATA, thumbnail, BLOCK_RECORD table). Binary R12 has one-byte group codes (`DxfBinaryWriter::new_r12`; 255 escapes a longer code). An entity R12 lacks is written by the converter of `writer/r12.rs` in its R12 form, one entity at a time (`SectionWriter::write_owned_entity`, `r12::write_r12_entity`; R5a-6 review), so the rest of the document keeps its records, handles and extended data; `with_version(AC1009)` of a document of another version goes through that converter as a whole, now text or binary (it refused binary). The AC1009 DWG writer builds its records from the R13-structured text of the document and keeps asking for that (`DxfWriter::with_r13_structure`). | Upstream issue #68: the writer declared R12 documents R13. An R12 file now reads back to the same native model (G4-RR and idem exact for AC1009 ASCII and binary, and for the six BricsCAD `acR12_dxf` fixtures). Upstream PR candidate. |
+| R5a-6 R12 records | R12 form of the records: header variables only from the R12 list (`R12_HEADER_VARIABLES`: AutoCAD's R12 DXF plus `$DWGCODEPAGE`, which is written only when the source stated it, and the pre-R13 view state of `HeaderVariables::legacy`, written per variable when it differs from the default state), `$HANDLING` (0 when the source stated no handle); TABLE headers `name, count` only and table records without handles; tables in the order of the source (`legacy_dxf_tables`), missing ones only when they hold records; LTYPE without the BYLAYER and BYBLOCK defaults, DIMSTYLE without the Standard default the source lacked; APPID in source order; DIMSTYLE groups 4 to 7 always, no 270; LAYER without 290, 370, 420; LTYPE without the zero flag word 74; no entity groups 48 and 370, no DIMENSION 42, no VERTEX 91; BLOCK has no handle and no description, ENDBLK states the handle the source stated (`legacy_dxf_blocks`; the document keeps the one it assigned), the space blocks are `$MODEL_SPACE` and `$PAPER_SPACE`; VIEWPORT is centre, size, status and number with the view in a regenerated `ACAD`/`MVIEW` record (`legacy_viewport::record_r12`, as the R12 DWG writer does). Handles (R5a-6 review): with `$HANDLING` 1 every entity, VERTEX and SEQEND states the handle the document holds, an entity added after the read included; with 0 (the source stated none) no record states one. A handle the writer allocates (a VERTEX or SEQEND without one) and the BLOCK end marker of a block the source did not have are stated only for a document without an R12 DXF source (`source_explicit_handle_max`): otherwise the reader allocated them and allocates them again, so the re-read allocates the same numbers. | Structure and values of the R12 files in the fixtures (AutoCAD-style sample and BricsCAD exports): the groups above do not exist in R12, and writing a handle the reader allocated would shift every allocated handle of the re-read. |
+| R5a-6 polyline vertex widths | A VERTEX of a 2D polyline states group 40/41 when its width differs from the default width of the POLYLINE record, and also a zero width read from a file that stated it (`source_widths` set). It stated them when non-zero only. | A vertex without the groups inherits the record's default width: an explicit zero next to a non-zero default came back as the default (AutoCAD-style R12 sample: polyline 0.2/0.1, three vertices with 0/0). A vertex built in memory with width 0 still means the default. Upstream PR candidate. |
+| R5a-6 binary DXF strings | The binary DXF reader decodes a string that is not UTF-8, in a file with no declared code page, byte per byte as Latin-1 (what the text reader does); it replaced the bytes with U+FFFD. The bytes of such a TEXT/ATTRIB/ATTDEF string stay with the pair (`undecoded_text_bytes`), as the text reader keeps them, so the ACadSharp view still shows the U+FFFD that ACadSharp decodes (G1 unchanged). | An R12 binary file without `$DWGCODEPAGE` lost its non-ASCII text on the read (sample_AC1009_binary.dxf: one TEXT, `0xD8`), and the text reader kept it. Upstream PR candidate. |
 
 
 ## ACadSharp differential dump
@@ -451,7 +456,7 @@ older AutoCAD accepts it needs a manual check in AutoCAD.
 
 Open, listed by cause (RR unless noted). Nothing here is allow-listed.
 
-* **DXF-sourced, 8 cells.** Binary DXF of R2000/R2004 sources (4 cells: AC1015/AC1018 ascii and binary inputs, binary
+* **DXF-sourced, 8 cells (all closed in R5a-6: binary DXF is written at the version of the document and an AC1009 document as R12; see the end).** Binary DXF of R2000/R2004 sources (4 cells: AC1015/AC1018 ascii and binary inputs, binary
   output) is written as R2010 binary DXF (`DxfWriter::output_version`, BricsCAD rejects the older binary headers); the
   document version is the only difference. This is writer policy, not a format fact, so it is not an RR rule (the RC
   rules G4-009..011 keep it). The four R12 cells (AC1009, ASCII and binary output; idem fails there too): the writer
@@ -507,7 +512,7 @@ Classes, each with the reason (classes 1-3 are decided by experiment, the rest b
 5. **Fork writer policy kept.** AcDbDynamicBlockRoundTripPurgePreventer and other association objects other
    applications cannot restore are not written (`is_unrestorable_assoc_object`); binary DXF of an R2000/R2004
    drawing is written as R2010 (BricsCAD rejects the older binary headers), which adds the R2007+ groups; R12
-   sources are written as R13 structure (upstream issue #68).
+   sources are written as R13 structure (upstream issue #68). (Both closed in R5a-6.)
 6. **DWG originals.** D holds ACadSharp's DWG-reader values, which the compat view reproduces and a DXF cannot carry:
    `CreateDateTime`/`UpdateDateTime` are half a day later (DWG date conversion), `DIMFIT` is read from the DIMATFIT
    slot, entity transparency of an ENC word 0 is "opaque", the DWG has-attributes bit and attachment/spacing
@@ -628,7 +633,7 @@ Open (DWG-sourced):
   never saw, and four AEC objects (Wall, AecWallStyle, AecCleanupGroup, AecBinRecord) change their type, which no RC rule
   may allow; RC unexplained rows would go from 21 to about 1,370. AutoCAD's acceptance of such proxies is UNVERIFIED too.
   The `CANNOSCALE` row of this drawing is fixed (DXF reader).
-* **AC1014, AC1015, AC1018 binary (3 cells)**: the binary DXF of an R2000/R2004 drawing is written as R2010 (writer
+* **AC1014, AC1015, AC1018 binary (3 cells; closed in R5a-6)**: the binary DXF of an R2000/R2004 drawing is written as R2010 (writer
   policy, see "Open" above), so `doc/version` differs, plus the knock-ons of the R2010 form (VX control handle,
   `value_handle` of a block cell, AC1014: dimension style `dimfit`/`dimblk_name`, viewport scale, and the R14 leader's
   `byblock_color`, which an R2010 DXF carries in group 77 as `override_color` only). The ASCII cells of the same samples pass.
@@ -646,3 +651,65 @@ UNVERIFIED: the VX table, the preview and `$TDUCREATE` rules for AC1014 rest on 
 TABLES list and the oracle (there is no R14 DXF in the fixtures); AutoCAD's acceptance of `91` = the style word in R2007+
 legacy cells, of the second CELL_VALUE of a block cell and of the carriers is not checked; the DATATABLE group of types
 7 to 9. Upstream PR candidates: case-insensitive application names; layout dictionary repair; legacy cell word.
+
+### R5a-6: DXF written at the source version (binary R13 to R2004, and R12)
+
+Gate G4 after the job (clean build of the final tree, 48 samples): **RR 94 / 96** (ASCII 47, binary 47; 83 before),
+**RC 72 / 96** (36 + 36; 68), **idem 96 / 96** (92). G1 45 / 49 with an `rs-gap.tsv` identical to R5a-5's. Fork suite
+`cargo test --features acadsharp-compat --no-fail-fast`: 2,491 passed, 0 failed, 60 ignored after the review (2,482 before; the nine
+new tests are `tests/r5a6_dxf_versions.rs`), 0 warnings in `cargo build --lib` and the feature build. No cell regresses
+in RR, RC or idem; the RC unexplained rows of the cells that still fail are equal to before.
+
+Closed: the 7 binary RR cells (AC1014, AC1015, AC1018 DWG; AC1015 and AC1018 ASCII and binary DXF, binary output): the
+file is written at the version of the document, so the R2007+ defaults of the R2010 form no longer appear; and the 4
+R12 cells (AC1009 ASCII and binary DXF, ASCII and binary output): RR, RC and idem are exact (RC went from 9,895
+unexplained rows to 0). The six R12 DXF files a real CAD wrote (`tests/fixtures/r12/cad-created`, BricsCAD `acR12_dxf`)
+also read back to the same native model in both modes (RR and idem, checked outside the gate).
+
+Removed from `Tools/g4-allowlist.json` (CadKit): the 38 RC rules whose reason is "Binary DXF of a pre-R2007 drawing is
+written as R2010" (G4-009..014, 016..020, 053..058, 157..173, 482..484, 486). None is used in the final run (before, the used ones
+covered 1 to 546 rows each), and their reason is no longer true, so they would only widen the list. The two comparers'
+`--self-test` pass (447 and 48 rules). No rule was added; no native-dump exclusion or fold was added. G4-413, G4-414 and
+G4-423 are unused as before.
+
+Binary version: the only reason the promotion gave was BricsCAD's refusal of older binary headers (UNVERIFIED here: no
+BricsCAD). A binary DXF of R13 to R2004 differs from R2010's in the two-byte codes it shares and in its strings, which
+are in the declared code page.
+
+R12 writer (rows "R5a-6 R12 ..." above): an AC1009 document made of R12 entities (POINT, LINE, CIRCLE, ARC, SOLID/TRACE,
+3DFACE, TEXT, SHAPE, INSERT with ATTRIB, ATTDEF, POLYLINE/VERTEX/SEQEND in its 2D, 3D, polyface and polygon-mesh forms,
+VIEWPORT, the seven R12 DIMENSION kinds) is written as it is. A newer entity of an AC1009 document is converted on its
+own by `writer/r12.rs` (its R12 parts carry no handle and no extended data; a hatch becomes its parts in place, no `*X`
+block), and the document around it keeps its R12 records, handles and extended data (the first version of R5a-6 sent the
+whole document through the converter when it held one newer entity, which dropped every handle, all extended data and
+the MVIEW records; fixed in the review). `with_version(AC1009)` of another version is converted as a whole, as before
+except that it now writes binary too; the module doc lists the rules: LWPOLYLINE becomes a 2D POLYLINE with its bulges and widths, RAY and
+XLINE long LINEs, everything else is decomposed with `EntityType::explode` until only R12 entities remain (MTEXT into TEXT,
+ELLIPSE and SPLINE into polylines, HATCH into lines or an INSERT of an anonymous block of SOLIDs, ...) and what cannot be
+decomposed (3D solids, images, OLE, ...) is left out; names are mapped to the R12 alphabet there (the native path keeps
+the names of the document). ARC_DIMENSION and LARGE_RADIAL_DIMENSION are not R12 kinds and take that path.
+
+Header and tables of the native path: only the variables of an R12 file are written (`R12_HEADER_VARIABLES`), so what an
+AC1009 document holds beyond them (R13+ variables a DWG R12 or an edit set, `HeaderVariables::legacy.user_unit_*`) has no
+place in the file. The pre-R13 view state is written as `$VIEWCTR`, `$SNAPMODE`, ... when it differs from the default
+state (those are R11 variables; R12 keeps them in the VPORT; AutoCAD's acceptance of them in an R12 header is UNVERIFIED).
+
+Open:
+
+* **AecObjects, 2 cells** (RR and RC): as in R5a-5.
+* **RC, 24 cells**: unchanged (the R2000+ DWG- and DXF-sourced cells of R5a-5, all with explained causes there).
+* **R12 file written from a document built in memory or read from an R12 DWG** states all handles of its entities and
+  none of its table records. The table records of an R12 file have no handles, so the reader allocates them above the
+  highest handle the file states: when an entity added to a document read from an R12 DXF states its handle (above the
+  source's highest), the table records of the re-read get other numbers than in the document that was written.
+* **Names on the native path**: the section writer keeps the names of the document; a document built in memory at
+  AC1009 with names outside the R12 alphabet (spaces, more than 31 characters) is written with them, while the
+  converter (`with_version(AC1009)` of another version, and the parts of a converted entity) maps them.
+* **R12 VIEWPORT**: the view is written only through the regenerated MVIEW record (what the record has: target,
+  direction, twist, height, centre, lens, clips, status, circle sides, fast zoom, UCS icon, snap and grid state, snap
+  angle, base and spacing, hide-plot, frozen layers); the fork's other viewport fields (render mode, UCS references,
+  shade plot, ...) are lost in an R12 file, as in an R12 DWG.
+* UNVERIFIED (no AutoCAD or BricsCAD here): that AutoCAD accepts the R12 files (the groups written beyond the fixtures'
+  alphabet are R12 groups at their defaults: TEXT 73, ATTDEF/ATTRIB 7, 41, 50, 51, 72, 73, 74, POLYLINE 73 to 75, VERTEX
+  50, DIMENSION 3 and 53), and BricsCAD's acceptance of binary R2000 and R2004 DXF. Upstream PR candidates: the R12 DXF
+  writer (issue #68), the polyline vertex width rule, the binary Latin-1 fallback.

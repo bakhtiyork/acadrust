@@ -82,7 +82,7 @@ acadrust = { version = "0.6.5", features = ["serde", "import"] }
 `R/W` means read and write support. Entity availability varies by file version.
 AC1009 DWG fidelity is incomplete; see the
 [R12 support status and remaining work](src/docs/ac1009_support.md).
-DXF export of R12 documents is promoted to R13 or later.
+DXF export of an R12 document is an R12 file (text or binary).
 
 ## Examples
 
