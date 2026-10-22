@@ -2787,11 +2787,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             flags |= 16; // externally dependent
         }
         flags |= block_record.source_flags & !31;
-        // A DWG block keeps its anonymous bit apart from the typed flag (native hydration renames anonymous
-        // blocks); the marker written for it must still say anonymous.
-        if document.dwg_source_version.is_some() {
-            flags |= block_record.source_flags & 1;
-        }
+        // A block keeps its anonymous bit apart from the typed flag: native hydration renames the anonymous
+        // table name of a dynamic definition (DWG) and the DXF reader takes a public name for not anonymous.
+        // The marker written for it must still say what its source said.
+        flags |= block_record.source_flags & 1;
 
         // Write BLOCK entity: its own appearance, attachments and XDATA when the source had them.
         let begin_common = self.block_marker_common(block_record, document, false);
@@ -7571,6 +7570,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                 self.writer.write_i32(90, value.class_version)?;
                 self.writer.write_bool(290, value.is_on)?;
                 self.writer.write_color(63, value.color)?;
+                if let Some(rgb) = value.color.to_true_color_value() {
+                    self.writer.write_i32(421, rgb)?;
+                }
                 self.writer.write_double(40, value.intensity)?;
                 self.writer.write_bool(291, value.has_shadow)?;
                 self.writer.write_i32(91, value.julian_day)?;
@@ -8779,6 +8781,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         let keep = |code: i32, at_default: bool| {
             !from_dxf || style.dxf_code_present(code) || !at_default
         };
+        // A DWG before R2010 has no text bottom/top attachment fields (groups 272, 273): they stay at the
+        // defaults a DXF without the groups gets, and are left out unless changed.
+        let dwg_lacks_attachments = self.dwg_source.is_some_and(|version| version < DxfVersion::AC1024);
+        let keep_attachment = |code: i32, at_default: bool| keep(code, at_default) && !(dwg_lacks_attachments && at_default);
 
         // Content type
         self.writer.write_i16(170, style.content_type as i16)?;
@@ -8932,11 +8938,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if self.dxf_version >= DxfVersion::AC1024 {
             self.writer
                 .write_i16(271, style.text_attachment_direction as i16)?;
-            if keep(272, style.text_bottom_attachment == defaults.text_bottom_attachment) {
+            if keep_attachment(272, style.text_bottom_attachment == defaults.text_bottom_attachment) {
             self.writer
                 .write_i16(272, style.text_bottom_attachment as i16)?;
         }
-            if keep(273, style.text_top_attachment == defaults.text_top_attachment) {
+            if keep_attachment(273, style.text_top_attachment == defaults.text_top_attachment) {
             self.writer
                 .write_i16(273, style.text_top_attachment as i16)?;
         }
@@ -11125,7 +11131,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         if self.needs_sab() {
             // AC1027+: SAB binary format stored in ACDSDATA section
-            self.writer.write_bool(290, false)?;
+            self.writer.write_bool(290, solid.acis_data.acis_empty_bit)?;
             // The entity's unique identifier (group 2, R2013+); the zero GUID when it has none.
             self.writer.write_string(2, modeler_uid(&solid.uid))?;
 
@@ -11156,7 +11162,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbModelerGeometry")?;
 
         if self.needs_sab() {
-            self.writer.write_bool(290, false)?;
+            self.writer.write_bool(290, region.acis_data.acis_empty_bit)?;
             // The entity's unique identifier (group 2, R2013+); the zero GUID when it has none.
             self.writer.write_string(2, modeler_uid(&region.uid))?;
             self.queue_sab_data(&region.acis_data, region.common.handle);
@@ -11175,7 +11181,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.writer.write_subclass("AcDbModelerGeometry")?;
 
         if self.needs_sab() {
-            self.writer.write_bool(290, false)?;
+            self.writer.write_bool(290, body.acis_data.acis_empty_bit)?;
             // The entity's unique identifier (group 2, R2013+); the zero GUID when it has none.
             self.writer.write_string(2, modeler_uid(&body.uid))?;
             self.queue_sab_data(&body.acis_data, body.common.handle);
@@ -12963,6 +12969,24 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         self.writer.write_section_end()?;
         Ok(())
+    }
+
+    /// Write the THUMBNAILIMAGE section (R2000 and later): group 90 holds the image size in bytes, the
+    /// image follows in 310 chunks of at most 127 bytes. The image is the document's preview as stored
+    /// (a DIB without BITMAPFILEHEADER for a bitmap, as AutoCAD writes it).
+    pub fn write_thumbnail(&mut self, document: &CadDocument) -> Result<()> {
+        let Some(preview) = document.preview.as_ref().filter(|preview| !preview.data.is_empty()) else {
+            return Ok(());
+        };
+        if self.dxf_version < DxfVersion::AC1015 {
+            return Ok(());
+        }
+        self.writer.write_section_start("THUMBNAILIMAGE")?;
+        self.writer.write_i32(90, preview.data.len() as i32)?;
+        for chunk in preview.data.chunks(127) {
+            self.writer.write_binary(310, chunk)?;
+        }
+        self.writer.write_section_end()
     }
 
     fn write_acds_thumbnail_schema(&mut self) -> Result<()> {

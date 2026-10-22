@@ -26,7 +26,7 @@ use crate::io::dwg::dwg_stream_readers::object_reader::tables;
 ///
 /// These records use `<base layer> @ <decimal viewport handle>` names but
 /// resolve as the base layer in AutoCAD's public layer table.
-fn viewport_override_base_layer(name: &str) -> Option<&str> {
+pub(crate) fn viewport_override_base_layer(name: &str) -> Option<&str> {
     let (base, viewport) = name.rsplit_once(" @ ")?;
     (!base.is_empty() && !viewport.is_empty() && viewport.bytes().all(|byte| byte.is_ascii_digit()))
         .then_some(base)
@@ -430,6 +430,16 @@ impl HandleMaps {
     }
 }
 
+/// The MTEXT embedded in an ATTRIB / ATTDEF. Its DXF object states the X-axis direction (group 11) only for
+/// a rotated text, so the default direction of an unrotated one is no stated direction.
+fn embedded_mtext_from_data(data: entities::MTextData, common: EntityCommon, maps: &HandleMaps) -> MText {
+    let mut mtext = mtext_from_data(data, common, maps);
+    if mtext.rotation == 0.0 && mtext.dwg_x_direction == Some(crate::types::Vector3::new(1.0, 0.0, 0.0)) {
+        mtext.dwg_x_direction = None;
+    }
+    mtext
+}
+
 fn mtext_from_data(data: entities::MTextData, common: EntityCommon, maps: &HandleMaps) -> MText {
     let mut e = MText::new();
     e.common = common;
@@ -655,6 +665,38 @@ impl DwgDocumentBuilder {
                         viewport.id = available_ids.next().unwrap_or(0);
                     }
                 }
+            }
+        }
+    }
+
+    /// A layout's viewport list: a DWG before R2004 has none (and a DXF never has one), the DXF reader
+    /// lists the viewport entities of the layout's block; give the layout the same list.
+    fn list_layout_viewports(document: &mut CadDocument) {
+        let lists: Vec<(Handle, Vec<Handle>)> = document
+            .objects
+            .iter()
+            .filter_map(|(handle, object)| match object {
+                crate::objects::ObjectType::Layout(layout) if layout.viewports.is_empty() => {
+                    let block = document
+                        .block_records
+                        .iter()
+                        .find(|block| block.handle == layout.block_record)?;
+                    let viewports: Vec<Handle> = block
+                        .entity_handles
+                        .iter()
+                        .copied()
+                        .filter(|entity| {
+                            matches!(document.get_entity(*entity), Some(EntityType::Viewport(_)))
+                        })
+                        .collect();
+                    (!viewports.is_empty()).then_some((*handle, viewports))
+                }
+                _ => None,
+            })
+            .collect();
+        for (handle, viewports) in lists {
+            if let Some(crate::objects::ObjectType::Layout(layout)) = document.objects.get_mut(&handle) {
+                layout.viewports = viewports;
             }
         }
     }
@@ -2389,36 +2431,9 @@ impl DwgDocumentBuilder {
             }
         }
 
-        // GROUP names live in the owning dictionary; the GROUP body only
-        // carries a separate unnamed flag. Restore the public name without
-        // using it to synthesize or overwrite that flag.
-        {
-            let group_names: HashMap<Handle, String> = document
-                .objects
-                .values()
-                .filter_map(|object| match object {
-                    crate::objects::ObjectType::Dictionary(dictionary) => {
-                        Some(dictionary.entries.iter())
-                    }
-                    _ => None,
-                })
-                .flatten()
-                .filter_map(|(name, handle)| {
-                    matches!(
-                        document.objects.get(handle),
-                        Some(crate::objects::ObjectType::Group(_))
-                    )
-                    .then(|| (*handle, name.clone()))
-                })
-                .collect();
-            for (handle, name) in group_names {
-                if let Some(crate::objects::ObjectType::Group(group)) =
-                    document.objects.get_mut(&handle)
-                {
-                    group.name = name;
-                }
-            }
-        }
+        // GROUP names live in the owning dictionary (a GROUP body only carries a separate unnamed
+        // flag, which this does not touch).
+        document.resolve_dictionary_names();
 
         document.resolve_xrecord_names();
 
@@ -3509,6 +3524,7 @@ impl DwgDocumentBuilder {
         // are assembled.
         Self::hydrate_block_markers(document);
         Self::number_paper_space_viewports(document);
+        Self::list_layout_viewports(document);
         document.ensure_model_layout();
 
         document.original_objects = document
@@ -4860,7 +4876,7 @@ impl DwgDocumentBuilder {
                     e.is_multiline = data.att_type > 1;
                     e.line_count = e.default_value.matches("\\P").count() as i16 + 1;
                     e.embedded_mtext = data.embedded_mtext.map(|mtext| {
-                        Box::new(mtext_from_data(mtext, EntityCommon::default(), &maps))
+                        Box::new(embedded_mtext_from_data(mtext, EntityCommon::default(), &maps))
                     });
                     let _ = document.add_entity(EntityType::AttributeDefinition(e));
                 }
@@ -4926,7 +4942,7 @@ impl DwgDocumentBuilder {
                     e.is_multiline = data.att_type > 1;
                     e.line_count = e.value.matches("\\P").count() as i16 + 1;
                     e.embedded_mtext = data.embedded_mtext.map(|mtext| {
-                        Box::new(mtext_from_data(mtext, EntityCommon::default(), &maps))
+                        Box::new(embedded_mtext_from_data(mtext, EntityCommon::default(), &maps))
                     });
                     // Collect pending — will be attached to parent INSERT
                     // after Pass 2 (owner_handle = INSERT handle).
@@ -5178,6 +5194,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
                     e.acis_data.revision = data.revision;
+                    e.uid = e.acis_data.revision.guid_string().unwrap_or_default();
                     e.acis_data.materials = data.materials;
                     e.acis_data.wireframe_data_present = data.wireframe_data_present;
                     e.acis_data.wireframe_point_present = data.wireframe_point_present;
@@ -5235,6 +5252,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
                     e.acis_data.revision = data.revision;
+                    e.uid = e.acis_data.revision.guid_string().unwrap_or_default();
                     e.acis_data.materials = data.materials;
                     e.acis_data.wireframe_data_present = data.wireframe_data_present;
                     e.acis_data.wireframe_point_present = data.wireframe_point_present;
@@ -5283,6 +5301,7 @@ impl DwgDocumentBuilder {
                     e.acis_data.sab_data = data.sab_data;
                     e.acis_data.is_binary = data.is_binary;
                     e.acis_data.revision = data.revision;
+                    e.uid = e.acis_data.revision.guid_string().unwrap_or_default();
                     e.acis_data.materials = data.materials;
                     e.acis_data.wireframe_data_present = data.wireframe_data_present;
                     e.acis_data.wireframe_point_present = data.wireframe_point_present;
@@ -5661,6 +5680,15 @@ impl DwgDocumentBuilder {
                     obj.hard_owner = data.hard_owner;
                     obj.duplicate_cloning = data.duplicate_cloning;
                     for entry in data.entries {
+                        // A DWG states ownership per dictionary (the hard-owner
+                        // flag); the DXF reader records the entries it owns
+                        // (group 360, or the flag, or a canonical key). Fill the
+                        // list the same way so one drawing has one model.
+                        if obj.hard_owner
+                            || crate::objects::Dictionary::is_canonical_hard_owner_key(&entry.name)
+                        {
+                            obj.hard_owner_entries.push(entry.name.clone());
+                        }
                         obj.add_entry(entry.name, Handle::from(entry.handle));
                     }
                     document.objects.insert(
@@ -5768,7 +5796,11 @@ impl DwgDocumentBuilder {
                     obj.paper_image_origin_y = ps.paper_image_y;
                     obj.shade_plot_mode = ps.shade_plot_mode;
                     obj.shade_plot_resolution = ps.shade_plot_resolution;
-                    obj.shade_plot_dpi = ps.shade_plot_dpi;
+                    // Before R2004 the record has no shade-plot DPI; the style keeps the default a
+                    // DXF without group 78 gets.
+                    if self.obj_reader.version().r2004_plus() {
+                        obj.shade_plot_dpi = ps.shade_plot_dpi;
+                    }
                     obj.plot_view_handle =
                         Handle::from(ps.plot_view_handle);
                     if obj.plot_view_name.is_empty()
@@ -5943,7 +5975,9 @@ impl DwgDocumentBuilder {
                     obj.shade_plot_resolution = crate::objects::ShadePlotResolutionLevel::from_code(
                         data.shade_plot_resolution,
                     );
-                    obj.shade_plot_dpi = data.shade_plot_dpi;
+                    if self.obj_reader.version().r2004_plus() {
+                        obj.shade_plot_dpi = data.shade_plot_dpi;
+                    }
                     obj.flags = crate::objects::PlotFlags::from_bits(data.plot_flags as i32);
                     obj.standard_scale_factor = data.scale_factor;
                     obj.paper_image_origin_x = data.paper_image_x;
@@ -5975,6 +6009,13 @@ impl DwgDocumentBuilder {
                     let mut obj = crate::objects::MultiLeaderStyle::new("");
                     obj.handle = Handle::from(handle);
                     obj.owner_handle = owner_handle;
+                    // Neither format stores the style's name in the object (it is the dictionary key). The
+                    // DXF reader keeps the description as the legacy native name, or "Standard" without one.
+                    obj.name = if data.description.is_empty() {
+                        crate::objects::MultiLeaderStyle::STANDARD.to_string()
+                    } else {
+                        data.description.clone()
+                    };
                     obj.description = data.description;
                     obj.content_type = crate::objects::LeaderContentType::from(data.content_type);
                     obj.multileader_draw_order =
@@ -6039,14 +6080,18 @@ impl DwgDocumentBuilder {
                     obj.property_changed = data.property_changed;
                     obj.is_annotative = data.is_annotative;
                     obj.break_gap_size = data.break_gap_size;
-                    obj.text_attachment_direction =
-                        crate::objects::TextAttachmentDirectionType::from(
-                            data.text_attachment_direction,
-                        );
-                    obj.text_top_attachment =
-                        crate::objects::TextAttachmentType::from(data.text_top_attachment);
-                    obj.text_bottom_attachment =
-                        crate::objects::TextAttachmentType::from(data.text_bottom_attachment);
+                    // Before R2010 the record has no text attachment fields: the style keeps the defaults a
+                    // DXF without groups 271/272/273 gets.
+                    if self.obj_reader.version().r2010_plus() {
+                        obj.text_attachment_direction =
+                            crate::objects::TextAttachmentDirectionType::from(
+                                data.text_attachment_direction,
+                            );
+                        obj.text_top_attachment =
+                            crate::objects::TextAttachmentType::from(data.text_top_attachment);
+                        obj.text_bottom_attachment =
+                            crate::objects::TextAttachmentType::from(data.text_bottom_attachment);
+                    }
                     obj.unknown_flag_298 = data.unknown_flag_298;
                     document.objects.insert(
                         Handle::from(handle),

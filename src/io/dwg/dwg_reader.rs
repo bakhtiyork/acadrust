@@ -834,6 +834,90 @@ fn decode_block_units_xdata(document: &mut crate::document::CadDocument) {
     }
 }
 
+/// An ACAD_TABLE names its block in DXF (group 2, an anonymous `*T` block); a DWG references the block
+/// record by handle only. Name it, as the DXF reader does for the same drawing.
+fn resolve_table_block_names(document: &mut crate::document::CadDocument) {
+    use crate::entities::EntityType;
+    // Most drawings have no table: look before touching any entity.
+    let tables: Vec<crate::types::Handle> = document
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::Table(table) if table.block_name.is_empty() && table.block_record_handle.is_some() => {
+                Some(table.common.handle)
+            }
+            _ => None,
+        })
+        .collect();
+    for handle in tables {
+        let name = match document.get_entity(handle) {
+            Some(EntityType::Table(table)) => table
+                .block_record_handle
+                .and_then(|record| document.block_records.iter().find(|block| block.handle == record))
+                .map(|block| block.name.clone()),
+            _ => None,
+        };
+        if let (Some(name), Some(EntityType::Table(table))) = (name, document.get_entity_mut(handle)) {
+            table.block_name = name;
+        }
+    }
+}
+
+/// A DWG header names the current records and the dimension defaults by handle, and the name fields the
+/// reader fills stay at their defaults ("Standard", "ByBlock"); the DXF HEADER stores the names. Fill each
+/// name from the record its handle points at, as the DXF reader does for the same drawing.
+fn resolve_header_names(document: &mut crate::document::CadDocument) {
+    use crate::tables::TableEntry;
+    use crate::types::Handle;
+    fn name_of<T: TableEntry>(table: &crate::tables::Table<T>, handle: Handle) -> Option<String> {
+        if handle.is_null() {
+            return None;
+        }
+        table
+            .iter()
+            .find(|entry| entry.handle() == handle)
+            .map(|entry| entry.name().to_string())
+    }
+    let h = &document.header;
+    let layer = name_of(&document.layers, h.current_layer_handle);
+    let text_style = name_of(&document.text_styles, h.current_text_style_handle);
+    let linetype = name_of(&document.line_types, h.current_linetype_handle);
+    let dimstyle = name_of(&document.dim_styles, h.current_dimstyle_handle);
+    let dim_text_style = name_of(&document.text_styles, h.dim_text_style_handle);
+    let dim_linetype = name_of(&document.line_types, h.dim_linetype_handle);
+    let dim_linetype1 = name_of(&document.line_types, h.dim_linetype1_handle);
+    let dim_linetype2 = name_of(&document.line_types, h.dim_linetype2_handle);
+    let arrow = name_of(&document.block_records, h.dim_arrow_block_handle);
+    let arrow1 = name_of(&document.block_records, h.dim_arrow_block1_handle);
+    let arrow2 = name_of(&document.block_records, h.dim_arrow_block2_handle);
+    let leader_arrow = name_of(&document.block_records, h.dim_leader_arrow_block_handle);
+    let multiline_style = match document.objects.get(&h.current_multiline_style_handle) {
+        Some(crate::objects::ObjectType::MLineStyle(style)) if !h.current_multiline_style_handle.is_null() => {
+            Some(style.name.clone())
+        }
+        _ => None,
+    };
+    let h = &mut document.header;
+    for (field, name) in [
+        (&mut h.current_layer_name, layer),
+        (&mut h.current_text_style_name, text_style),
+        (&mut h.current_linetype_name, linetype),
+        (&mut h.current_dimstyle_name, dimstyle),
+        (&mut h.dim_text_style_name, dim_text_style),
+        (&mut h.dim_linetype_name, dim_linetype),
+        (&mut h.dim_linetype1_name, dim_linetype1),
+        (&mut h.dim_linetype2_name, dim_linetype2),
+        (&mut h.dim_arrow_block, arrow),
+        (&mut h.dim_arrow_block1, arrow1),
+        (&mut h.dim_arrow_block2, arrow2),
+        (&mut h.dim_leader_arrow_block, leader_arrow),
+        (&mut h.multiline_style, multiline_style),
+    ] {
+        if let Some(name) = name {
+            *field = name;
+        }
+    }
+}
+
 /// Parse the decompressed `AcDb:SummaryInfo` section (R2004+): eight fixed
 /// strings, a total-edit timer, two raw dates, and custom properties.
 fn parse_summary_info(
@@ -1544,6 +1628,8 @@ impl<R: Read + Seek> DwgReader<R> {
         decode_block_units_xdata(&mut document);
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
+        resolve_header_names(&mut document);
+        resolve_table_block_names(&mut document);
 
         // Document summary information (Author/Title/Subject/… → the
         // Document-category dynamic-text fields).
@@ -1555,6 +1641,8 @@ impl<R: Read + Seek> DwgReader<R> {
             let (summary_info, timestamps) = parse_summary_info(&buf, utf16, encoding);
             document.summary_info = summary_info;
             document.dwg_summary_timestamps = timestamps;
+            // DXF has one $LASTSAVEDBY; its reader keeps it in the header and in the summary.
+            document.header.last_saved_by = document.summary_info.last_saved_by.clone();
         }
 
         // R2000/R14 down-saved gradient hatches store their gradient in the
@@ -1616,6 +1704,8 @@ impl<R: Read + Seek> DwgReader<R> {
         decode_block_units_xdata(&mut document);
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
+        resolve_header_names(&mut document);
+        resolve_table_block_names(&mut document);
 
         // Document summary information (Author/Title/Subject/… → the
         // Document-category dynamic-text fields).
@@ -1627,6 +1717,8 @@ impl<R: Read + Seek> DwgReader<R> {
             let (summary_info, timestamps) = parse_summary_info(&buf, utf16, encoding);
             document.summary_info = summary_info;
             document.dwg_summary_timestamps = timestamps;
+            // DXF has one $LASTSAVEDBY; its reader keeps it in the header and in the summary.
+            document.header.last_saved_by = document.summary_info.last_saved_by.clone();
         }
 
         // Transfer reader notifications to the document so callers can

@@ -2474,6 +2474,71 @@ impl CadDocument {
         });
     }
 
+    /// Every handle the document uses: table controls and entries, block records and their markers,
+    /// entities with their children, and objects.
+    pub(crate) fn used_handle_values(&self) -> std::collections::HashSet<u64> {
+        let mut used = std::collections::HashSet::new();
+        macro_rules! table {
+            ($table:expr) => {{
+                used.insert($table.handle().value());
+                for entry in $table.iter() {
+                    used.insert(entry.handle().value());
+                }
+            }};
+        }
+        table!(self.layers);
+        table!(self.line_types);
+        table!(self.text_styles);
+        table!(self.dim_styles);
+        table!(self.app_ids);
+        table!(self.views);
+        table!(self.vports);
+        table!(self.ucss);
+        table!(self.vx_table);
+        table!(self.block_records);
+        for record in self.block_records.iter() {
+            used.insert(record.block_entity_handle.value());
+            used.insert(record.block_end_handle.value());
+            used.extend(record.entity_handles.iter().map(|handle| handle.value()));
+        }
+        for entity in self.entities.iter() {
+            used.insert(entity.common().handle.value());
+            entity.for_each_child_handle(|handle| {
+                used.insert(handle.value());
+            });
+        }
+        for (handle, object) in self.objects.iter() {
+            used.insert(handle.value());
+            // A dictionary entry may name an object the reader did not keep; its handle is still taken.
+            if let ObjectType::Dictionary(dictionary) = object {
+                used.extend(dictionary.entries.iter().map(|(_, entry)| entry.value()));
+            }
+        }
+        used.remove(&0);
+        used
+    }
+
+    /// The lowest handle above `above` that is not in `used` and is below the allocator's next handle (a gap
+    /// in the handle space, such as a deleted object leaves), or a fresh handle when there is none. The handle
+    /// taken is added to `used`.
+    pub(crate) fn allocate_handle_in_gap(
+        &mut self,
+        above: Handle,
+        used: &mut std::collections::HashSet<u64>,
+    ) -> Handle {
+        let top = self.next_handle.max(self.header.handle_seed);
+        let mut candidate = above.value().saturating_add(1);
+        while candidate < top {
+            if used.insert(candidate) {
+                return Handle::new(candidate);
+            }
+            candidate += 1;
+        }
+        let fresh = self.allocate_handle();
+        used.insert(fresh.value());
+        fresh
+    }
+
     /// Allocate a new unique handle
     pub fn allocate_handle(&mut self) -> Handle {
         // The DWG reader inserts objects straight into `objects` without
@@ -4480,6 +4545,34 @@ impl CadDocument {
         }
     }
 
+    /// Assign dictionary keys to the objects that are named only by their dictionary key: a GROUP (a DXF
+    /// GROUP has no name group; the DWG body carries only its unnamed flag). Both readers call this after
+    /// loading.
+    pub fn resolve_dictionary_names(&mut self) {
+        let mut names: Vec<(Handle, String)> = self
+            .objects
+            .values()
+            .filter_map(|object| match object {
+                ObjectType::Dictionary(dictionary) => Some(
+                    dictionary
+                        .entries
+                        .iter()
+                        .filter(|(_, handle)| matches!(self.objects.get(handle), Some(ObjectType::Group(_))))
+                        .map(|(name, handle)| (*handle, name.clone()))
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        names.sort_by_key(|(handle, name)| (handle.value(), name.clone()));
+        for (handle, name) in names {
+            if let Some(ObjectType::Group(group)) = self.objects.get_mut(&handle) {
+                group.name = name;
+            }
+        }
+    }
+
     /// Project typed properties whose authoritative storage is a named
     /// XRecord onto their public object models.
     pub fn resolve_xrecord_backed_properties(&mut self) {
@@ -6130,6 +6223,7 @@ impl CadDocument {
         }
         self.resolve_book_colors();
         self.resolve_xrecord_names();
+        self.resolve_dictionary_names();
         self.resolve_xrecord_backed_properties();
         self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
     }

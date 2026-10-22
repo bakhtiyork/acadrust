@@ -163,6 +163,13 @@ impl<'a> DxfWriter<'a> {
         // so entity layer/linetype lookups miss and reference a name the
         // written table no longer defines (issue #80).
         crate::io::dwg::dwg_writer::prepare_table_keys(&mut prepared);
+        // The modern cell styles of a table style have no place in the DXF TABLESTYLE record: they travel
+        // in a CELLSTYLEMAP object of its extension dictionary (an R2010+ DWG keeps them in the record).
+        if prepared.objects.values().any(|object| {
+            matches!(object, crate::objects::ObjectType::TableStyle(style) if !style.modern_overrides.is_empty())
+        }) {
+            crate::objects::store_table_style_carriers(prepared.to_mut(), output_version);
+        }
         // Table entries added after the document was built or read
         // (`Layer::new` + `layers.add`, `AppId::new` + `app_ids.add`) still
         // carry NULL handles. Written as they are, each becomes a `5 / 0`
@@ -210,6 +217,7 @@ impl<'a> DxfWriter<'a> {
         section_writer.write_entities(document)?;
         section_writer.write_objects(document)?;
         section_writer.write_acdsdata()?;
+        section_writer.write_thumbnail(document)?;
 
         // Write EOF
         writer.write_string(0, "EOF")?;

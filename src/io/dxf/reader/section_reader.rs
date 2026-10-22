@@ -1643,9 +1643,13 @@ impl<'a> SectionReader<'a> {
             hdr.dxf_source_variables.as_mut().unwrap().insert(var_name.clone());
             match var_name.as_str() {
                 "$VIEWCTR" | "$VIEWDIR" | "$TARGET" | "$SNAPBASE" | "$SNAPUNIT" | "$GRIDUNIT" | "$AXISUNIT" => {
-                    let state = hdr.legacy.get_or_insert_with(Default::default);
                     let mut point = Vector3::ZERO;
                     self.read_header_point3(&mut point)?;
+                    // The pre-R13 current view/drafting state; a later file keeps it in its VPORT.
+                    if document.version > DxfVersion::AC1009 {
+                        continue;
+                    }
+                    let state = hdr.legacy.get_or_insert_with(Default::default);
                     match var_name.as_str() {
                         "$VIEWCTR" => state.view_center = point,
                         "$VIEWDIR" => state.view_direction = point,
@@ -1659,6 +1663,12 @@ impl<'a> SectionReader<'a> {
                 }
                 "$SNAPMODE" | "$SNAPSTYLE" | "$SNAPISOPAIR" | "$GRIDMODE" | "$AXISMODE" | "$VIEWRES" | "$FASTZOOM" | "$VIEWMODE" | "$FLATLAND" | "$UCSICON" | "$UNITMODE" => {
                     if let Some(value) = self.reader.read_pair()?.and_then(|pair| pair.as_i16()) {
+                        if document.version > DxfVersion::AC1009 {
+                            if var_name == "$UNITMODE" {
+                                hdr.unit_mode = value;
+                            }
+                            continue;
+                        }
                         let state = hdr.legacy.get_or_insert_with(Default::default);
                         match var_name.as_str() {
                             "$SNAPMODE" => state.snap_mode = value,
@@ -1681,6 +1691,9 @@ impl<'a> SectionReader<'a> {
                 }
                 "$VIEWSIZE" | "$SNAPANG" | "$FRONTZ" | "$BACKZ" => {
                     if let Some(value) = self.reader.read_pair()?.and_then(|pair| pair.as_double()) {
+                        if document.version > DxfVersion::AC1009 {
+                            continue;
+                        }
                         let state = hdr.legacy.get_or_insert_with(Default::default);
                         match var_name.as_str() {
                             "$VIEWSIZE" => state.view_height = value,
@@ -3798,6 +3811,11 @@ impl<'a> SectionReader<'a> {
         // Read entities until ENDBLK
         while let Some(pair) = self.reader.read_pair()? {
             if pair.code == 0 {
+                let (graphics, entities_before) = if pair.value_string == "ENDBLK" {
+                    (None, 0)
+                } else {
+                    (self.take_entity_graphics()?, block_entities.len())
+                };
                 match pair.value_string.as_str() {
                     "ENDBLK" => {
                         // Read ENDBLK properties
@@ -3848,7 +3866,11 @@ impl<'a> SectionReader<'a> {
                             block_record.block_end_common = Some(Box::new(block_end.common));
                             // Block-type flags come from the BLOCK entity's
                             // code 70 (the BLOCK_RECORD's code 70 is units).
-                            block_record.flags.anonymous = (block_flags & 1) != 0;
+                            // Anonymous blocks are named `*...`; a block with a public name is not anonymous
+                            // (a down-saved dynamic definition read from a DWG gets its public name back and
+                            // keeps the bit only in its marker).
+                            block_record.flags.anonymous =
+                                (block_flags & 1) != 0 && block_record.name.starts_with('*');
                             block_record.flags.has_attributes = (block_flags & 2) != 0;
                             block_record.flags.is_xref = (block_flags & 4) != 0;
                             block_record.flags.is_xref_overlay = (block_flags & 8) != 0;
@@ -4116,6 +4138,14 @@ impl<'a> SectionReader<'a> {
                         block_entities.push(EntityType::Unknown(entity));
                     }
                 }
+                if let Some(graphics) = graphics {
+                    if let Some(entity) = block_entities.get_mut(entities_before) {
+                        let common = entity.common_mut();
+                        if common.graphic_data.is_none() {
+                            common.graphic_data = Some(graphics);
+                        }
+                    }
+                }
             }
         }
 
@@ -4133,6 +4163,50 @@ impl<'a> SectionReader<'a> {
             self.try_read_common_entity_code(&pair, &mut block_end.common)?;
         }
         Ok(block_end)
+    }
+
+    /// The proxy graphics of the entity record that starts at the current position (its `0` pair was just
+    /// read): in the AcDbEntity subclass, group 92 (160 from R2010) gives the size in bytes and the 310
+    /// groups the data. The groups are taken out of the stream so that an entity reader whose own groups
+    /// use 92 (a MESH's vertex count) never sees them; every other pair is put back in order.
+    fn take_entity_graphics(&mut self) -> Result<Option<Vec<u8>>> {
+        let mut held: Vec<super::stream_reader::DxfCodePair> = Vec::new();
+        let mut in_entity = false;
+        let mut size: Option<usize> = None;
+        let mut data: Vec<u8> = Vec::new();
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                held.push(pair);
+                break;
+            }
+            if pair.code == 100 {
+                let is_entity = pair.value_string.trim() == "AcDbEntity";
+                held.push(pair);
+                if in_entity || !is_entity {
+                    break;
+                }
+                in_entity = true;
+                continue;
+            }
+            if in_entity {
+                if matches!(pair.code, 92 | 160) {
+                    size = Some(pair.as_int().unwrap_or(0).max(0) as usize);
+                    continue;
+                }
+                if size.is_some() && pair.code == 310 {
+                    append_hex_bytes(&mut data, &pair.value_string);
+                    continue;
+                }
+            }
+            held.push(pair);
+        }
+        for pair in held.into_iter().rev() {
+            self.reader.push_back(pair);
+        }
+        Ok(size.and_then(|size| {
+            data.truncate(size);
+            (size != 0 || !data.is_empty()).then_some(data)
+        }))
     }
 
     /// Read the ENTITIES section
@@ -4154,6 +4228,7 @@ impl<'a> SectionReader<'a> {
                 let before = document.entities.len();
 
                 let result: Result<()> = (|| {
+                let graphics = self.take_entity_graphics()?;
                 match entity_type.as_str() {
                     "POINT" => {
                         if let Some(entity) = self.read_point()? {
@@ -4431,6 +4506,13 @@ impl<'a> SectionReader<'a> {
                         );
                         let entity = self.read_unknown_entity(&entity_type)?;
                         let _ = document.add_entity(EntityType::Unknown(entity));
+                    }
+                }
+                if let Some(graphics) = graphics {
+                    if let Some(entity) = document.entities.get_mut(before) {
+                        if entity.common().graphic_data.is_none() {
+                            std::sync::Arc::make_mut(entity).common_mut().graphic_data = Some(graphics);
+                        }
                     }
                 }
                     Ok(())
@@ -5951,7 +6033,15 @@ impl<'a> SectionReader<'a> {
                 ClassObjectData::Sun(Sun {
                     class_version: fields.i32(section, 90),
                     is_on: fields.bool(section, 290),
-                    color: Color::from_index(fields.i16(section, 63)),
+                    // Group 63 is the nearest ACI colour; group 421, when present, the true colour.
+                    color: {
+                        let index = Color::from_index(fields.i16(section, 63));
+                        if fields.has(section, 421) {
+                            Color::from_true_color_value(fields.i64(section, 421) as i32)
+                        } else {
+                            index
+                        }
+                    },
                     intensity: fields.f64(section, 40),
                     has_shadow: fields.bool(section, 291),
                     julian_day: fields.i32(section, 91),
@@ -16051,6 +16141,9 @@ impl<'a> SectionReader<'a> {
                 let center = definition_point.get_point().unwrap_or(Vector3::zero());
                 let chord_point = pt3;
                 let mut dim = DimensionRadius::new(center, chord_point);
+                // `base.definition_point` mirrors the typed definition point (the chord point), as the
+                // DWG reader and `Dimension::set_definition_point` keep it.
+                dim.base.definition_point = chord_point;
                 dim.base.common.layer = layer;
                 dim.base.common.color = color;
                 dim.base.common.line_weight = line_weight;
@@ -19832,6 +19925,7 @@ impl<'a> SectionReader<'a> {
         let mut common = EntityCommon::new();
         let mut acis_data = String::new();
         let mut uid = String::new();
+        let mut acis_empty = false;
         let mut history_handle = None;
         let mut acis_version: u8 = 1; // default to Version 1 (encoded)
 
@@ -19866,6 +19960,8 @@ impl<'a> SectionReader<'a> {
                     chunks.push(DxfAcisChunk::capture(new_line, &pair.value_string, source_override));
                 }
                 2 => uid = pair.value_string.clone(),
+                // R2013: the ACIS empty bit (the geometry is in ACDSDATA, not in the entity).
+                290 => acis_empty = pair.as_bool().unwrap_or(false),
                 350 => {
                     let handle = parse_dxf_handle(&pair.value_string);
                     history_handle = (!handle.is_null()).then_some(handle);
@@ -19903,6 +19999,14 @@ impl<'a> SectionReader<'a> {
             chunks,
             layout,
         })));
+        data.acis_empty_bit = acis_empty;
+        // Group 2 is the GUID of the modeler revision (a DWG states it as the revision block); the zero
+        // GUID the writer emits for a solid without one means "none".
+        match crate::entities::solid3d::AcisRevision::from_guid_string(&uid) {
+            Some(revision) => data.revision = revision,
+            None if uid.trim() == "{00000000-0000-0000-0000-000000000000}" => uid.clear(),
+            None => {}
+        }
         Ok((common, uid, data, history_handle))
     }
 
@@ -19913,6 +20017,12 @@ impl<'a> SectionReader<'a> {
         solid.common = common;
         solid.uid = uid;
         solid.acis_data = acis_data;
+        // The wireframe anchor a DWG stores is the body's centre; a DXF has no group for it.
+        solid.point_of_reference = solid
+            .acis_data
+            .geometry_centre()
+            .or_else(|| solid.acis_data.placement_origin())
+            .unwrap_or(solid.point_of_reference);
         solid.history_handle = history_handle;
         Ok(Some(solid))
     }
@@ -19924,6 +20034,11 @@ impl<'a> SectionReader<'a> {
         region.common = common;
         region.uid = uid;
         region.acis_data = acis_data;
+        region.point_of_reference = region
+            .acis_data
+            .geometry_centre()
+            .or_else(|| region.acis_data.placement_origin())
+            .unwrap_or(region.point_of_reference);
         region.history_handle = history_handle;
         Ok(Some(region))
     }
