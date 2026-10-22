@@ -129,6 +129,26 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
     handle_seed: u64,
     /// DXF version (determines SAT vs SAB format for ACIS data)
     dxf_version: DxfVersion,
+    /// Writing the R12 (AC1009) structure: no CLASSES or OBJECTS section, table records and block markers without
+    /// handles, the R12 header variables (the stream drops the groups R12 lacks, see `R12Stream`).
+    r12: bool,
+    /// R12 only: the highest handle the source stated (`source_explicit_handle_max` of a document read from an R12
+    /// file, 0 when it stated none, so `$HANDLING` is 0 and no record states a handle); `u64::MAX` for a document
+    /// with no such source. With handles on, every entity states its own (an entity added to the document keeps its
+    /// handle); a BLOCK end marker the source did not have states one only up to this limit, since above it the
+    /// reader allocated the handle and allocates it again.
+    r12_handle_limit: u64,
+    /// R12 only: the first handle this writer allocates (above every handle of the document).
+    r12_first_allocated: u64,
+    /// R12 only: the name maps of the converter of `writer/r12.rs` for the entities R12 does not have, built on the
+    /// first such entity.
+    r12_names: Option<super::r12::R12Names>,
+    /// R12 only: the handle the source stated on each BLOCK end marker (the document keeps the one it assigned),
+    /// by upper-case block name.
+    r12_end_handles: HashMap<String, Handle>,
+    /// R12 only: the extended data of each viewport with its `ACAD`/`MVIEW` record brought up to date. An R12
+    /// VIEWPORT states its centre, size, status and number only; the rest of the view is that record.
+    r12_viewport_xdata: HashMap<Handle, ExtendedData>,
     /// Collected SAB entries: (entity_handle, sab_binary_data) for ACDSDATA section
     sab_entries: Vec<(Handle, Vec<u8>)>,
     /// Whether currently writing paper space entities (for group code 67)
@@ -224,6 +244,43 @@ fn source_spelling_characters<'a>(spelled: &'a str, decoded: &str) -> std::borro
     }
 }
 
+/// The highest handle an R12 file written from `document` states (see `SectionWriter::r12_handle_limit`).
+pub(super) fn r12_handle_limit(document: &CadDocument) -> u64 {
+    // The reader keeps the source's table and BLOCK provenance for an R12 DXF only.
+    if document.legacy_dxf_tables.is_some() {
+        document.source_explicit_handle_max.unwrap_or(0)
+    } else {
+        u64::MAX
+    }
+}
+
+/// The header variables of an R12 (AC1009) DXF: those of AutoCAD's own R12 DXF (the AC1009 samples and the
+/// BricsCAD `acR12_dxf` exports), `$DWGCODEPAGE`, and the pre-R13 view and drafting state that a document read
+/// from an older source keeps in `HeaderVariables::legacy` (R11 kept it in the header, R12 keeps it in the
+/// VPORT; the reader of this crate takes either).
+const R12_HEADER_VARIABLES: &[&str] = &[
+    "$ACADVER", "$DWGCODEPAGE", "$INSBASE", "$EXTMIN", "$EXTMAX", "$LIMMIN", "$LIMMAX", "$ORTHOMODE",
+    "$REGENMODE", "$FILLMODE", "$QTEXTMODE", "$MIRRTEXT", "$DRAGMODE", "$LTSCALE", "$OSMODE", "$ATTMODE",
+    "$TEXTSIZE", "$TRACEWID", "$TEXTSTYLE", "$CLAYER", "$CELTYPE", "$CECOLOR", "$DIMSCALE", "$DIMASZ",
+    "$DIMEXO", "$DIMDLI", "$DIMRND", "$DIMDLE", "$DIMEXE", "$DIMTP", "$DIMTM", "$DIMTXT", "$DIMCEN", "$DIMTSZ",
+    "$DIMTOL", "$DIMLIM", "$DIMTIH", "$DIMTOH", "$DIMSE1", "$DIMSE2", "$DIMTAD", "$DIMZIN", "$DIMBLK",
+    "$DIMASO", "$DIMSHO", "$DIMPOST", "$DIMAPOST", "$DIMALT", "$DIMALTD", "$DIMALTF", "$DIMLFAC", "$DIMTOFL",
+    "$DIMTVP", "$DIMTIX", "$DIMSOXD", "$DIMSAH", "$DIMBLK1", "$DIMBLK2", "$DIMSTYLE", "$DIMCLRD", "$DIMCLRE",
+    "$DIMCLRT", "$DIMTFAC", "$DIMGAP", "$LUNITS", "$LUPREC", "$SKETCHINC", "$FILLETRAD", "$AUNITS", "$AUPREC",
+    "$MENU", "$ELEVATION", "$PELEVATION", "$THICKNESS", "$LIMCHECK", "$BLIPMODE", "$CHAMFERA", "$CHAMFERB",
+    "$SKPOLY", "$TDCREATE", "$TDUPDATE", "$TDINDWG", "$TDUSRTIMER", "$USRTIMER", "$ANGBASE", "$ANGDIR",
+    "$PDMODE", "$PDSIZE", "$PLINEWID", "$COORDS", "$SPLFRAME", "$SPLINETYPE", "$SPLINESEGS", "$ATTDIA",
+    "$ATTREQ", "$HANDLING", "$HANDSEED", "$SURFTAB1", "$SURFTAB2", "$SURFTYPE", "$SURFU", "$SURFV", "$UCSNAME",
+    "$UCSORG", "$UCSXDIR", "$UCSYDIR", "$PUCSNAME", "$PUCSORG", "$PUCSXDIR", "$PUCSYDIR", "$USERI1", "$USERI2",
+    "$USERI3", "$USERI4", "$USERI5", "$USERR1", "$USERR2", "$USERR3", "$USERR4", "$USERR5", "$WORLDVIEW",
+    "$SHADEDGE", "$SHADEDIF", "$TILEMODE", "$MAXACTVP", "$PLIMCHECK", "$PEXTMIN", "$PEXTMAX", "$PLIMMIN",
+    "$PLIMMAX", "$UNITMODE", "$VISRETAIN", "$PLINEGEN", "$PSLTSCALE",
+    // the pre-R13 state
+    "$VIEWCTR", "$VIEWDIR", "$TARGET", "$SNAPBASE", "$SNAPUNIT", "$GRIDUNIT", "$AXISUNIT", "$SNAPMODE",
+    "$SNAPSTYLE", "$SNAPISOPAIR", "$GRIDMODE", "$AXISMODE", "$VIEWRES", "$FASTZOOM", "$VIEWMODE", "$FLATLAND",
+    "$UCSICON", "$VIEWSIZE", "$SNAPANG", "$FRONTZ", "$BACKZ",
+];
+
 /// Which MATERIAL groups are written (see `write_material`).
 struct MaterialGate<'a> {
     source: Option<&'a crate::objects::MaterialDxfSource>,
@@ -250,6 +307,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             next_handle: handle_start,
             handle_seed,
             dxf_version: DxfVersion::AC1024,
+            r12: false,
+            r12_handle_limit: u64::MAX,
+            r12_first_allocated: u64::MAX,
+            r12_names: None,
+            r12_end_handles: HashMap::new(),
+            r12_viewport_xdata: HashMap::new(),
             sab_entries: Vec::new(),
             writing_paper_space: false,
             paper_viewport_ids: HashMap::new(),
@@ -516,16 +579,49 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.dxf_version = Self::writable_version(version);
     }
 
+    /// Write the R12 (AC1009) structure. The caller wraps the stream in `R12Stream`.
+    pub(crate) fn set_r12(&mut self, document: &CadDocument) {
+        self.dxf_version = DxfVersion::AC1009;
+        self.r12 = true;
+        self.r12_handle_limit = r12_handle_limit(document);
+        self.r12_first_allocated = self.next_handle;
+        if let Some(blocks) = document.legacy_dxf_blocks.as_ref() {
+            self.r12_end_handles = blocks
+                .iter()
+                .map(|block| (block.name.to_ascii_uppercase(), block.end_handle))
+                .collect();
+        }
+        for entity in document.entities() {
+            if let EntityType::Viewport(viewport) = entity {
+                if viewport.common.handle.is_null() {
+                    continue;
+                }
+                let mut data = viewport.common.extended_data.clone();
+                data.upsert_record(crate::io::dwg::legacy_viewport::record_r12(viewport, document));
+                self.r12_viewport_xdata.insert(viewport.common.handle, data);
+            }
+        }
+    }
+
+    /// Whether an R12 record states `handle`: while handles are on (`$HANDLING` 1), every handle of the document; a
+    /// handle this writer allocates (a VERTEX or SEQEND the document holds without one) only when there is no R12
+    /// source, since otherwise the reader allocates it again.
+    fn r12_states(&self, handle: Handle) -> bool {
+        !handle.is_null()
+            && self.r12_handle_limit != 0
+            && (self.r12_handle_limit == u64::MAX || handle.value() < self.r12_first_allocated)
+    }
+
     /// The version this writer actually emits for a requested target.
     ///
     /// R12 (AC1009) predates the handle-based object model: its table records
     /// carry no handles, no `330` owner pointers and no `100` subclass markers,
-    /// and it has no OBJECTS section. This writer always emits those R13+
-    /// constructs, so declaring `AC1009` in `$ACADVER` would describe the file
-    /// as something it is not - consumers applying R12 parsing rules then fail
-    /// to read the table records at all (issue #68). R12 input is therefore
-    /// preserved through read (`document.version` stays `AC1009`) but written
-    /// as R13, the oldest version whose structure matches what is emitted.
+    /// and it has no OBJECTS section. This writer emits those R13+ constructs
+    /// unless it is put in its R12 mode with `set_r12` (which `DxfWriter` does
+    /// for an R12 file, behind a stream that drops the groups R12 lacks), so
+    /// a plain `set_version(AC1009)` writes R13, the oldest version whose
+    /// structure matches what is emitted. The AC1009 DWG writer takes its
+    /// records from that R13 structure.
     pub(crate) fn writable_version(version: DxfVersion) -> DxfVersion {
         match version {
             DxfVersion::AC1009 => DxfVersion::AC1012,
@@ -646,7 +742,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             // byte of another version is not written as the variable.
             self.write_header_variable("$ACADMAINTVER", |w| w.write_i16(70, hdr.maintenance_version as i16))?;
         }
-        self.write_header_variable("$DWGCODEPAGE", |w| w.write_string(3, &hdr.code_page))?;
+        // An R12 file states the code page only when its source did (the bytes are then the source's, which a
+        // reader decodes the same way).
+        if !self.r12 || hdr.dxf_source_variables.as_ref().is_none_or(|vars| vars.contains("$DWGCODEPAGE")) {
+            self.write_header_variable("$DWGCODEPAGE", |w| w.write_string(3, &hdr.code_page))?;
+        }
 
         // === Drawing properties (DWGPROPS) === R2004+ files carry them here,
         // right after $DWGCODEPAGE.
@@ -654,6 +754,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.write_summary_info(document)?;
         }
 
+        if self.r12 {
+            // Entities, VERTEX and SEQEND records and the BLOCK end marker carry handles.
+            let handling = i16::from(self.r12_handle_limit != 0);
+            self.write_header_variable("$HANDLING", |w| w.write_i16(70, handling))?;
+        }
         let handle_seed = self.handle_seed;
         self.write_header_variable("$HANDSEED", |w| w.write_handle(5, Handle::new(handle_seed)))?;
 
@@ -1194,8 +1299,79 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         })?;
 
         self.write_optional_header_variables(hdr, document)?;
+        if self.r12 {
+            self.write_legacy_header_state(hdr)?;
+        }
 
         self.writer.write_section_end()?;
+        Ok(())
+    }
+
+    /// The pre-R13 current view and drafting state (`HeaderVariables::legacy`), as the header variables the reader of
+    /// this crate takes it from. A variable is written when it differs from the default of the state: the source
+    /// stated the others only when it was an R11-style file, and the default is what a missing variable reads as.
+    fn write_legacy_header_state(&mut self, hdr: &crate::document::HeaderVariables) -> Result<()> {
+        let Some(state) = hdr.legacy.as_ref() else {
+            return Ok(());
+        };
+        let d = crate::document::LegacyHeaderState::default();
+        macro_rules! point3 {
+            ($name:literal, $value:expr, $default:expr) => {
+                if $value != $default {
+                    self.write_header_variable($name, |w| {
+                        w.write_double(10, $value.x)?;
+                        w.write_double(20, $value.y)?;
+                        w.write_double(30, $value.z)
+                    })?;
+                }
+            };
+        }
+        macro_rules! point2 {
+            ($name:literal, $value:expr, $default:expr) => {
+                if $value != $default {
+                    self.write_header_variable($name, |w| {
+                        w.write_double(10, $value.x)?;
+                        w.write_double(20, $value.y)?;
+                        w.write_double(30, 0.0)
+                    })?;
+                }
+            };
+        }
+        macro_rules! int {
+            ($name:literal, $value:expr, $default:expr) => {
+                if $value != $default {
+                    self.write_header_variable($name, |w| w.write_i16(70, $value))?;
+                }
+            };
+        }
+        macro_rules! real {
+            ($name:literal, $code:literal, $value:expr, $default:expr) => {
+                if $value != $default {
+                    self.write_header_variable($name, |w| w.write_double($code, $value))?;
+                }
+            };
+        }
+        point3!("$VIEWCTR", state.view_center, d.view_center);
+        point3!("$VIEWDIR", state.view_direction, d.view_direction);
+        point3!("$TARGET", state.view_target, d.view_target);
+        point2!("$SNAPBASE", state.snap_base, d.snap_base);
+        point2!("$SNAPUNIT", state.snap_spacing, d.snap_spacing);
+        point2!("$GRIDUNIT", state.grid_spacing, d.grid_spacing);
+        point2!("$AXISUNIT", state.axis_spacing, d.axis_spacing);
+        int!("$SNAPMODE", state.snap_mode, d.snap_mode);
+        int!("$SNAPSTYLE", state.snap_style, d.snap_style);
+        int!("$SNAPISOPAIR", state.snap_isopair, d.snap_isopair);
+        int!("$GRIDMODE", state.grid_mode, d.grid_mode);
+        int!("$AXISMODE", state.axis_mode, d.axis_mode);
+        int!("$VIEWRES", state.circle_zoom, d.circle_zoom);
+        int!("$FASTZOOM", state.fast_zoom, d.fast_zoom);
+        int!("$VIEWMODE", state.view_mode, d.view_mode);
+        int!("$FLATLAND", state.flatland, d.flatland);
+        int!("$UCSICON", state.ucs_icon, d.ucs_icon);
+        real!("$VIEWSIZE", 40, state.view_height, d.view_height);
+        real!("$SNAPANG", 50, state.snap_angle.to_dxf_degrees(), d.snap_angle.to_dxf_degrees());
+        real!("$FRONTZ", 40, state.front_clip, d.front_clip);
+        real!("$BACKZ", 40, state.back_clip, d.back_clip);
         Ok(())
     }
 
@@ -1412,7 +1588,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     where
         F: FnOnce(&mut W) -> Result<()>,
     {
-        if self.omitted_header_variables.contains(name) {
+        if self.omitted_header_variables.contains(name) || (self.r12 && !R12_HEADER_VARIABLES.contains(&name)) {
             return Ok(());
         }
         self.writer.write_string(9, name)?;
@@ -1502,6 +1678,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     pub fn write_tables(&mut self, document: &CadDocument) -> Result<()> {
         self.writer.write_section_start("TABLES")?;
 
+        if self.r12 {
+            return self.write_r12_tables(document);
+        }
+
         // Write tables in the standard order
         self.write_vport_table(document)?;
         self.write_ltype_table(document)?;
@@ -1511,8 +1691,56 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_ucs_table(document)?;
         self.write_appid_table(document)?;
         self.write_dimstyle_table(document)?;
-        self.write_block_record_table(document)?;
+        // R12 has no BLOCK_RECORD table: the blocks are the BLOCKS section.
+        if !self.r12 {
+            self.write_block_record_table(document)?;
+        }
 
+        self.writer.write_section_end()?;
+        Ok(())
+    }
+
+    /// The TABLES section of an R12 file: the tables of the source in the order it had them (an R12 reader creates
+    /// the records of a missing table itself), then the standard ones that hold records and were not among them.
+    fn write_r12_tables(&mut self, document: &CadDocument) -> Result<()> {
+        const STANDARD: [&str; 8] = ["VPORT", "LTYPE", "LAYER", "STYLE", "VIEW", "UCS", "APPID", "DIMSTYLE"];
+        let mut order: Vec<&str> = Vec::new();
+        for table in document.legacy_dxf_tables.iter().flatten() {
+            if let Some(name) = STANDARD.iter().find(|name| table.name.eq_ignore_ascii_case(name)) {
+                if !order.contains(name) {
+                    order.push(name);
+                }
+            }
+        }
+        let has_source = !order.is_empty();
+        for name in STANDARD {
+            let holds_records = match name {
+                "VPORT" => document.vports.len() > 0,
+                "LTYPE" => document.line_types.len() > 0,
+                "LAYER" => document.layers.len() > 0,
+                "STYLE" => document.text_styles.len() > 0,
+                "VIEW" => document.views.len() > 0,
+                "UCS" => document.ucss.len() > 0,
+                "APPID" => document.app_ids.len() > 0,
+                _ => document.dim_styles.len() > 0,
+            };
+            // Without a source every table is written, as AutoCAD does, empty or not.
+            if !order.contains(&name) && (!has_source || holds_records) {
+                order.push(name);
+            }
+        }
+        for name in order {
+            match name {
+                "VPORT" => self.write_vport_table(document)?,
+                "LTYPE" => self.write_ltype_table(document)?,
+                "LAYER" => self.write_layer_table(document)?,
+                "STYLE" => self.write_style_table(document)?,
+                "VIEW" => self.write_view_table(document)?,
+                "UCS" => self.write_ucs_table(document)?,
+                "APPID" => self.write_appid_table(document)?,
+                _ => self.write_dimstyle_table(document)?,
+            }
+        }
         self.writer.write_section_end()?;
         Ok(())
     }
@@ -1710,9 +1938,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Write LTYPE table
     fn write_ltype_table(&mut self, document: &CadDocument) -> Result<()> {
         let table_handle = document.line_types.handle();
-        self.write_table_header("LTYPE", document.line_types.len(), table_handle, document)?;
+        // BYLAYER and BYBLOCK are keywords of the entity records in R12, not LTYPE records: the document holds them
+        // as defaults unless the R12 file it was read from had such a record.
+        let r12 = self.r12;
+        let written = |ltype: &LineType| {
+            !r12
+                || !(ltype.name.eq_ignore_ascii_case("ByLayer") || ltype.name.eq_ignore_ascii_case("ByBlock"))
+                || document.legacy_dxf_tables.iter().flatten().any(|table| {
+                    table.name == "LTYPE" && table.entries.iter().any(|entry| entry.name.eq_ignore_ascii_case(&ltype.name))
+                })
+        };
+        let count = document.line_types.iter().filter(|ltype| written(ltype)).count();
+        self.write_table_header("LTYPE", count, table_handle, document)?;
 
-        for ltype in document.line_types.iter() {
+        for ltype in document.line_types.iter().filter(|ltype| written(ltype)) {
             self.write_ltype_entry(ltype, table_handle, document)?;
             self.write_table_xdata(document, ltype.handle, &[])?;
         }
@@ -1791,8 +2030,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     }
                 }
             } else {
-                // Plain dash element — AutoCAD emits the zero flag word.
-                self.writer.write_i16(74, 0)?;
+                // Plain dash element — AutoCAD emits the zero flag word (R12 has no such group).
+                if !self.r12 {
+                    self.writer.write_i16(74, 0)?;
+                }
             }
         }
 
@@ -1861,8 +2102,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         } else {
             self.writer.write_i16(62, -color_index)?;
         }
-        // Preserve the exact RGB value alongside the nearest ACI fallback.
-        if let Some(tc) = layer.color.to_true_color_value() {
+        // Preserve the exact RGB value alongside the nearest ACI fallback (R2004 and later; R12 has the index).
+        if let Some(tc) = layer.color.to_true_color_value().filter(|_| !self.r12) {
             self.writer.write_i32(420, tc)?;
         }
         if self.dxf_version >= DxfVersion::AC1018 {
@@ -1877,8 +2118,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Linetype name
         self.writer.write_string(6, &layer.line_type)?;
 
-        // Lineweight
-        self.writer.write_i16(370, layer.line_weight.value())?;
+        // Lineweight (R2002 and later)
+        if !self.r12 {
+            self.writer.write_i16(370, layer.line_weight.value())?;
+        }
 
         // R2000+ layer records require a hard pointer to a plot-style object.
         // NOTE (issue #51): BricsCAD's audit only accepts the reference when
@@ -1904,8 +2147,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
         }
 
-        // Plot flag (code 290 is Bool type - single byte in binary)
-        self.writer.write_bool(290, layer.is_plottable)?;
+        // Plot flag (code 290 is Bool type - single byte in binary); R2000 and later
+        if !self.r12 {
+            self.writer.write_bool(290, layer.is_plottable)?;
+        }
         // R2007+ layer material (hard pointer).
         if self.dxf_version >= DxfVersion::AC1021 && !layer.material.is_null() {
             self.writer.write_handle(347, layer.material)?;
@@ -2252,21 +2497,42 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // ACAD at index 0 (issue #51 BricsCAD audit: "RegApp ACAD has
         // invalid index 1").
         let mut wrote_acad = false;
-        for appid in document.app_ids.iter() {
-            if appid.name().eq_ignore_ascii_case("ACAD") {
+        if self.r12 {
+            // An R12 file is written in the order of its source: a reader registers the applications in that order.
+            let position = |appid: &AppId| {
+                document
+                    .source_app_id_order
+                    .iter()
+                    .flatten()
+                    .position(|name| name.eq_ignore_ascii_case(appid.name()))
+                    .unwrap_or(usize::MAX)
+            };
+            let mut ordered: Vec<&AppId> = document
+                .app_ids
+                .iter()
+                .filter(|appid| !unused.contains(&appid.name().to_ascii_uppercase()))
+                .collect();
+            ordered.sort_by_key(|appid| position(appid));
+            for appid in ordered {
                 self.write_appid_entry(appid, table_handle, document)?;
-                wrote_acad = true;
-                break;
             }
-        }
-        for appid in document.app_ids.iter() {
-            if wrote_acad && appid.name().eq_ignore_ascii_case("ACAD") {
-                continue;
+        } else {
+            for appid in document.app_ids.iter() {
+                if appid.name().eq_ignore_ascii_case("ACAD") {
+                    self.write_appid_entry(appid, table_handle, document)?;
+                    wrote_acad = true;
+                    break;
+                }
             }
-            if unused.contains(&appid.name().to_ascii_uppercase()) {
-                continue;
+            for appid in document.app_ids.iter() {
+                if wrote_acad && appid.name().eq_ignore_ascii_case("ACAD") {
+                    continue;
+                }
+                if unused.contains(&appid.name().to_ascii_uppercase()) {
+                    continue;
+                }
+                self.write_appid_entry(appid, table_handle, document)?;
             }
-            self.write_appid_entry(appid, table_handle, document)?;
         }
         if let Some(handle) = self.loft_reference_appid {
             let mut appid = AppId::new("CADCODEC_LOFT_REFERENCES");
@@ -2302,19 +2568,20 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Write DIMSTYLE table
     fn write_dimstyle_table(&mut self, document: &CadDocument) -> Result<()> {
         let table_handle = document.dim_styles.handle();
-        self.write_table_header(
-            "DIMSTYLE",
-            document.dim_styles.len(),
-            table_handle,
-            document,
-        )?;
+        // The Standard style the document starts with is not a record of an R12 file that did not have it.
+        let r12_source = self.r12 && document.legacy_dxf_tables.is_some();
+        let written = |style: &DimStyle| {
+            !(r12_source && !style.source_present && style.name.eq_ignore_ascii_case("Standard"))
+        };
+        let count = document.dim_styles.iter().filter(|style| written(style)).count();
+        self.write_table_header("DIMSTYLE", count, table_handle, document)?;
         if self.dxf_version >= DxfVersion::AC1015 {
             self.writer.write_subclass("AcDbDimStyleTable")?;
             self.writer
                 .write_i16(71, document.dim_styles.len() as i16)?;
         }
 
-        for dimstyle in document.dim_styles.iter() {
+        for dimstyle in document.dim_styles.iter().filter(|style| written(style)) {
             self.write_dimstyle_entry(dimstyle, table_handle, document)?;
         }
 
@@ -2368,17 +2635,18 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if dimstyle.dimpost != "<>" {
             self.writer.write_string(3, &dimstyle.dimpost)?;
         }
-        if !dimstyle.dimapost.is_empty() {
+        // An R12 record states the suffix and the three arrow block names whether they are empty or not.
+        if self.r12 || !dimstyle.dimapost.is_empty() {
             self.writer.write_string(4, &dimstyle.dimapost)?;
         }
         if self.dxf_version <= DxfVersion::AC1014 {
-            if !dimstyle.dimblk_name.is_empty() {
+            if self.r12 || !dimstyle.dimblk_name.is_empty() {
                 self.writer.write_string(5, &dimstyle.dimblk_name)?;
             }
-            if !dimstyle.dimblk1_name.is_empty() {
+            if self.r12 || !dimstyle.dimblk1_name.is_empty() {
                 self.writer.write_string(6, &dimstyle.dimblk1_name)?;
             }
-            if !dimstyle.dimblk2_name.is_empty() {
+            if self.r12 || !dimstyle.dimblk2_name.is_empty() {
                 self.writer.write_string(7, &dimstyle.dimblk2_name)?;
             }
         }
@@ -2461,7 +2729,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         put! { 179, dimadec, self.writer.write_i16(179, dimstyle.dimadec)? }
 
         // Int16 (270-290)
-        if self.dxf_version <= DxfVersion::AC1014 {
+        if self.dxf_version <= DxfVersion::AC1014 && !self.r12 {
             self.writer.write_i16(270, dimstyle.dimunit)?;
         }
         put! { 271, dimdec, self.writer.write_i16(271, dimstyle.dimdec)? }
@@ -2623,6 +2891,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     ) -> Result<()> {
         self.writer.write_string(0, "TABLE")?;
         self.writer.write_string(2, name)?;
+        if self.r12 {
+            // An R12 table header has its name and the entry count only.
+            self.writer.write_i16(70, count as i16)?;
+            return Ok(());
+        }
         self.writer.write_handle(5, table_handle)?;
         if let Some(handle) = document.extension_dictionary_handle(table_handle) {
             self.writer.write_string(102, "{ACAD_XDICTIONARY")?;
@@ -2675,6 +2948,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         owner: Handle,
         document: &CadDocument,
     ) -> Result<()> {
+        if self.r12 {
+            // R12 table records are not handled objects.
+            return Ok(());
+        }
         self.writer.write_handle(5, handle)?;
         self.write_table_entry_reactors(handle, document)?;
         self.write_table_entry_xdictionary(handle, document)?;
@@ -2767,6 +3044,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         common
     }
 
+    /// The names R12 gives the two space blocks.
+    fn r12_block_name(block_record: &BlockRecord) -> &str {
+        if block_record.is_model_space() {
+            "$MODEL_SPACE"
+        } else if block_record.name().eq_ignore_ascii_case("*Paper_Space") {
+            "$PAPER_SPACE"
+        } else {
+            block_record.name()
+        }
+    }
+
     fn write_block_definition(
         &mut self,
         block_record: &BlockRecord,
@@ -2812,19 +3100,28 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         flags |= block_record.source_flags & 1;
 
         // Write BLOCK entity: its own appearance, attachments and XDATA when the source had them.
-        let begin_common = self.block_marker_common(block_record, document, false);
+        let mut begin_common = self.block_marker_common(block_record, document, false);
+        if self.r12 {
+            // The BLOCK record of an R12 file has no handle (its ENDBLK has one).
+            begin_common.handle = Handle::NULL;
+        }
+        let block_name = if self.r12 {
+            Self::r12_block_name(block_record)
+        } else {
+            block_record.name()
+        };
         self.writer.write_string(0, "BLOCK")?;
         let prev_ps = self.writing_paper_space;
         self.writing_paper_space = is_paper_space;
         self.write_common_entity_data(&begin_common, owner)?;
         self.writing_paper_space = prev_ps;
         self.writer.write_subclass("AcDbBlockBegin")?;
-        self.writer.write_string(2, block_record.name())?;
+        self.writer.write_string(2, block_name)?;
         self.writer.write_i16(70, flags)?;
         self.writer.write_double(10, block_record.base_point.x)?;
         self.writer.write_double(20, block_record.base_point.y)?;
         self.writer.write_double(30, block_record.base_point.z)?;
-        self.writer.write_string(3, block_record.name())?;
+        self.writer.write_string(3, block_name)?;
         // Group code 1 is XRef path (empty for normal blocks)
         self.writer.write_string(1, &block_record.xref_path)?;
         // Group code 4 is the block description, written when it has text or the source had the field (every
@@ -2833,7 +3130,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             || document
                 .dwg_source_version
                 .is_some_and(|version| version >= DxfVersion::AC1015);
-        if !block_record.description.is_empty() || description_present {
+        if (!block_record.description.is_empty() || description_present) && !self.r12 {
             self.writer.write_string(4, &block_record.description)?;
         }
         self.write_xdata(&begin_common.extended_data)?;
@@ -2865,14 +3162,23 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
             for eh in &block_record.entity_handles {
                 if let Some(&idx) = document.entity_index.get(eh) {
-                    self.write_entity_with_owner(&document.entities[idx], owner)?;
+                    self.write_owned_entity(&document.entities[idx], owner, document)?;
                 }
             }
             self.writing_paper_space = prev_ps;
         }
 
         // Write ENDBLK entity
-        let end_common = self.block_marker_common(block_record, document, true);
+        let mut end_common = self.block_marker_common(block_record, document, true);
+        if self.r12 {
+            if let Some(handle) = self.r12_end_handles.get(&block_record.name().to_ascii_uppercase()) {
+                end_common.handle = *handle;
+            } else if end_common.handle.value() > self.r12_handle_limit {
+                // The marker of a block the source did not have (the space blocks of an R12 file without them):
+                // the reader allocated its handle and allocates it again.
+                end_common.handle = Handle::NULL;
+            }
+        }
         self.writer.write_string(0, "ENDBLK")?;
         self.writing_paper_space = is_paper_space;
         self.write_common_entity_data(&end_common, owner)?;
@@ -2893,7 +3199,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             let owner = model_space.handle();
             for eh in &model_space.entity_handles {
                 if let Some(&idx) = document.entity_index.get(eh) {
-                    self.write_entity_with_owner(&document.entities[idx], owner)?;
+                    self.write_owned_entity(&document.entities[idx], owner, document)?;
                 }
             }
         }
@@ -2907,7 +3213,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.number_paper_space_viewports(paper_space, document);
             for eh in &paper_space.entity_handles {
                 if let Some(&idx) = document.entity_index.get(eh) {
-                    self.write_entity_with_owner(&document.entities[idx], owner)?;
+                    self.write_owned_entity(&document.entities[idx], owner, document)?;
                 }
             }
         }
@@ -2915,6 +3221,17 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
         self.writer.write_section_end()?;
         Ok(())
+    }
+
+    /// Write an entity of a block or a space. An R12 file states an entity R12 does not have in its R12 form (the
+    /// conversion rules of `writer/r12.rs`: R12 entities without handles, or nothing for what has no R12 form); the
+    /// rest of the document keeps its R12 records, handles and extended data.
+    fn write_owned_entity(&mut self, entity: &EntityType, owner: Handle, document: &CadDocument) -> Result<()> {
+        if self.r12 && !super::r12::is_r12_entity(entity) {
+            let paper = self.writing_paper_space;
+            return super::r12::write_r12_entity(&mut *self.writer, document, entity, paper, &mut self.r12_names);
+        }
+        self.write_entity_with_owner(entity, owner)
     }
 
     /// Write an entity with explicit owner, followed by its XDATA.
@@ -2972,6 +3289,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                     );
                     data.add_record(record);
                 }
+                self.write_xdata(&data)?;
+            } else if let Some(data) = self.r12_viewport_xdata.remove(&entity.common().handle) {
                 self.write_xdata(&data)?;
             } else {
                 self.write_xdata(&entity.common().extended_data)?;
@@ -4376,7 +4695,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
     /// Write common entity data with owner
     fn write_common_entity_data(&mut self, common: &EntityCommon, owner: Handle) -> Result<()> {
         let owner = self.safe_entity_owner(owner);
-        self.writer.write_handle(5, common.handle)?;
+        // An R12 record states a handle only when its source did.
+        if !self.r12 || self.r12_states(common.handle) {
+            self.writer.write_handle(5, common.handle)?;
+        }
         self.writer.write_handle(330, owner)?;
 
         // Write xdictionary group
@@ -4458,12 +4780,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
 
         // Write linetype scale if not 1.0
-        if (common.linetype_scale - 1.0).abs() > 1e-12 {
+        if (common.linetype_scale - 1.0).abs() > 1e-12 && !self.r12 {
             self.writer.write_double(48, common.linetype_scale)?;
         }
 
         // Write lineweight if not default
-        if common.line_weight != crate::types::LineWeight::ByLayer {
+        if common.line_weight != crate::types::LineWeight::ByLayer && !self.r12 {
             self.writer.write_i16(370, common.line_weight.value())?;
         }
 
@@ -4743,17 +5065,21 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_subclass("AcDbVertex")?;
             self.writer.write_subclass("AcDb2dVertex")?;
             self.writer.write_point3d(10, vertex.location)?;
-            if vertex.start_width != 0.0 {
+            // A VERTEX without these groups has the width of the POLYLINE record. A width that differs from it is
+            // stated, and so is a zero width read from a file that stated it (a vertex built in memory with width 0
+            // means "the default").
+            let from_source = vertex.source_widths.is_some();
+            if vertex.start_width != default_start && (vertex.start_width != 0.0 || from_source) {
                 self.writer.write_double(40, vertex.start_width)?;
             }
-            if vertex.end_width != 0.0 {
+            if vertex.end_width != default_end && (vertex.end_width != 0.0 || from_source) {
                 self.writer.write_double(41, vertex.end_width)?;
             }
             if vertex.bulge != 0.0 {
                 self.writer.write_double(42, vertex.bulge)?;
             }
             self.writer.write_i16(70, vertex.flags.bits() as i16)?;
-            if vertex.id != 0 { self.writer.write_i32(91, vertex.id)?; }
+            if vertex.id != 0 && !self.r12 { self.writer.write_i32(91, vertex.id)?; }
             self.writer.write_double(50, vertex.curve_tangent.to_dxf_degrees())?;
             self.write_xdata(&common.extended_data)?;
         }
@@ -5277,7 +5603,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         };
         let type_flags = type_flags | block_bit;
         self.writer.write_i16(70, type_flags)?;
-        self.writer.write_double(42, base.actual_measurement)?;
+        if !self.r12 {
+            self.writer.write_double(42, base.actual_measurement)?;
+        }
         // DXF angles are in degrees; internal representation is radians.
         self.writer
             .write_double(53, base.text_rotation.to_dxf_degrees())?;
@@ -6008,6 +6336,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         });
         self.writer.write_i16(68, status)?;
         self.writer.write_i16(69, id)?;
+        if self.r12 {
+            // The rest of the view is the MVIEW record of the extended data.
+            return Ok(());
+        }
 
         // Status
         let grid_word = i32::from(viewport.grid_flags.to_bits()) << 18;

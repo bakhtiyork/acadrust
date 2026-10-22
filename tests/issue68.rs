@@ -14,7 +14,7 @@ fn repro_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn ac1009_is_preserved_on_read_and_written_as_r13() {
+fn ac1009_is_preserved_on_read_and_written_as_r12() {
     assert_eq!(DxfVersion::parse("AC1009"), Some(DxfVersion::AC1009));
     assert_eq!(DxfVersion::AC1009.as_str(), "AC1009");
     assert_eq!(DxfVersion::AC1009.version_code(), 1009);
@@ -40,17 +40,19 @@ fn ac1009_is_preserved_on_read_and_written_as_r13() {
         "round-tripped file still declares an UNKNOWN version"
     );
 
-    // The DXF writer has no R12 emit mode: it always writes handles, `330`
-    // owner pointers and `100` subclass markers. Declaring AC1009 over that
-    // content makes the file unreadable to consumers that apply R12 parsing
-    // rules, so R12 input is written as R13 - the oldest version whose
-    // structure matches what is emitted.
+    // An AC1009 document is written as an R12 file: no handles on table records, no `330` owner pointers or `100`
+    // subclass markers, no CLASSES or OBJECTS section (R5a-6; the writer used to promote it to R13, upstream
+    // issue #68).
+    for pair in text.lines().collect::<Vec<_>>().chunks_exact(2) {
+        assert!(
+            !matches!(pair[0].trim(), "100" | "102" | "330" | "360"),
+            "R13 group {} in an R12 file",
+            pair[0].trim()
+        );
+    }
+    assert!(!text.contains("OBJECTS") && !text.contains("CLASSES"));
     let reloaded = DxfReader::from_file(&output).unwrap().read().unwrap();
-    assert_eq!(
-        reloaded.version,
-        DxfVersion::AC1012,
-        "R12 input must be written as a documented supported version"
-    );
+    assert_eq!(reloaded.version, DxfVersion::AC1009, "R12 input must be written as R12");
 }
 
 #[test]

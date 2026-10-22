@@ -1,12 +1,16 @@
-//! Genuine DXF R12 (AC1009) output.
+//! DXF R12 (AC1009) output of documents that are not R12 documents.
 //!
 //! R12 predates the handle-based object model of R13: it has no CLASSES and
 //! no OBJECTS section, table records and entities carry no handles, owner
-//! pointers or subclass markers, and many entity types do not exist yet. The
-//! regular [`SectionWriter`](super::SectionWriter) always emits R13+
-//! structures, so documents are written as R13 when they carry `AC1009`
-//! (see `SectionWriter::writable_version`). This module is used instead when
-//! R12 is requested explicitly with [`DxfWriter::with_version`](super::DxfWriter::with_version).
+//! pointers or subclass markers, and many entity types do not exist yet. A
+//! document of version `AC1009` is written by the regular
+//! [`SectionWriter`](super::SectionWriter) in its R12 mode (see
+//! `DxfWriter::write_r12`), which keeps what the document has (handles,
+//! extended data, the R12 view state); it hands each entity R12 does not have
+//! (see [`is_r12_entity`]) to this module ([`write_r12_entity`]). The whole
+//! document goes through this module when R12 is requested explicitly with
+//! [`DxfWriter::with_version`](super::DxfWriter::with_version) for a document
+//! of another version.
 //!
 //! Conversion rules:
 //!
@@ -37,7 +41,36 @@ const MAX_HATCH_SEGMENTS: usize = 200_000;
 /// Nesting limit for `explode` chains.
 const MAX_EXPLODE_DEPTH: usize = 8;
 
-/// Writes `document` as an ASCII/text DXF R12 file.
+/// Whether R12 has `entity` as it is: the section writer states it in its R12 mode without conversion (every
+/// entity of a document read from an R12 file is one).
+pub(super) fn is_r12_entity(entity: &EntityType) -> bool {
+    matches!(
+        entity,
+        EntityType::Point(_)
+            | EntityType::Line(_)
+            | EntityType::Circle(_)
+            | EntityType::Arc(_)
+            | EntityType::Solid(_)
+            | EntityType::Face3D(_)
+            | EntityType::Text(_)
+            | EntityType::Shape(_)
+            | EntityType::Insert(_)
+            | EntityType::AttributeDefinition(_)
+            | EntityType::AttributeEntity(_)
+            | EntityType::Polyline(_)
+            | EntityType::Polyline2D(_)
+            | EntityType::Polyline3D(_)
+            | EntityType::PolyfaceMesh(_)
+            | EntityType::PolygonMesh(_)
+            | EntityType::Viewport(_)
+    ) || matches!(
+        entity,
+        EntityType::Dimension(dimension)
+            if !matches!(**dimension, Dimension::Arc(_) | Dimension::LargeRadial(_))
+    )
+}
+
+/// Writes `document` as an R12 file (text or binary DXF) with R12 entities only, converting what R12 lacks.
 pub(super) fn write_r12<W: DxfStreamWriter>(writer: &mut W, document: &CadDocument) -> Result<()> {
     let mut r12 = R12Writer::new(writer, document);
     r12.write_header()?;
@@ -46,6 +79,36 @@ pub(super) fn write_r12<W: DxfStreamWriter>(writer: &mut W, document: &CadDocume
     r12.write_entities()?;
     r12.writer.write_string(0, "EOF")?;
     Ok(())
+}
+
+/// The name maps and reach of a converter, kept between the entities the section writer hands over.
+pub(super) struct R12Names {
+    layers: NameMap,
+    linetypes: NameMap,
+    styles: NameMap,
+    blocks: NameMap,
+    dimstyles: NameMap,
+    reach: f64,
+}
+
+/// Writes the R12 form of `entity`, which R12 does not have, into an R12 file the section writer writes (see the
+/// conversion rules above): R12 entities without handles, or nothing when the entity has no R12 form. A hatch
+/// becomes its lines or SOLID strips in place (no `*X` block). `names` keeps the name maps from one call to the
+/// next.
+pub(super) fn write_r12_entity<W: DxfStreamWriter>(
+    writer: &mut W,
+    document: &CadDocument,
+    entity: &EntityType,
+    paper: bool,
+    names: &mut Option<R12Names>,
+) -> Result<()> {
+    let mut r12 = match names.take() {
+        Some(kept) => R12Writer::with_names(writer, document, kept),
+        None => R12Writer::new(writer, document),
+    };
+    let result = r12.write_entity(entity, paper, 0);
+    *names = Some(r12.into_names());
+    result
 }
 
 // ----------------------------------------------------------------------------- names
@@ -193,6 +256,32 @@ impl<'a, W: DxfStreamWriter> R12Writer<'a, W> {
             dimstyles,
             reach,
             hatch_blocks: HashMap::new(),
+        }
+    }
+
+    fn with_names(writer: &'a mut W, doc: &'a CadDocument, names: R12Names) -> Self {
+        let R12Names { layers, linetypes, styles, blocks, dimstyles, reach } = names;
+        Self {
+            writer,
+            doc,
+            layers,
+            linetypes,
+            styles,
+            blocks,
+            dimstyles,
+            reach,
+            hatch_blocks: HashMap::new(),
+        }
+    }
+
+    fn into_names(self) -> R12Names {
+        R12Names {
+            layers: self.layers,
+            linetypes: self.linetypes,
+            styles: self.styles,
+            blocks: self.blocks,
+            dimstyles: self.dimstyles,
+            reach: self.reach,
         }
     }
 

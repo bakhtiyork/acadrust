@@ -1,5 +1,13 @@
 ## Changelog
 
+### Unreleased (fork, R5a-6)
+
+- **DXF is written at the version of the document** - an `AC1009` document is written as an R12 file, text or binary
+  (no handles on table records, no CLASSES or OBJECTS, one-byte group codes in binary), and reads back to the same
+  model; it was written as R13 (issue #68). Binary DXF of R13 to R2004 is written as that version, not promoted to
+  R2010. A 2D polyline vertex whose width is zero next to a non-zero default width of the record keeps it, and the
+  binary DXF reader keeps non-UTF-8 text of a file with no code page byte per byte. See `COMPAT-NOTES.md`.
+
 ### 0.6.5
 
 - **Genuine DXF R12 output** - `DxfWriter::with_version(DxfVersion::AC1009)`

@@ -15,6 +15,8 @@ pub struct DxfBinaryWriter<W: Write> {
     /// Stack buffer for formatting handles without heap allocation.
     hex_buf: [u8; 17],
     encoding: Option<crate::io::dxf::code_page::LegacyEncoding>,
+    /// R12 and earlier: a group code is one byte, 255 announcing a two-byte code (R13 and later: always two bytes).
+    single_byte_codes: bool,
 }
 
 impl<W: Write> DxfBinaryWriter<W> {
@@ -26,7 +28,16 @@ impl<W: Write> DxfBinaryWriter<W> {
             writer,
             hex_buf: [0u8; 17],
             encoding: None,
+            single_byte_codes: false,
         })
+    }
+
+    /// Create a binary DXF writer for R12 (AC1009) and earlier: one-byte group codes, with 255 as the escape for a
+    /// code above 254 (the code then follows as 16 bits).
+    pub fn new_r12(writer: W) -> Result<Self> {
+        let mut writer = Self::new(writer)?;
+        writer.single_byte_codes = true;
+        Ok(writer)
     }
 
     /// Select the declared code page for a pre-2007 DXF.
@@ -34,8 +45,17 @@ impl<W: Write> DxfBinaryWriter<W> {
         self.encoding = Some(encoding);
     }
 
-    /// Write a DXF code as 16-bit little-endian
+    /// Write a DXF code: 16-bit little-endian (R13 and later) or one byte (R12)
     fn write_code(&mut self, code: i32) -> Result<()> {
+        if self.single_byte_codes {
+            if (0..255).contains(&code) {
+                self.writer.write_u8(code as u8)?;
+            } else {
+                self.writer.write_u8(255)?;
+                self.writer.write_i16::<LittleEndian>(code as i16)?;
+            }
+            return Ok(());
+        }
         self.writer.write_i16::<LittleEndian>(code as i16)?;
         Ok(())
     }

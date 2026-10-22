@@ -2,6 +2,7 @@
 
 mod binary_writer;
 mod r12;
+mod r12_stream;
 mod section_writer;
 mod stream_writer;
 mod text_writer;
@@ -12,6 +13,7 @@ mod r5a2_tests;
 #[cfg(test)]
 mod r5a3_tests;
 
+use r12_stream::R12Stream;
 pub use binary_writer::DxfBinaryWriter;
 pub use section_writer::SectionWriter;
 pub use stream_writer::{value_type_for_code, DxfStreamWriter, DxfStreamWriterExt};
@@ -59,6 +61,9 @@ pub struct DxfWriter<'a> {
     pub binary: bool,
     /// Explicit target version; `None` writes the document's own version.
     version: Option<crate::types::DxfVersion>,
+    /// Write an AC1009 document in the R13 structure (handled table records, BLOCK_RECORD table, OBJECTS), which
+    /// the AC1009 DWG writer takes its records from, instead of as an R12 file.
+    r13_structure: bool,
 }
 
 impl<'a> DxfWriter<'a> {
@@ -68,6 +73,7 @@ impl<'a> DxfWriter<'a> {
             document,
             binary: false,
             version: None,
+            r13_structure: false,
         }
     }
 
@@ -77,18 +83,26 @@ impl<'a> DxfWriter<'a> {
             document,
             binary: true,
             version: None,
+            r13_structure: false,
         }
     }
 
     /// Write the document as `version` instead of its own version.
     ///
-    /// Requesting [`DxfVersion::AC1009`](crate::types::DxfVersion::AC1009)
-    /// produces a genuine R12 file (no handles, no CLASSES/OBJECTS sections,
-    /// newer entities converted to R12 entities; ASCII only). A document that
-    /// merely *carries* `AC1009` without this call keeps being written as R13,
-    /// because the R13 structure preserves everything the document holds.
+    /// A document of version [`DxfVersion::AC1009`](crate::types::DxfVersion::AC1009) is written as R12 (ASCII or
+    /// binary DXF) unless another version is requested here: no handles on table records, no CLASSES or OBJECTS
+    /// section, no subclass markers, the R12 header variables and entity forms, exactly the structure of an R12
+    /// file, from which the document reads back unchanged; an entity R12 does not have is converted to R12
+    /// entities (see the `r12` module), the rest keeps its records. Requesting `AC1009` for a document of another
+    /// version produces a genuine R12 file as well, with the whole document converted by the `r12` module.
     pub fn with_version(mut self, version: crate::types::DxfVersion) -> Self {
         self.version = Some(version);
+        self
+    }
+
+    /// The AC1009 DWG writer builds its records from the R13-structured text of the document.
+    pub(crate) fn with_r13_structure(mut self) -> Self {
+        self.r13_structure = true;
         self
     }
 
@@ -106,15 +120,10 @@ impl<'a> DxfWriter<'a> {
 
     /// Write to any writer
     pub fn write_to_writer<W: Write>(&self, writer: W) -> Result<()> {
-        if self.version == Some(crate::types::DxfVersion::AC1009) {
+        let output_version = self.output_version();
+        if output_version == crate::types::DxfVersion::AC1009 && !self.r13_structure {
             return self.write_r12(writer);
         }
-        // BricsCAD's binary DXF importer rejects the R2000/R2004 headers even
-        // when their records are otherwise valid.  The same records are
-        // accepted as R2010 binary DXF, whose strings are UTF-8.  Keep this
-        // compatibility promotion local to binary output; ASCII and DWG
-        // continue to preserve the requested legacy version and code page.
-        let output_version = self.output_version();
         let encoding = if output_version < crate::types::DxfVersion::AC1021 {
             crate::io::dxf::code_page::encoding_from_code_page(&self.document.header.code_page)
         } else {
@@ -148,12 +157,8 @@ impl<'a> DxfWriter<'a> {
         Ok(buffer)
     }
 
-    /// Write DXF content to a stream writer
-    fn write_dxf<W: DxfStreamWriter>(
-        &self,
-        writer: &mut W,
-        output_version: crate::types::DxfVersion,
-    ) -> Result<()> {
+    /// The document as written: a copy only where the output needs a repair of its ownership graph.
+    fn prepare(&self) -> std::borrow::Cow<'a, CadDocument> {
         let mut prepared = crate::io::loft_parameters::prepared(self.document);
         // DXF and DWG share the same ownership graph. Repair table-backed
         // entities before either writer snapshots handles, otherwise an
@@ -173,11 +178,67 @@ impl<'a> DxfWriter<'a> {
             prepared.to_mut().assign_table_entry_handles();
         }
         crate::io::dwg::dwg_writer::prepare_active_viewport_elevation(&mut prepared);
+        prepared
+    }
+
+    /// Write DXF content to a stream writer
+    fn write_dxf<W: DxfStreamWriter>(
+        &self,
+        writer: &mut W,
+        output_version: crate::types::DxfVersion,
+    ) -> Result<()> {
+        let prepared = self.prepare();
         // The modern cell styles of a table style have no place in the DXF TABLESTYLE record: they travel
         // in a CELLSTYLEMAP object of its extension dictionary (an R2010+ DWG keeps them in the record). The
         // output states those objects besides the document's own; the document is not copied for them.
         let carriers = crate::objects::plan_table_style_carriers(prepared.as_ref(), output_version);
         self.write_prepared_dxf(writer, prepared.as_ref(), output_version, carriers)
+    }
+
+    /// The first handle the writer may allocate and the `$HANDSEED` it states.
+    fn handle_range(
+        document: &CadDocument,
+        output_version: crate::types::DxfVersion,
+        carriers: Option<&crate::objects::TableStyleCarriers>,
+        r12: bool,
+    ) -> (u64, u64) {
+        let carrier_max_handle = carriers.map_or(0, |carriers| carriers.max_handle());
+        // The handles the carriers took from the allocator are used handles.
+        let handle_start = compute_max_handle(document)
+            .max(carriers.and_then(|carriers| carriers.next_handle).unwrap_or(0))
+            .max(carrier_max_handle + 1);
+        // Count against the version actually emitted, not the one the document
+        // was loaded as, so the handle budget matches what the writer produces.
+        let r12_limit = section_writer::r12_handle_limit(document);
+        // An R12 file read from a source does not state the handles allocated while writing (for records that had
+        // none), so they take nothing from the seed.
+        let extra_handles = if r12 && r12_limit != u64::MAX {
+            0
+        } else {
+            count_extra_handles(
+                document,
+                if output_version == crate::types::DxfVersion::AC1009 {
+                    crate::types::DxfVersion::AC1012
+                } else {
+                    output_version
+                },
+            )
+        };
+        // A document read from a file keeps the seed its source stated unless a handle at or above it is
+        // written: the native seed advances while the reader creates default objects, and writing it back would
+        // grow it with every round trip. An R12 file states the handles of its entities and BLOCK end markers only.
+        let handle_seed = match document.header.source_handle_seed {
+            Some(source) if extra_handles == 0 => {
+                let written = if r12 {
+                    max_written_handle_r12(document, r12_limit)
+                } else {
+                    max_written_handle(document)
+                };
+                source.max(written.max(carrier_max_handle) + 1)
+            }
+            _ => handle_start + extra_handles + 1,
+        };
+        (handle_start, handle_seed)
     }
 
     fn write_prepared_dxf<W: DxfStreamWriter>(
@@ -187,24 +248,7 @@ impl<'a> DxfWriter<'a> {
         output_version: crate::types::DxfVersion,
         carriers: Option<crate::objects::TableStyleCarriers>,
     ) -> Result<()> {
-        let carrier_max_handle = carriers.as_ref().map_or(0, |carriers| carriers.max_handle());
-        // The handles the carriers took from the allocator are used handles.
-        let handle_start = compute_max_handle(document)
-            .max(carriers.as_ref().and_then(|carriers| carriers.next_handle).unwrap_or(0))
-            .max(carrier_max_handle + 1);
-        // Count against the version actually emitted, not the one the document
-        // was loaded as, so the handle budget matches what the writer produces.
-        let extra_handles = count_extra_handles(
-            document,
-            SectionWriter::<W>::writable_version(output_version),
-        );
-        // A document read from a file keeps the seed its source stated unless a handle at or above it is
-        // written: the native seed advances while the reader creates default objects, and writing it back would
-        // grow it with every round trip.
-        let handle_seed = match document.header.source_handle_seed {
-            Some(source) if extra_handles == 0 => source.max(max_written_handle(document).max(carrier_max_handle) + 1),
-            _ => handle_start + extra_handles + 1,
-        };
+        let (handle_start, handle_seed) = Self::handle_range(document, output_version, carriers.as_ref(), false);
         let mut section_writer = SectionWriter::new(writer, handle_start, handle_seed);
         section_writer.set_version(output_version);
         if let Some(carriers) = carriers {
@@ -230,29 +274,55 @@ impl<'a> DxfWriter<'a> {
         Ok(())
     }
 
+    /// The version written: the requested one, else the document's own. Binary DXF exists for every version since
+    /// R10 (R13 and later with two-byte group codes), so it is written at the same version as the ASCII form.
     fn output_version(&self) -> crate::types::DxfVersion {
-        let version = self.version.unwrap_or(self.document.version);
-        if self.binary && version < crate::types::DxfVersion::AC1021 {
-            crate::types::DxfVersion::AC1024
-        } else {
-            version
-        }
+        self.version.unwrap_or(self.document.version)
     }
 
-    /// Genuine R12 output (see [`DxfWriter::with_version`]).
+    /// R12 output (see [`DxfWriter::with_version`]).
     fn write_r12<W: Write>(&self, writer: W) -> Result<()> {
+        let encoding = crate::io::dxf::code_page::encoding_from_code_page(&self.document.header.code_page);
+        // An R12 document is written as it is, with the entities R12 lacks converted one by one; a document of
+        // another version is converted as a whole.
+        let native = self.document.version == crate::types::DxfVersion::AC1009;
         if self.binary {
-            // R12 binary DXF uses one-byte group codes, which the binary writer does not emit
-            return Err(crate::error::DxfError::UnsupportedVersion(
-                "binary DXF R12 (AC1009); write R12 as ASCII DXF".into(),
-            ));
+            let mut stream_writer = DxfBinaryWriter::new_r12(writer)?;
+            if let Some(encoding) = encoding {
+                stream_writer.set_encoding(encoding);
+            }
+            self.write_r12_stream(&mut stream_writer, native)?;
+            stream_writer.flush()?;
+        } else {
+            let mut stream_writer = DxfTextWriter::new(writer);
+            if let Some(encoding) = encoding {
+                stream_writer.set_encoding(encoding);
+            }
+            self.write_r12_stream(&mut stream_writer, native)?;
+            stream_writer.flush()?;
         }
-        let mut stream_writer = DxfTextWriter::new(writer);
-        if let Some(encoding) = crate::io::dxf::code_page::encoding_from_code_page(&self.document.header.code_page) {
-            stream_writer.set_encoding(encoding);
+        Ok(())
+    }
+
+    fn write_r12_stream<W: DxfStreamWriter>(&self, writer: &mut W, native: bool) -> Result<()> {
+        if !native {
+            return r12::write_r12(writer, self.document);
         }
-        r12::write_r12(&mut stream_writer, self.document)?;
-        stream_writer.flush()?;
+        let prepared = self.prepare();
+        let document = prepared.as_ref();
+        let (handle_start, handle_seed) =
+            Self::handle_range(document, crate::types::DxfVersion::AC1009, None, true);
+        let mut filtered = R12Stream::new(writer);
+        let mut section_writer = SectionWriter::new(&mut filtered, handle_start, handle_seed);
+        section_writer.set_r12(document);
+        section_writer.set_dwg_source(document.dwg_source_version);
+        section_writer.set_layer_names(document);
+        section_writer.build_valid_handles(document);
+        section_writer.write_header(document)?;
+        section_writer.write_tables(document)?;
+        section_writer.write_blocks(document)?;
+        section_writer.write_entities(document)?;
+        filtered.write_string(0, "EOF")?;
         Ok(())
     }
 
@@ -409,6 +479,32 @@ fn max_written_handle(document: &CadDocument) -> u64 {
     }
     for r in document.ucss.iter() {
         max = max.max(r.handle.value());
+    }
+    max
+}
+
+/// The highest handle an R12 file written from `document` states: those of the entities (and their children) while
+/// handles are on, and those of the BLOCK end markers that are stated at all (see `SectionWriter::r12_states`).
+fn max_written_handle_r12(document: &CadDocument, limit: u64) -> u64 {
+    let mut max = 0u64;
+    if limit != 0 {
+        for entity in document.entities() {
+            max = max.max(entity.common().handle.value());
+            entity.for_each_child_handle(|handle| max = max.max(handle.value()));
+        }
+    }
+    let mut state = |handle: u64| {
+        if handle <= limit {
+            max = max.max(handle);
+        }
+    };
+    for block in document.legacy_dxf_blocks.iter().flatten() {
+        state(block.end_handle.value());
+    }
+    if document.legacy_dxf_blocks.is_none() {
+        for br in document.block_records.iter() {
+            state(br.block_end_handle.value());
+        }
     }
     max
 }

@@ -694,7 +694,7 @@ fn header_references(
 }
 
 pub(crate) fn write_document(document: &CadDocument) -> Result<Vec<u8>> {
-    let dxf = DxfWriter::new(document).write_to_vec()?;
+    let dxf = DxfWriter::new(document).with_r13_structure().write_to_vec()?;
     let mut records = parse_dxf_records(&dxf, &document.header.code_page)?;
     complete_table_records(document, &mut records);
     metadata::prepare(document, &mut records.entities, &records.tables[2])?;

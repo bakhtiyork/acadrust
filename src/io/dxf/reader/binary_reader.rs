@@ -16,6 +16,8 @@ pub struct DxfBinaryReader<R: Read + Seek> {
     use_single_byte_codes: bool,
     /// Reusable buffer for reading null-terminated strings.
     str_buf: Vec<u8>,
+    /// The bytes of the last string that was not UTF-8 and had no code page to be decoded with.
+    undecoded: Option<Vec<u8>>,
     encoding: Option<crate::io::dxf::code_page::LegacyEncoding>,
     context: DxfStreamContext,
 }
@@ -49,6 +51,7 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
             peeked_pair: None,
             use_single_byte_codes,
             str_buf: Vec::with_capacity(256),
+            undecoded: None,
             encoding: None,
             context: DxfStreamContext::default(),
         })
@@ -115,18 +118,26 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
 
     fn read_null_terminated_string_raw(&mut self) -> Result<String> {
         self.str_buf.clear();
+        self.undecoded = None;
         self.reader.read_until(0, &mut self.str_buf)?;
         // read_until includes the delimiter in the buffer
         if self.str_buf.last() == Some(&0) {
             self.str_buf.pop();
         }
-        // Try UTF-8 first (borrow check), then fall back to lossy conversion
+        // Try UTF-8 first (borrow check). Bytes that are not UTF-8 in a file with no declared code page are
+        // single-byte characters, as the text reader takes them (Latin-1); a lossy conversion would replace each
+        // with U+FFFD and lose them.
         let s = if let Some(encoding) = self.encoding {
             encoding.decode(&self.str_buf).0.into_owned()
         } else {
             match std::str::from_utf8(&self.str_buf) {
                 Ok(s) => s.to_owned(),
-                Err(_) => String::from_utf8_lossy(&self.str_buf).into_owned(),
+                Err(_) => {
+                    // The bytes stay with the pair, as the text reader keeps them: a reader that has no code page
+                    // for them (ACadSharp) decodes them as UTF-8.
+                    self.undecoded = Some(self.str_buf.clone());
+                    self.str_buf.iter().map(|&b| b as char).collect()
+                }
             }
         };
         self.str_buf.clear(); // keep the allocation for reuse
@@ -151,13 +162,20 @@ impl<R: Read + Seek> DxfBinaryReader<R> {
                     || self.context.record_type.as_deref() == Some("XRECORD") =>
             {
                 let raw = self.read_null_terminated_string_raw()?;
+                let undecoded = self.undecoded.take().filter(|_| {
+                    matches!(code, 1 | 2 | 3)
+                        && matches!(self.context.record_type.as_deref(), Some("TEXT" | "ATTRIB" | "ATTDEF"))
+                });
                 if !crate::io::dxf::code_page::has_legacy_escape(&raw) {
-                    return Ok(Some(DxfCodePair::new(code, raw)));
+                    let mut pair = DxfCodePair::new(code, raw);
+                    pair.undecoded_text_bytes = undecoded;
+                    return Ok(Some(pair));
                 }
                 let decoded = crate::io::dxf::code_page::decode_legacy_escapes(&raw);
                 let changed = decoded != raw;
                 let mut pair = DxfCodePair::new(code, decoded);
                 pair.raw_value_string = changed.then_some(raw);
+                pair.undecoded_text_bytes = undecoded;
                 pair
             }
             GroupCodeValueType::String => {
