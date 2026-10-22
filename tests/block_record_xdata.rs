@@ -64,3 +64,28 @@ fn block_record_xdata_round_trips_dxf_and_dwg() {
     let tag = again.object_xdata(handle).unwrap().get_record("AcDbBlockRepETag").unwrap();
     assert_eq!(tag.values[1], XDataValue::Integer32(9));
 }
+
+/// R13/R14 files state application names in upper case: a dynamic block saved down to R14 keeps its public name
+/// in `ACDBDYNAMICBLOCKTRUENAME` (R5a-7; the lookup of the application was case sensitive).
+#[test]
+fn r14_dynamic_block_recovers_its_true_name_from_an_upper_case_application() {
+    let mut doc = CadDocument::with_version(DxfVersion::AC1014);
+    let mut app = AppId::new("ACDBDYNAMICBLOCKTRUENAME");
+    app.handle = doc.allocate_handle();
+    doc.app_ids.add(app).unwrap();
+    let mut record = BlockRecord::new("*U17");
+    record.handle = doc.allocate_handle();
+    record.block_entity_handle = doc.allocate_handle();
+    record.block_end_handle = doc.allocate_handle();
+    record.flags.anonymous = true;
+    let handle = record.handle;
+    doc.block_records.add(record).unwrap();
+    let mut name = ExtendedDataRecord::new("ACDBDYNAMICBLOCKTRUENAME");
+    name.add_value(XDataValue::String("my-dynamic-block".into()));
+    doc.set_object_xdata_record(handle, name);
+    let dwg = DwgWriter::write_to_vec(&doc).unwrap();
+    let read = DwgReader::from_stream(Cursor::new(dwg)).read().unwrap();
+    let record = read.block_records.get("my-dynamic-block").expect("the public name");
+    assert!(!record.flags.anonymous);
+    assert!(read.block_records.get("*U17").is_none());
+}

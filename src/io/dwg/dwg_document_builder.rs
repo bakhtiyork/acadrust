@@ -1219,7 +1219,8 @@ impl DwgDocumentBuilder {
             // preserve their public name in AcDbDynamicBlockTrueName XData.
             // Restore it before deduplication and INSERT name resolution.
             let true_name_app = parsed_entries.iter().find_map(|entry| match entry {
-                ParsedEntry::AppId(handle, data) if data.name == "AcDbDynamicBlockTrueName" => Some(*handle),
+                // R13/R14 files state application names in upper case.
+                ParsedEntry::AppId(handle, data) if data.name.eq_ignore_ascii_case("AcDbDynamicBlockTrueName") => Some(*handle),
                 _ => None,
             });
             if let Some(app) = true_name_app {

@@ -246,6 +246,7 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5a-6 R12 records | R12 form of the records: header variables only from the R12 list (`R12_HEADER_VARIABLES`: AutoCAD's R12 DXF plus `$DWGCODEPAGE`, which is written only when the source stated it, and the pre-R13 view state of `HeaderVariables::legacy`, written per variable when it differs from the default state), `$HANDLING` (0 when the source stated no handle); TABLE headers `name, count` only and table records without handles; tables in the order of the source (`legacy_dxf_tables`), missing ones only when they hold records; LTYPE without the BYLAYER and BYBLOCK defaults, DIMSTYLE without the Standard default the source lacked; APPID in source order; DIMSTYLE groups 4 to 7 always, no 270; LAYER without 290, 370, 420; LTYPE without the zero flag word 74; no entity groups 48 and 370, no DIMENSION 42, no VERTEX 91; BLOCK has no handle and no description, ENDBLK states the handle the source stated (`legacy_dxf_blocks`; the document keeps the one it assigned), the space blocks are `$MODEL_SPACE` and `$PAPER_SPACE`; VIEWPORT is centre, size, status and number with the view in a regenerated `ACAD`/`MVIEW` record (`legacy_viewport::record_r12`, as the R12 DWG writer does). Handles (R5a-6 review): with `$HANDLING` 1 every entity, VERTEX and SEQEND states the handle the document holds, an entity added after the read included; with 0 (the source stated none) no record states one. A handle the writer allocates (a VERTEX or SEQEND without one) and the BLOCK end marker of a block the source did not have are stated only for a document without an R12 DXF source (`source_explicit_handle_max`): otherwise the reader allocated them and allocates them again, so the re-read allocates the same numbers. | Structure and values of the R12 files in the fixtures (AutoCAD-style sample and BricsCAD exports): the groups above do not exist in R12, and writing a handle the reader allocated would shift every allocated handle of the re-read. |
 | R5a-6 polyline vertex widths | A VERTEX of a 2D polyline states group 40/41 when its width differs from the default width of the POLYLINE record, and also a zero width read from a file that stated it (`source_widths` set). It stated them when non-zero only. | A vertex without the groups inherits the record's default width: an explicit zero next to a non-zero default came back as the default (AutoCAD-style R12 sample: polyline 0.2/0.1, three vertices with 0/0). A vertex built in memory with width 0 still means the default. Upstream PR candidate. |
 | R5a-6 binary DXF strings | The binary DXF reader decodes a string that is not UTF-8, in a file with no declared code page, byte per byte as Latin-1 (what the text reader does); it replaced the bytes with U+FFFD. The bytes of such a TEXT/ATTRIB/ATTDEF string stay with the pair (`undecoded_text_bytes`), as the text reader keeps them, so the ACadSharp view still shows the U+FFFD that ACadSharp decodes (G1 unchanged). | An R12 binary file without `$DWGCODEPAGE` lost its non-ASCII text on the read (sample_AC1009_binary.dxf: one TEXT, `0xD8`), and the text reader kept it. Upstream PR candidate. |
+| R5a-7 R13/R14 dynamic block name | The DWG reader finds the `AcDbDynamicBlockTrueName` application case-insensitively, so a dynamic block down-saved to R13/R14 (applications are upper case there: `ACDBDYNAMICBLOCKTRUENAME`) gets its public name back for its anonymous `*U` record, as in R2000+ files. | The lookup compared the exact spelling: in sample_AC1014.dwg the record stayed `*U17` where the record's own extended data and ACadSharp name it `my-dynamic-block`. Genuine reader bug (the spelling of application names in R13/R14); upstream-PR candidate. |
 
 
 ## ACadSharp differential dump
@@ -713,3 +714,97 @@ Open:
   alphabet are R12 groups at their defaults: TEXT 73, ATTDEF/ATTRIB 7, 41, 50, 51, 72, 73, 74, POLYLINE 73 to 75, VERTEX
   50, DIMENSION 3 and 53), and BricsCAD's acceptance of binary R2000 and R2004 DXF. Upstream PR candidates: the R12 DXF
   writer (issue #68), the polyline vertex width rule, the binary Latin-1 fallback.
+
+### R5a-7: the remaining RC failures (ACadSharp reading the fork's DXF against D)
+
+Gate G4 after the job (clean build of the final tree, 48 samples, four chunks of 12): **RR 94 / 96** (unchanged),
+**RC 94 / 96** (72 before), **idem 96 / 96**. No cell regresses in RR, RC or idem (baseline and final `cells.tsv` compared
+cell by cell). G1 45 / 49 with an `rs-gap.tsv` identical to R5a-6's. Fork suite `cargo test --features acadsharp-compat
+--no-fail-fast`: 2,492 passed, 0 failed, 60 ignored (2,491 before; one new test, `tests/block_record_xdata.rs`), 0 warnings in the
+test build, `cargo build --lib` and the feature build. The two comparers' `--self-test` pass (471 and 48 rules).
+Review (clean `cargo clean -p acadrust` build, full gate re-run with G4-499 and G4-508 narrowed): RR 94 (ASCII 47, binary
+47), RC 94 (47, 47), idem 96 (48, 48); against the R5a-6 cells no cell regresses; the 4 failing cells are AecObjects RR and
+RC. G1 45 / 49 (`rs-gap.tsv` identical to R5a-6's), suite 2,492 / 0 / 60.
+
+One fork change (row "R5a-7 R13/R14 dynamic block name"), twenty-four RC rules (G4-498..521, CadKit `Tools/g4-allowlist.json`).
+Each family was compared with AutoCAD's own DXF of the drawing where one exists (ACadSharp run on it is the committed
+dump of the `_ascii.dxf` twin) and with ACadSharp's reader source.
+
+1. **TableEntity.Rows (46 rows per R2010+ DWG cell, 1 in AC1021): an ACadSharp DXF-reader limitation.** ACadSharp's
+   DXF reader (`readTableEntity`) maps the legacy TABLE groups only and builds no `Rows[].CellStyle`, no cell geometry, and
+   reads no date value (groups 92/310); its DWG reader fills them from the modern record. For every one of the 46 rows of
+   AC1027, AC1032 and sample_base (and AC1024, AC1021) the value ACadSharp gives for the fork's output equals the value it
+   gives for AutoCAD's own DXF of the same drawing (`sample_AC1027_ascii.dxf` etc.). Rules G4-498 (row CellStyle object to
+   null), G4-499 (cell background index -1 to 0), G4-500 (relation `cad_value_to_null`: a number to null on a ValueType 8
+   value). Not fixed: for a DWG-sourced table the fork writes the legacy groups at their defaults (group 90 = 0, 93 = 0, no
+   40/41 margins, no 140 text heights, 91 = 0 per cell) where AutoCAD's DXF has the values (`sample_AC1027_ascii.dxf`, TABLE
+   528: `90 22, 93 7340056, 40/41 0.0342, 140 x3, 91 262176 ...`); the modern TABLECONTENT carries the same data, and none of
+   the RC rows depends on them, but a reader that takes the legacy groups gets defaults (open item).
+   Review: all 370 rows these three rules accept in the 10 cells equal ACadSharp's value on AutoCAD's DXF twin. G4-499 is
+   narrowed (relation `const_pair_expected_sibling`) to a D background whose TrueColor is 0 (the DWG reader's unset colour),
+   so a real true-colour background the output dropped keeps failing. The legacy-group gap is a loss for legacy-only
+   readers, and no rule masks it: ACadSharp on AutoCAD's DXF and on the fork's output differ for TABLE 528 in `ValueFlag`
+   (22 / 0), `OverrideFlag` (true / false), `EdgeFlags` of rows 4 to 6 (9, 11, 1 / 0), the content colour of row 4 cell 0
+   (7 / ByBlock), the right border of row 4 and 5 cell 2 (63, 40 / ByBlock, -2) and the empty value records of the merged
+   title cells (one content / none); the gate cannot see it because ACadSharp's DWG reader leaves the same members at those
+   defaults (D of the DWG equals the fork's output there). Not derivable from the native model without AutoCAD's style
+   resolution: those legacy values are effective values (the right border 63/40 of row 4 cell 2 is the cell's
+   inside-horizontal border in the model, its right border is not overridden), group 91 carries bit 0x40000 and the
+   visibility bits without the matching groups, and value flag 22 has no counterpart in the model; fitting them to one
+   drawing was not done.
+2. **CadDictionary entries / XRECORD / BlockRepresentationData in the AC1015 and AC1018 DXF cells (35 rows per cell): ACadSharp
+   loses a run of objects in the original.** The original holds TABLECONTENT objects (`sample_AC1015_ascii.dxf` 747, 149C, ...);
+   `readCell`, `readLinkedTableRow` and `readTableRow` end their loop with a `ReadNext` after the sub-reader stopped on the
+   next group 0, so the object that follows is read as table content (the notifications read `Unhandled dxf code 5 value
+   1882 at readCell method`) and is not registered; the run reaches #75A, #760, #ABD..#AC4 and the like, and the dictionaries
+   that own them show no entries in D. Evidence: with TABLECONTENT 747 cut out of the original ACadSharp registers #75A
+   (checked with a small program on the built ACadSharp.dll). The fork's output holds the same objects in another order
+   and ACadSharp reads them (RR shows the model equal). Rules G4-501..503 (`object_lost_below_dictionary`: an object only in
+   the output whose owner chain ends at a dictionary of both that lists it in the output but not in D), G4-504..507
+   (`entries_of_lost_objects`: the output's entries, less those naming such objects, are D's), G4-508 (the XRECORD
+   handle that D keeps as an integer, as G4-181 for DWG sources). Sources dxf, versions AC1015 and AC1018.
+   Review: with both TABLECONTENT objects (747, 149C) cut out of `sample_AC1015_ascii.dxf` and `sample_AC1018_ascii.dxf`,
+   ACadSharp (`Tools/AcadDump/run.sh dump`) registers all 18 objects G4-501..503 accept in the gate (#75A, #760,
+   #ABD..#AC4, #AC8..#ACF); in file order #75A/#760 follow 747 (after its TABLEGEOMETRY and ACDBDATATABLE) and
+   #ABD..#AC9 follow 149C, the others are owned by them. The relations accept only objects present in the output (never one
+   it lacks), and RR proves the fork read them from the original. G4-508 is narrowed (relation `xrecord_marked_handle_int`)
+   from any handle/integer pair to an integer of D turning into the reference of the same number, on a group-360 entry
+   right after the marker `ACAD_ROUNDTRIP_2008_TABLE_ENTITY` (the reference to the TABLECONTENT).
+3. **Solid3D / Region AcisData in AC1018, AC1021, AC1024 DWG: SAB written as SAT.** The DXF of these versions has SAT text
+   only; AutoCAD's own DXF agrees (D of `sample_AC1021_ascii.dxf` holds SAT). Rules G4-509/510 (`acis_sab_as_sat_text`)
+   accept the pair only when `acad-dump acis-same` (the tool of RR-035, reached through RS_DUMP) finds the SAB and the SAT the
+   same model; verified on the three real pairs of AC1018 outside the gate. One difference to AutoCAD's text remains: the SAT
+   header's fourth number is 26 (R2007) or 24 (R2010) there, the value of the SAB header, and 0 in the fork's (its SAT header
+   keeps a boolean `has_history`); the rule does not look at it (open item).
+4. **Viewport rows and two block names in AC1014: one reader fix and a rule.** (a) The DWG reader looked for the
+   application `AcDbDynamicBlockTrueName` by exact spelling; R13/R14 files state `ACDBDYNAMICBLOCKTRUENAME`, so the
+   down-saved dynamic block kept its anonymous name `*U17` where ACadSharp names it `my-dynamic-block` (BlockRecord and
+   Block name rows): case-insensitive now (test `r14_dynamic_block_recovers_its_true_name_from_an_upper_case_application`,
+   fails without the fix). (b) The view parameters of an R13/R14 viewport live in its ACAD/MVIEW extended data only;
+   ACadSharp's DWG reader reads none (`DwgObjectReader.cs:6447-6476` is R2000+), D holds zeros while D's own MVIEW record states
+   the values the fork wrote (R5a-5 restores them, as it does on a DXF read). Rules G4-511..518 (`viewport_mview_real`, one per
+   field: the zero turns into the n-th real of the expected viewport's own MVIEW record), G4-519/520 (`viewport_derived_from_mview`:
+   ScaleFactor and ViewWidth are ACadSharp's getters of the view height). No R14 DXF of AutoCAD is in the fixtures, so there is no
+   external check of the values (only that they are D's own MVIEW numbers).
+5. **AecObjects (RR and RC, 2 cells): not a writer fix.** The 21 RC rows are one header value and the AEC objects
+   (`Wall`, `AecWallStyle`, `AecCleanupGroup`, `AecBinRecord`) with the dictionary entries and the block record entity list that
+   name them: the fork keeps them as opaque `Unknown` records with no DXF form, so they are not in the output (ACadSharp's
+   DWG reader types them). A proxy carrier is not a form (R5a-5: it passed RR and broke RC on ~1,350 objects). The header row
+   (`MeasurementUnits` 256 against 1) is ACadSharp's `readTemplate` skipping a UTF-16 description by its character count
+   as bytes (a one-character description gives the bytes 00 01 = 256; the fork reads two bytes a character and accepts only 0 or 1):
+   rule G4-521 (D-b). The cells keep failing on the 20 object rows and RR.
+
+Rule use in the final run: G4-498 88 rows, 499 272, 500 10, 501 64, 502 64, 503 16, 504..507 32 each, 508 8, 509 12, 510 6,
+511..520 12 each (AC1014, both modes), 521 2 (AecObjects).
+
+Open:
+
+* **AecObjects, 2 cells** (RR and RC): as above.
+* **DWG-sourced TABLE legacy groups** at defaults (family 1): the fork's DXF is shorter than AutoCAD's for the same table;
+  a legacy-only reader (ACadSharp's DXF reader, pre-2008 AutoCAD) loses the table and cell override flags, edge flags and
+  the effective colours/borders AutoCAD resolves into them (see family 1, review). The gate cannot detect it.
+* **SAT header flags**: the fork writes `0` as the fourth number of the SAT header, AutoCAD writes the SAB header's value (26 for
+  R2007, 24 for R2010); content is the same model (`acis-same`).
+* UNVERIFIED: the R14 viewport values against an AutoCAD-written R14 DXF; that AutoCAD opens the fork's DXF with the TABLE legacy groups
+  at defaults.
+
