@@ -658,8 +658,10 @@ pub(super) fn block_flags(doc: &CadDocument, b: &crate::tables::BlockRecord) -> 
         return b.source_flags & !2;
     }
     let attributes = !source_dwg(doc) && b.flags.has_attributes;
+    // ACadSharp takes the anonymous flag from bit 1 of the DXF word whatever the block is named (the native
+    // flag is set for `*` names only).
     (b.source_flags & !31)
-        | i16::from(b.flags.anonymous)
+        | i16::from(b.flags.anonymous || b.source_flags & 1 != 0)
         | (i16::from(attributes) << 1)
         | (i16::from(b.flags.is_xref) << 2)
         | (i16::from(b.flags.is_xref_overlay) << 3)

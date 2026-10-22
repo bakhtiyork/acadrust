@@ -3524,7 +3524,8 @@ fn read_cell_style(reader: &mut DwgMergedReader) -> (Option<CellStyle>, Option<i
     style.override_flags = reader.read_bit_long();
     style.property_flags = CellStylePropertyFlags::from_bits_retain(reader.read_bit_long() as u32);
     style.background_color = reader.read_cm_true_color();
-    style.fill_enabled = style.background_color != Color::ByBlock;
+    // No colour (`None`) and ByBlock both state no background fill, as the DXF reader reads group 62.
+    style.fill_enabled = !matches!(style.background_color, Color::ByBlock | Color::None);
     style.layout_flags = ContentLayoutFlags::from_bits_retain(reader.read_bit_long() as u32);
     let format = read_cell_content_format(reader);
     style.content_format_override_flags = format.override_flags;

@@ -558,13 +558,7 @@ impl DxfReader {
                                 &mut diagnostics,
                             ),
                             "ACDSDATA" => self.read_acdsdata_section(&mut document),
-                            "THUMBNAILIMAGE" => {
-                                document.notifications.notify(
-                                    crate::notification::NotificationType::NotImplemented,
-                                    "THUMBNAILIMAGE section skipped",
-                                );
-                                self.skip_section()
-                            }
+                            "THUMBNAILIMAGE" => self.read_thumbnail_section(&mut document),
                             _ => {
                                 // Skip unknown section
                                 self.skip_section()
@@ -635,6 +629,10 @@ impl DxfReader {
         // (R12 STYLE entries) only receive their handles there, so running this
         // earlier would resolve every reference to a null handle.
         rewire_stale_text_style_references(&mut document);
+        drop_decoded_typefaces(&mut document);
+        name_viewport_override_layers(&mut document);
+        name_dynamic_block_classes(&mut document);
+        resolve_table_style_text_styles(&mut document);
         rewire_dangling_layout_block_records(&mut document);
         document.ensure_model_layout();
         if document.version == crate::types::DxfVersion::AC1009 {
@@ -657,6 +655,13 @@ impl DxfReader {
             // Pre-R2004 also stores an MTEXT background fill as round-trip EED
             // rather than the native codes; rebuild it (dimension text fills).
             crate::io::dwg::dwg_reader::recover_mtext_bg_roundtrip(&mut document);
+        }
+
+        // The legacy viewport-entity table (VX_CONTROL) exists in R13-R2000 files only. A DWG of a later
+        // version has no such control object (its header handle is null); the document default would
+        // reserve a handle for a table the file does not have.
+        if document.version >= crate::types::DxfVersion::AC1018 && document.vx_table.is_empty() {
+            document.vx_table.set_handle(Handle::NULL);
         }
 
         source_records = source_records.saturating_add(skipped_source_records);
@@ -876,6 +881,7 @@ impl DxfReader {
             };
             match entity {
                 EntityType::Solid3D(e) => {
+                    e.common.has_ds_data = true;
                     e.acis_data.sab_data = sab;
                     e.acis_data.is_binary = true;
                     e.acis_data.version = AcisVersion::Version2;
@@ -886,6 +892,7 @@ impl DxfReader {
                         .unwrap_or(e.point_of_reference);
                 }
                 EntityType::Region(e) => {
+                    e.common.has_ds_data = true;
                     e.acis_data.sab_data = sab;
                     e.acis_data.is_binary = true;
                     e.acis_data.version = AcisVersion::Version2;
@@ -896,6 +903,7 @@ impl DxfReader {
                         .unwrap_or(e.point_of_reference);
                 }
                 EntityType::Body(e) => {
+                    e.common.has_ds_data = true;
                     e.acis_data.sab_data = sab;
                     e.acis_data.is_binary = true;
                     e.acis_data.version = AcisVersion::Version2;
@@ -906,6 +914,7 @@ impl DxfReader {
                         .unwrap_or(e.point_of_reference);
                 }
                 EntityType::Surface(e) => {
+                    e.common.has_ds_data = true;
                     e.acis_data.sab_data = sab;
                     e.acis_data.is_binary = true;
                     e.acis_data.version = AcisVersion::Version2;
@@ -914,6 +923,76 @@ impl DxfReader {
             }
         }
 
+        Ok(())
+    }
+
+    /// Read the THUMBNAILIMAGE section: group 90 holds the image size in bytes, the image follows in
+    /// 310 chunks. AutoCAD writes the Windows DIB (a BITMAPINFOHEADER, palette and pixels, without the
+    /// 14-byte BITMAPFILEHEADER) of the drawing's preview; the format is told from the bytes, so a PNG
+    /// or a metafile (as a DWG can carry) is kept as that.
+    fn read_thumbnail_section(&mut self, document: &mut CadDocument) -> Result<()> {
+        use crate::document::{Preview, PreviewFormat};
+        let mut size: Option<usize> = None;
+        let mut data: Vec<u8> = Vec::new();
+        while let Some(pair) = self.reader.read_pair()? {
+            if pair.code == 0 {
+                if pair.value_string == "ENDSEC" {
+                    break;
+                }
+                continue;
+            }
+            match pair.code {
+                90 => size = pair.as_int().and_then(|value| usize::try_from(value).ok()),
+                310 => {
+                    let hex = pair.value_string.trim().as_bytes();
+                    for digits in hex.chunks_exact(2) {
+                        if let (Some(high), Some(low)) = (
+                            (digits[0] as char).to_digit(16),
+                            (digits[1] as char).to_digit(16),
+                        ) {
+                            data.push((high * 16 + low) as u8);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(size) = size {
+            data.truncate(size);
+        }
+        let header_size = |bytes: &[u8]| {
+            bytes
+                .get(..4)
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        };
+        let (format, skip) = if data.starts_with(&[0x89, b'P', b'N', b'G']) {
+            (Some(PreviewFormat::Png), 0)
+        } else if data.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A])
+            || data.starts_with(&[0x01, 0x00, 0x09, 0x00])
+            || data.starts_with(&[0x02, 0x00, 0x09, 0x00])
+        {
+            (Some(PreviewFormat::Wmf), 0)
+        } else if data.starts_with(b"BM") && data.len() > 14 {
+            // A BITMAPFILEHEADER in front of the DIB: the model keeps the DIB.
+            (Some(PreviewFormat::Bmp), 14)
+        } else if matches!(header_size(&data), Some(12 | 40 | 52 | 56 | 64 | 108 | 124)) {
+            (Some(PreviewFormat::Bmp), 0)
+        } else {
+            (None, 0)
+        };
+        match format {
+            Some(format) if data.len() > skip => {
+                document.preview = Some(Preview {
+                    format,
+                    data: data.split_off(skip),
+                });
+            }
+            _ if !data.is_empty() => document.notifications.notify(
+                crate::notification::NotificationType::Warning,
+                "THUMBNAILIMAGE section skipped: image format not recognised",
+            ),
+            _ => {}
+        }
         Ok(())
     }
 
@@ -1169,6 +1248,142 @@ fn rewire_dangling_layout_block_records(document: &mut CadDocument) {
 /// Re-point text-style handles on default records that no longer resolve to a
 /// text style.
 ///
+/// A dynamic-block object names its C++ class as the file's CLASSES section does (the DWG reader takes it
+/// from there); the DXF subclass marker of some objects differs (`AcDbBlockRotationAction` for the class
+/// `AcDbBlockRotateAction`).
+fn name_dynamic_block_classes(document: &mut CadDocument) {
+    use crate::objects::ObjectType;
+    let renamed: Vec<(Handle, String)> = document
+        .objects
+        .iter()
+        .filter_map(|(handle, object)| match object {
+            ObjectType::DynamicBlock(block) => document
+                .classes
+                .source_classes()
+                .and_then(|classes| {
+                    classes
+                        .iter()
+                        .find(|class| class.dxf_name.eq_ignore_ascii_case(&block.dxf_name))
+                })
+                .filter(|class| {
+                    !class.cpp_class_name.is_empty() && class.cpp_class_name != block.cpp_class_name
+                })
+                .map(|class| (*handle, class.cpp_class_name.clone())),
+            _ => None,
+        })
+        .collect();
+    for (handle, name) in renamed {
+        if let Some(ObjectType::DynamicBlock(block)) = document.objects.get_mut(&handle) {
+            block.cpp_class_name = name;
+        }
+    }
+}
+
+/// AutoCAD's hidden per-viewport layer-override records (`<base layer> @ <viewport handle>`) are named by
+/// their base layer in an entity of a DWG, which keeps the record's handle. A DXF entity names the record
+/// itself (group 8); read it the same way (base layer and the record's handle) so that one drawing has one
+/// model, and the writer writes the record's name back.
+fn name_viewport_override_layers(document: &mut CadDocument) {
+    use crate::io::dwg::dwg_document_builder::viewport_override_base_layer;
+    let overrides: std::collections::HashMap<String, (String, Handle)> = document
+        .layers
+        .iter()
+        .filter(|layer| !layer.handle.is_null())
+        .filter_map(|layer| {
+            viewport_override_base_layer(&layer.name)
+                .map(|base| (layer.name.clone(), (base.to_string(), layer.handle)))
+        })
+        .collect();
+    if overrides.is_empty() {
+        return;
+    }
+    for entity in document.entities_mut_keep_raw() {
+        let common = entity.common_mut();
+        if let Some((base, handle)) = overrides.get(&common.layer) {
+            common.layer = base.clone();
+            common.layer_handle = Some(*handle);
+        }
+    }
+}
+
+/// A STYLE's TrueType typeface is XDATA (`ACAD`: face name, flags) in DXF. The reader decodes it into the
+/// style's `true_type_font` fields; as the DWG reader does, drop the record from the retained XDATA so one
+/// datum has one place (the writer writes the fields back), and remember where the source listed it.
+fn drop_decoded_typefaces(document: &mut CadDocument) {
+    use crate::xdata::XDataValue;
+    let handles: Vec<Handle> = document
+        .text_styles
+        .iter()
+        .filter(|style| !style.true_type_font.is_empty())
+        .map(|style| style.handle)
+        .collect();
+    for handle in handles {
+        let Some(xdata) = document.object_xdata.get_mut(&handle) else {
+            continue;
+        };
+        let Some(index) = xdata
+            .records()
+            .iter()
+            .position(|record| record.application_name == "ACAD")
+        else {
+            continue;
+        };
+        // Only the exact shape the typeface fields were decoded from: a string and a 32-bit flags word.
+        let decoded = matches!(
+            xdata.records()[index].values.as_slice(),
+            [XDataValue::String(_), XDataValue::Integer32(_)]
+        );
+        if !decoded {
+            continue;
+        }
+        xdata.remove_record("ACAD");
+        if xdata.is_empty() {
+            document.object_xdata.remove(&handle);
+        }
+        if let Some(style) = document.text_styles.iter_mut().find(|style| style.handle == handle) {
+            style.true_type_font_eed_position = Some(index);
+        }
+    }
+}
+
+/// A TABLESTYLE row names its text style (group 7) and DXF has no handle for it; the DWG reader keeps the
+/// handle. Resolve the name to the style's handle so one drawing has one model.
+fn resolve_table_style_text_styles(document: &mut CadDocument) {
+    use crate::objects::ObjectType;
+    let handles: Vec<Handle> = document
+        .objects
+        .iter()
+        .filter(|(_, object)| matches!(object, ObjectType::TableStyle(_)))
+        .map(|(handle, _)| *handle)
+        .collect();
+    for handle in handles {
+        let Some(ObjectType::TableStyle(style)) = document.objects.get(&handle) else {
+            continue;
+        };
+        let wanted: Vec<Option<Handle>> = [&style.data_row_style, &style.header_row_style, &style.title_row_style]
+            .iter()
+            .map(|row| {
+                (row.text_style_handle.is_none() && !row.text_style_name.is_empty())
+                    .then(|| document.text_styles.get(&row.text_style_name).map(|text| text.handle))
+                    .flatten()
+            })
+            .collect();
+        if wanted.iter().all(Option::is_none) {
+            continue;
+        }
+        if let Some(ObjectType::TableStyle(style)) = document.objects.get_mut(&handle) {
+            for (row, found) in [&mut style.data_row_style, &mut style.header_row_style, &mut style.title_row_style]
+                .into_iter()
+                .zip(wanted)
+            {
+                if found.is_some() {
+                    row.text_style_handle = found;
+                }
+            }
+        }
+    }
+}
+
 /// The default Standard DIMSTYLE and Standard MLEADERSTYLE both wire their
 /// text-style reference to the default Standard TEXT STYLE handle. When the
 /// input file replaces that text style with its own record at a different
@@ -1227,5 +1442,28 @@ fn rewire_stale_text_style_references(document: &mut CadDocument) {
         {
             style.text_style_handle = Some(new);
         }
+    }
+}
+
+#[cfg(test)]
+mod r5a4_tests {
+    use super::*;
+    use crate::classes::DxfClass;
+    use crate::objects::{DynamicBlockObject, ObjectType};
+
+    #[test]
+    fn a_dynamic_block_object_takes_the_cpp_name_of_the_files_class() {
+        let mut document = CadDocument::new();
+        document
+            .classes
+            .record_source(DxfClass::new("BLOCKROTATEACTION", "AcDbBlockRotateAction"));
+        let object = DynamicBlockObject::new("BLOCKROTATEACTION", "AcDbBlockRotationAction");
+        let handle = Handle::new(0x500);
+        document.objects.insert(handle, ObjectType::DynamicBlock(object));
+        name_dynamic_block_classes(&mut document);
+        let Some(ObjectType::DynamicBlock(object)) = document.objects.get(&handle) else {
+            panic!("object")
+        };
+        assert_eq!(object.cpp_class_name, "AcDbBlockRotateAction");
     }
 }

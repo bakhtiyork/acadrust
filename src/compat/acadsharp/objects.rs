@@ -980,12 +980,21 @@ fn dump_mleader_style(
     } else {
         value.block_content_color
     };
-    let top = if source_dwg {
+    // ACadSharp's DWG reader reads the two in the other order, and before R2010 (no such fields in the
+    // record) leaves both at its own default; the native style keeps the defaults of a DXF without them.
+    let dwg_has_attachments = doc
+        .dwg_source_version
+        .is_some_and(|version| version >= crate::types::DxfVersion::AC1024);
+    let top = if source_dwg && !dwg_has_attachments {
+        TextAttachmentType::TopOfTopLine
+    } else if source_dwg {
         value.text_bottom_attachment
     } else {
         value.text_top_attachment
     };
-    let bottom = if source_dwg {
+    let bottom = if source_dwg && !dwg_has_attachments {
+        TextAttachmentType::TopOfTopLine
+    } else if source_dwg {
         value.text_top_attachment
     } else {
         value.text_bottom_attachment

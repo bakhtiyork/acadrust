@@ -583,6 +583,11 @@ pub struct TableStyle {
     pub modern_unknown_long1: i32,
     pub modern_unknown_long2: i32,
     pub modern_cell_style_handle: Handle,
+    /// Handle of the `CELLSTYLEMAP` object the modern cell styles were restored from (DXF, or a DWG before
+    /// R2010), which the readers take out of the document. The writers give the object they write again
+    /// this handle; NULL when the style was read from an R2010+ DWG, which keeps the styles in the record.
+    /// Not part of equality.
+    pub cell_style_map_handle: Handle,
     pub modern_style: Option<NamedTableCellStyle>,
     pub modern_overrides: Vec<(i32, NamedTableCellStyle)>,
     /// Annotative: tables using this style scale with the annotation scale.
@@ -626,6 +631,7 @@ impl TableStyle {
             modern_unknown_long1: 8,
             modern_unknown_long2: 101,
             modern_cell_style_handle: Handle::NULL,
+            cell_style_map_handle: Handle::NULL,
             modern_style: None,
             modern_overrides: Vec::new(),
             annotative: false,
@@ -763,21 +769,58 @@ fn legacy_rows_mut(style: &mut TableStyle) -> [&mut RowCellStyle; 3] {
     ]
 }
 
+fn dictionary_handle_entry(
+    document: &crate::document::CadDocument,
+    dictionary: Handle,
+    key: &str,
+) -> Handle {
+    match document.objects.get(&dictionary) {
+        Some(crate::objects::ObjectType::Dictionary(entries)) => entries.get(key).unwrap_or(Handle::NULL),
+        _ => Handle::NULL,
+    }
+}
+
+/// Take the round-trip carriers of a table style out of the document: the dictionary entry `key` of the
+/// style's extension dictionary and the object it names, with the side maps that describe that object.
+fn remove_carrier(document: &mut crate::document::CadDocument, dictionary: Handle, key: &str) {
+    use crate::objects::ObjectType;
+    let Some(ObjectType::Dictionary(entries)) = document.objects.get_mut(&dictionary) else {
+        return;
+    };
+    let Some(child) = entries.get(key) else {
+        return;
+    };
+    entries.entries.retain(|(name, _)| !name.eq_ignore_ascii_case(key));
+    entries
+        .hard_owner_entries
+        .retain(|name| !name.eq_ignore_ascii_case(key));
+    document.objects.remove(&child);
+    document.reactors_by_handle.remove(&child);
+    document.xdic_by_handle.remove(&child);
+    document.eed_by_handle.remove(&child);
+}
+
+/// Restore the modern cell styles (and the legacy rows' data types) of a table style from the carriers
+/// AutoCAD stores them in when the file format has no room for them: the `CELLSTYLEMAP` object and the
+/// `ACAD_XREC_ROUNDTRIP` record of the style's extension dictionary (DXF of every version, DWG before
+/// R2010). The typed data lives on the style from here on, as for an R2010+ DWG, which stores it in the
+/// TABLESTYLE record itself; the `CELLSTYLEMAP` object is taken out of the document and the writers write it
+/// again (the round-trip record stays, as the file has it).
 pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadDocument) {
     use crate::objects::{DataObjectData, ObjectType, XRecordValue};
     let styles: Vec<_> = document
         .objects
         .iter()
         .filter_map(|(handle, object)| match object {
-            ObjectType::TableStyle(style) if style.modern_overrides.is_empty() => Some(*handle),
+            ObjectType::TableStyle(_) => Some(*handle),
             _ => None,
         })
         .collect();
     for handle in styles {
-        let Some(dictionary) = document.extension_dictionary_handle(handle) else {
+        let Some(dictionary_handle) = document.extension_dictionary_handle(handle) else {
             continue;
         };
-        let Some(ObjectType::Dictionary(dictionary)) = document.objects.get(&dictionary) else {
+        let Some(ObjectType::Dictionary(dictionary)) = document.objects.get(&dictionary_handle) else {
             continue;
         };
         let cells = dictionary
@@ -790,38 +833,68 @@ pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadD
                 _ => None,
             });
         let mut row_types: [Option<(i32, i32, String)>; 3] = Default::default();
-        if let Some(Some(ObjectType::XRecord(record))) = dictionary
-            .get(ROUNDTRIP_RECORD_KEY)
-            .map(|record| document.objects.get(&record))
-        {
-            let mut entries = record
-                .entries
-                .iter()
-                .skip_while(|entry| entry.value.as_string() != Some(PRE2007_MARKER))
-                .skip(1)
-                .take_while(|entry| entry.code != 102);
-            for slot in &mut row_types {
-                let (Some(data_type), Some(unit_type), Some(format)) =
-                    (entries.next(), entries.next(), entries.next())
-                else {
-                    break;
-                };
-                if let (XRecordValue::Int32(data_type), XRecordValue::Int32(unit_type)) =
-                    (&data_type.value, &unit_type.value)
-                {
-                    *slot = Some((
-                        *data_type,
-                        *unit_type,
-                        format.value.as_string().unwrap_or_default().to_string(),
-                    ));
+        if let Some(record_handle) = dictionary.get(ROUNDTRIP_RECORD_KEY) {
+            if let Some(ObjectType::XRecord(record)) = document.objects.get(&record_handle) {
+                let mut entries = record
+                    .entries
+                    .iter()
+                    .skip_while(|entry| entry.value.as_string() != Some(PRE2007_MARKER))
+                    .skip(1)
+                    .take_while(|entry| entry.code != 102);
+                for slot in &mut row_types {
+                    let (Some(data_type), Some(unit_type), Some(format)) =
+                        (entries.next(), entries.next(), entries.next())
+                    else {
+                        break;
+                    };
+                    if let (XRecordValue::Int32(data_type), XRecordValue::Int32(unit_type)) =
+                        (&data_type.value, &unit_type.value)
+                    {
+                        *slot = Some((
+                            *data_type,
+                            *unit_type,
+                            format.value.as_string().unwrap_or_default().to_string(),
+                        ));
+                    }
                 }
             }
         }
+        let has_map = cells.is_some();
+        let map_handle = dictionary_handle_entry(document, dictionary_handle, CELL_STYLE_MAP_KEY);
         let Some(ObjectType::TableStyle(style)) = document.objects.get_mut(&handle) else {
             continue;
         };
+        if has_map {
+            style.cell_style_map_handle = map_handle;
+        }
         if let Some(cells) = cells {
-            style.modern_overrides = cells.into_iter().map(|cell| (cell.id, cell)).collect();
+            if style.modern_overrides.is_empty() {
+                style.modern_overrides = cells.iter().map(|cell| (cell.id, cell.clone())).collect();
+                // The legacy rows have no field for what the cell styles carry beyond them: the border
+                // type and the double-line spacing (the DWG reader copies whole borders of R2010+).
+                let [data, title, header] = legacy_rows_mut(style);
+                for cell in &cells {
+                    let row = match cell.name.as_str() {
+                        "_DATA" => &mut *data,
+                        "_TITLE" => &mut *title,
+                        "_HEADER" => &mut *header,
+                        _ => continue,
+                    };
+                    for grid in &cell.cell_style.borders {
+                        let border = match grid.index_mask {
+                            1 => &mut row.top_border,
+                            2 => &mut row.horizontal_inside_border,
+                            4 => &mut row.bottom_border,
+                            8 => &mut row.left_border,
+                            16 => &mut row.vertical_inside_border,
+                            32 => &mut row.right_border,
+                            _ => continue,
+                        };
+                        border.border_type = grid.border.border_type;
+                        border.double_line_spacing = grid.border.double_line_spacing;
+                    }
+                }
+            }
         }
         for (row, types) in legacy_rows_mut(style).into_iter().zip(row_types) {
             if let Some((data_type, unit_type, format)) = types {
@@ -830,18 +903,32 @@ pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadD
                 row.format_string = format;
             }
         }
+        if has_map {
+            remove_carrier(document, dictionary_handle, CELL_STYLE_MAP_KEY);
+        }
     }
 }
 
 pub(crate) fn store_table_style_roundtrip(document: &mut crate::document::CadDocument) {
+    if document.version >= crate::types::DxfVersion::AC1024 {
+        return;
+    }
+    store_table_style_carriers(document, document.version);
+}
+
+/// Write the carriers of the modern cell styles of every table style that has them, for an output of
+/// `version`: the `CELLSTYLEMAP` object in the style's extension dictionary and, before R2007, the
+/// `ACAD_XREC_ROUNDTRIP` record with the legacy rows' data types. A DWG before R2010 and every DXF need
+/// them; an R2010+ DWG keeps the styles in the TABLESTYLE record.
+pub(crate) fn store_table_style_carriers(
+    document: &mut crate::document::CadDocument,
+    version: crate::types::DxfVersion,
+) {
     use crate::objects::{
         CellStyleMap, DataObject, DataObjectData, ObjectType, XRecordEntry, XRecordValue,
     };
     use crate::types::DxfVersion;
-    if document.version >= DxfVersion::AC1024 {
-        return;
-    }
-    let with_row_types = document.version < DxfVersion::AC1021;
+    let with_row_types = version < DxfVersion::AC1021;
     let mut styles: Vec<_> = document
         .objects
         .iter()
@@ -859,14 +946,21 @@ pub(crate) fn store_table_style_roundtrip(document: &mut crate::document::CadDoc
                     &style.header_row_style,
                 ]
                 .map(|row| (row.data_type, row.unit_type, row.format_string.clone())),
+                style.cell_style_map_handle,
             )),
             _ => None,
         })
         .collect();
     // Objects are created in handle order so the output is deterministic.
     styles.sort_by_key(|style| style.0);
-    for (handle, cells, row_types) in styles {
+    // Handles in use, computed once when a carrier first needs a new handle; every handle created after that
+    // is added to it.
+    let mut used: Option<std::collections::HashSet<u64>> = None;
+    for (handle, cells, row_types, kept_map_handle) in styles {
         let dictionary = document.ensure_extension_dictionary(handle);
+        if let Some(used) = used.as_mut() {
+            used.insert(dictionary.value());
+        }
         let existing = match document.objects.get(&dictionary) {
             Some(ObjectType::Dictionary(entries)) => entries.get(CELL_STYLE_MAP_KEY),
             _ => None,
@@ -887,7 +981,15 @@ pub(crate) fn store_table_style_roundtrip(document: &mut crate::document::CadDoc
                         document.classes.add_or_update(class);
                     }
                 }
-                let map = document.allocate_handle();
+                // The handle the map was read under (DXF, a DWG before R2010); for a style read from an R2010+
+                // DWG, which keeps the cell styles in the record and has no map, a handle in a gap of the
+                // handle space after the style, so that the written file keeps the handle seed it states.
+                let map = if !kept_map_handle.is_null() && !document.objects.contains_key(&kept_map_handle) {
+                    kept_map_handle
+                } else {
+                    let used = used.get_or_insert_with(|| document.used_handle_values());
+                    document.allocate_handle_in_gap(handle, used)
+                };
                 let mut object = DataObject::new(DataObjectData::CellStyleMap(CellStyleMap {
                     cells,
                 }));
@@ -907,6 +1009,9 @@ pub(crate) fn store_table_style_roundtrip(document: &mut crate::document::CadDoc
             continue;
         }
         let record = document.ensure_xrecord(handle, ROUNDTRIP_RECORD_KEY);
+        if let Some(used) = used.as_mut() {
+            used.insert(record.value());
+        }
         let Some(ObjectType::XRecord(record)) = document.objects.get_mut(&record) else {
             continue;
         };

@@ -280,6 +280,63 @@ pub struct AcisRevision {
     pub end_marker: u32,
 }
 
+impl AcisRevision {
+    /// The revision as DXF group 2 spells it, `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}` in lower case (a
+    /// .NET `Guid`: the major component, the two minor ones and the eight bytes). `None` without a GUID.
+    pub fn guid_string(&self) -> Option<String> {
+        self.has_guid.then(|| {
+            format!(
+                "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
+                self.major,
+                self.minor1 as u16,
+                self.minor2 as u16,
+                self.bytes[0],
+                self.bytes[1],
+                self.bytes[2],
+                self.bytes[3],
+                self.bytes[4],
+                self.bytes[5],
+                self.bytes[6],
+                self.bytes[7]
+            )
+        })
+    }
+
+    /// The revision a DXF group 2 GUID states. `None` unless `text` is a GUID in braces other than the
+    /// zero GUID (which stands for "no revision").
+    pub fn from_guid_string(text: &str) -> Option<Self> {
+        let inner = text.trim().strip_prefix('{')?.strip_suffix('}')?;
+        let parts: Vec<&str> = inner.split('-').collect();
+        let widths = [8usize, 4, 4, 4, 12];
+        if parts.len() != 5
+            || parts.iter().zip(widths).any(|(part, width)| {
+                part.len() != width || !part.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return None;
+        }
+        let major = u32::from_str_radix(parts[0], 16).ok()?;
+        let minor1 = u16::from_str_radix(parts[1], 16).ok()? as i16;
+        let minor2 = u16::from_str_radix(parts[2], 16).ok()? as i16;
+        let mut bytes = [0u8; 8];
+        let tail = format!("{}{}", parts[3], parts[4]);
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&tail[2 * index..2 * index + 2], 16).ok()?;
+        }
+        if major == 0 && minor1 == 0 && minor2 == 0 && bytes == [0u8; 8] {
+            return None;
+        }
+        Some(Self {
+            has_guid: true,
+            major,
+            minor1,
+            minor2,
+            bytes,
+            end_marker: 0,
+        })
+    }
+}
+
 /// Material binding stored in the shared modeler-geometry body.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
