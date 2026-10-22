@@ -175,7 +175,12 @@ pub(super) fn dump_geo_data(
         ("ReferencePoint", vec3(reference)),
         (
             "ScaleEstimationMethod",
-            int(value.scale_estimation_method as i64),
+            // ACadSharp's R2009 layout has no scale estimation: the property keeps its class default (1).
+            int(if reader == "dwg" && value.version == 1 {
+                1
+            } else {
+                value.scale_estimation_method as i64
+            }),
         ),
         ("SeaLevelElevation", number(value.sea_level_elevation)),
         ("UpDirection", vec3(up)),

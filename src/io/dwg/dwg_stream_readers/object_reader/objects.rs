@@ -328,7 +328,11 @@ fn read_legacy_table_row_style(reader: &mut DwgMergedReader, version: DwgVersion
     let text_style = reader.read_handle();
     value.text_style_handle = (text_style != 0).then(|| Handle::from(text_style));
     value.text_height = reader.read_bit_double();
-    value.alignment = crate::objects::CellAlignment::from(reader.read_bit_short());
+    let alignment = reader.read_bit_short();
+    value.alignment = crate::objects::CellAlignment::from(alignment);
+    if !(1..=9).contains(&alignment) {
+        value.source_alignment = crate::objects::SourceWord(Some(alignment));
+    }
     value.text_color = reader.read_cm_true_color();
     value.fill_color = reader.read_cm_true_color();
     value.fill_enabled = reader.read_bit();
@@ -1825,7 +1829,10 @@ pub fn read_geodata(reader: &mut DwgMergedReader) -> GeoDataData {
             reader.read_bit_long(),
         ));
     }
-    if d.version == 1 {
+    // The civil trailer of the R2009 layout is optional: a record that ends after the mesh (ACadSharp writes none)
+    // has none, and reading on would invalidate the whole object. Up to seven bits are the padding of the byte (the
+    // main data ends where the string stream of an R2007+ record starts, or where the handles start).
+    if d.version == 1 && reader.main_remaining_bits() >= 8 {
         d.civil_data_present = reader.read_bit();
         d.civil_obsolete_flag = reader.read_bit();
         d.civil_reference_point1 = reader.read_2raw_double();
@@ -1942,6 +1949,44 @@ mod tests {
         assert!(!dict.hard_owner);
     }
 
+    /// A legacy row style states its alignment as a word that should be 1 to 9. A record with another word (ACadSharp
+    /// writes 0 for a style it read from an R2010+ drawing) reads as the default alignment, and the word is kept.
+    #[test]
+    fn legacy_row_style_keeps_an_alignment_word_outside_one_to_nine() {
+        use crate::types::Color;
+        let v = DwgVersion::AC15;
+        let d = DxfVersion::AC1015;
+        let mut r = make_reader(v, d, |w| {
+            w.write_variable_text("Standard"); // description
+            w.write_bit_short(0); // flow direction
+            w.write_bit_short(0); // flags
+            w.write_bit_double(0.06);
+            w.write_bit_double(0.06);
+            w.write_bit(false); // suppress title
+            w.write_bit(false); // suppress header
+            for alignment in [0i16, 2, 5] {
+                w.write_handle(DwgReferenceType::HardPointer, 0x11);
+                w.write_bit_double(0.18);
+                w.write_bit_short(alignment);
+                w.write_cm_true_color(&Color::from_index(7));
+                w.write_cm_true_color(&Color::from_index(7));
+                w.write_bit(false);
+                for _ in 0..6 {
+                    w.write_bit_short(-1);
+                    w.write_bit(true);
+                    w.write_cm_true_color(&Color::from_index(7));
+                }
+            }
+        });
+        let style = read_table_style(&mut r, v);
+        assert_eq!(style.data_row_style.source_alignment.0, Some(0));
+        assert_eq!(style.data_row_style.alignment, crate::objects::CellAlignment::MiddleCenter);
+        assert_eq!(style.title_row_style.source_alignment.0, None);
+        assert_eq!(style.title_row_style.alignment, crate::objects::CellAlignment::TopCenter);
+        assert_eq!(style.header_row_style.source_alignment.0, None);
+        assert_eq!(style.header_row_style.alignment, crate::objects::CellAlignment::MiddleCenter);
+    }
+
     #[test]
     fn test_dictionary_variable_roundtrip() {
         let v = DwgVersion::AC15;
@@ -1993,6 +2038,43 @@ mod tests {
         assert_eq!(g.coordinate_system_definition, csd);
         assert_eq!(g.geo_rss_tag, "georss-tag");
         assert_eq!(g.observation_coverage_tag, "cov");
+    }
+
+    /// An R2009 GEODATA record without the civil trailer (ACadSharp writes none) is read whole.
+    #[test]
+    fn geodata_version_one_without_the_civil_trailer_is_read_whole() {
+        let v = DwgVersion::AC15;
+        let d = DxfVersion::AC1015;
+        let mut r = make_reader(v, d, |w| {
+            w.write_bit_long(1); // object version (R2009)
+            w.write_handle(DwgReferenceType::SoftOwnership, 0x30); // host block
+            w.write_bit_short(0); // coordinate type
+            w.write_3bit_double(Vector3::new(4.0, 5.0, 6.0)); // reference point
+            w.write_bit_long(1); // horizontal units
+            w.write_3bit_double(Vector3::new(1.0, 2.0, 3.0)); // design point
+            w.write_3bit_double(Vector3::ZERO); // obsolete
+            w.write_3bit_double(Vector3::new(0.0, 0.0, 1.0)); // up direction
+            w.write_bit_double(0.0); // north angle
+            w.write_3bit_double(Vector3::new(1.0, 1.0, 1.0)); // obsolete
+            w.write_variable_text("PROJCS[\"X\"]"); // coordinate system definition
+            w.write_variable_text("georss"); // geo rss tag
+            w.write_bit_double(0.0254); // horizontal unit scale
+            w.write_variable_text(""); // obsolete datum
+            w.write_variable_text(""); // obsolete WKT
+            w.write_variable_text("from"); // observation from
+            w.write_variable_text("to"); // observation to
+            w.write_variable_text("cov"); // observation coverage
+            w.write_bit_long(1); // mesh points
+            w.write_2raw_double(Vector2::new(1.0, 2.0));
+            w.write_2raw_double(Vector2::new(3.0, 4.0));
+            w.write_bit_long(0); // mesh faces
+        });
+        let g = read_geodata(&mut r);
+        assert!(!r.has_error(), "the record ends after the mesh");
+        assert_eq!(g.version, 1);
+        assert_eq!(g.geo_rss_tag, "georss");
+        assert_eq!(g.mesh_points.len(), 1);
+        assert!(!g.civil_data_present);
     }
 
     #[test]

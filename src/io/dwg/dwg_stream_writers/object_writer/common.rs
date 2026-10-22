@@ -825,8 +825,18 @@ impl<'a> DwgObjectWriter<'a> {
                 }
                 let mut replacement = crate::xdata::ExtendedDataRecord::new(&application.name);
                 replacement.values = values;
+                let source_position = eed.raw_dwg_eed.iter().position(|(app, _)| *app == app_handle);
                 eed.merge_modeled_record(&replacement);
-                eed.raw_dwg_eed.retain(|(app, _)| *app != app_handle);
+                // The merged block keeps the place its application had in the source; without its verbatim block
+                // the application would be written after all the others.
+                let merged_bytes = source_position.and_then(|_| {
+                    eed.get_record(&application.name)
+                        .and_then(|record| self.encode_xdata_record(record))
+                });
+                match (source_position, merged_bytes) {
+                    (Some(index), Some((_, bytes))) => eed.raw_dwg_eed[index].1 = bytes,
+                    _ => eed.raw_dwg_eed.retain(|(app, _)| *app != app_handle),
+                }
             } else {
                 eed.raw_dwg_eed.retain(|(app, _)| *app != app_handle);
                 opaque_extra.push((app_handle, bytes));
@@ -931,6 +941,12 @@ impl<'a> DwgObjectWriter<'a> {
     /// 64-group "xref dependant" flag with explicit value.
     pub fn write_xref_dependant_bit_value(&mut self, xref_dep: bool) {
         self.write_xref_table_flags(false, false, xref_dep);
+    }
+
+    /// The xref flags of a table entry that models only the dependent bit. The "referenced" bit (64 of the DXF
+    /// group 70) is kept from the entry's source flags: it is stored from R2000 to R2004 and not afterwards.
+    pub fn write_xref_flags_with_source(&mut self, source_flags: i16, xref_dep: bool) {
+        self.write_xref_table_flags(source_flags & 64 != 0, false, xref_dep);
     }
 
     pub fn write_xref_table_flags(

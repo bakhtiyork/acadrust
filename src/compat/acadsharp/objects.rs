@@ -3437,7 +3437,11 @@ fn legacy_row_style(
     let mut result = default_cell_style(name, style_class);
     for (key, field) in [
         ("BackgroundColor", style_color(value.fill_color)),
-        ("CellAlignment", int(value.alignment as i64)),
+        // ACadSharp keeps the word of the record as it is, also when it is no alignment (0).
+        (
+            "CellAlignment",
+            int(value.source_alignment.0.map_or(value.alignment as i64, i64::from)),
+        ),
         ("IsFillColorOn", bool_value(value.fill_enabled)),
         ("TextColor", style_color(value.text_color)),
         ("TextHeight", number(value.text_height)),

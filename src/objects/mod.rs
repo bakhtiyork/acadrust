@@ -156,6 +156,18 @@ impl PartialEq for SourceText {
     }
 }
 
+/// A word of a record as the source stated it, kept only when the typed field folded it into something else.
+/// Metadata about how the record was read, so it never takes part in equality.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SourceWord(pub Option<i16>);
+
+impl PartialEq for SourceWord {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// Dictionary object - stores key-value pairs of object handles
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

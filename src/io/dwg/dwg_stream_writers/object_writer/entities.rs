@@ -2227,7 +2227,10 @@ impl<'a> DwgObjectWriter<'a> {
         // Frozen layer count BL
         self.writer.write_bit_long(e.frozen_layers.len() as i32);
         // Status flags BL 90
-        let grid_bits = if self.version.r2007_plus() {
+        // The grid behaviour bits (18..21) belong to R2007+; a file of an older version that states them keeps them.
+        let grid_bits = if self.version.r2007_plus()
+            || self.document.dwg_source_version == Some(self.dxf_version)
+        {
             i32::from(e.grid_flags.to_bits()) << 18
         } else {
             0
@@ -3293,9 +3296,11 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(border.double_spacing);
     }
 
-    fn write_table_cell_style(&mut self, style: Option<&CellStyle>) {
+    /// A cell style, or only its type when it carries no data. A style the source stated without data keeps the
+    /// type (column 3, row 2, cell 1, table 4) it had there.
+    fn write_table_cell_style(&mut self, style: Option<&CellStyle>, source_style_type: Option<i32>) {
         let Some(style) = style else {
-            self.writer.write_bit_long(0);
+            self.writer.write_bit_long(source_style_type.unwrap_or(0));
             self.writer.write_bit_short(0);
             return;
         };
@@ -3424,7 +3429,7 @@ impl<'a> DwgObjectWriter<'a> {
         for content in &cell.contents {
             self.write_table_cell_content(content);
         }
-        self.write_table_cell_style(cell.style.as_ref());
+        self.write_table_cell_style(cell.style.as_ref(), cell.source_style_type);
         self.writer.write_bit_long(cell.style_id);
         let geometries: Vec<CellContentGeometry> = if !cell.geometries.is_empty() {
             cell.geometries.clone()
@@ -3476,7 +3481,7 @@ impl<'a> DwgObjectWriter<'a> {
             for data in &col.custom_data_items {
                 self.write_table_custom_data(data);
             }
-            self.write_table_cell_style(col.style.as_ref());
+            self.write_table_cell_style(col.style.as_ref(), col.source_style_type);
             self.writer.write_bit_long(col.style_id);
             self.writer.write_bit_double(col.width);
         }
@@ -3507,7 +3512,7 @@ impl<'a> DwgObjectWriter<'a> {
             for data in &row.custom_data_items {
                 self.write_table_custom_data(data);
             }
-            self.write_table_cell_style(row.style.as_ref());
+            self.write_table_cell_style(row.style.as_ref(), row.source_style_type);
             self.writer.write_bit_long(style_id);
             self.writer.write_bit_double(row.height);
         }
@@ -3516,7 +3521,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer
                 .write_handle(DwgReferenceType::HardPointer, handle.value());
         }
-        self.write_table_cell_style(e.base_style.as_ref());
+        self.write_table_cell_style(e.base_style.as_ref(), e.base_style_type);
         self.writer.write_bit_long(e.merged_ranges.len() as i32);
         for range in &e.merged_ranges {
             self.writer.write_bit_long(range.top_row as i32);

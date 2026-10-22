@@ -133,6 +133,11 @@ pub struct DimensionBase {
     /// DXF field presence used only by the ACadSharp compatibility view.
     #[cfg_attr(feature = "serde", serde(default))]
     pub dxf_source: Option<DimensionDxfSource>,
+    /// The attachment point word of a DWG record when it is none of 1 to 9 (`attachment_point` holds the default
+    /// for it). Provenance: never part of equality.
+    #[doc(hidden)]
+    #[cfg_attr(feature = "serde", serde(default, skip))]
+    pub source_attachment_point: crate::objects::SourceWord,
 }
 
 // Source presence is compatibility metadata, not native logical state.
@@ -195,6 +200,7 @@ impl DimensionBase {
             dwg_flags_byte: 0x01,
             text_user_positioned: false,
             dxf_source: None,
+            source_attachment_point: crate::objects::SourceWord::default(),
         }
     }
 

@@ -474,6 +474,9 @@ fn mtext_from_data(data: entities::MTextData, common: EntityCommon, maps: &Handl
     e.dwg_x_direction = Some(data.x_direction);
     e.line_spacing_factor = data.linespacing_factor;
     e.line_spacing_style = crate::entities::LineSpacingStyle::from(data.linespacing_style);
+    if !(1..=2).contains(&data.linespacing_style) {
+        e.source_line_spacing_style = crate::objects::SourceWord(Some(data.linespacing_style));
+    }
     e.background_fill_flags = data.background_flags;
     e.background_scale = data.background_scale;
     e.background_color = data.background_color;
@@ -8418,6 +8421,9 @@ fn map_dimension_common(
         9 => crate::entities::dimension::AttachmentPointType::BottomRight,
         _ => crate::entities::dimension::AttachmentPointType::MiddleCenter,
     };
+    if !(1..=9).contains(&common.attachment_point) {
+        base.source_attachment_point = crate::objects::SourceWord(Some(common.attachment_point));
+    }
     base.line_spacing_factor = common.linespacing_factor;
     base.line_spacing_style = common.linespacing_style;
     base.insertion_scale = common.ins_scale;

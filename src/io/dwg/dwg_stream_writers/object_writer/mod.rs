@@ -97,6 +97,9 @@ pub struct DwgObjectWriter<'a> {
     pub(super) next_handle: Option<Handle>,
     /// Next handle value for allocating sub-entity handles (vertices, seqend)
     pub(super) next_alloc_handle: u64,
+    /// Upper-case names of the native default application IDs that stay out of the APPID table: the source never
+    /// registered them and nothing uses them.
+    pub(super) skipped_app_ids: std::sync::Arc<HashSet<String>>,
     /// Computed model space extents for VPort view adjustment and header EXTMIN/EXTMAX
     pub(crate) model_space_extents: Option<BoundingBox3D>,
     /// SAB data entries collected during entity writing (AC1027+).
@@ -267,6 +270,7 @@ impl<'a> DwgObjectWriter<'a> {
             prev_handle: None,
             next_handle: None,
             next_alloc_handle: max_h,
+            skipped_app_ids: std::sync::Arc::new(Self::skipped_app_ids_of(document)),
             model_space_extents: None,
             sab_entries: Vec::new(),
             pending_has_ds_data: false,
@@ -279,6 +283,33 @@ impl<'a> DwgObjectWriter<'a> {
             xdic_owner_index: std::sync::Arc::new(Self::build_xdic_owner_index(document)),
             block_users: std::sync::Arc::new(Self::build_block_users(document)),
         })
+    }
+
+    /// The default application IDs the APPID table leaves out (see `unused_default_app_ids` of the DXF writer),
+    /// less those the DWG record writers use: annotative styles and the raw extended-data blocks of a DWG source.
+    fn skipped_app_ids_of(document: &CadDocument) -> HashSet<String> {
+        let mut skipped = crate::io::dxf::unused_default_app_ids(document);
+        if skipped.is_empty() {
+            return skipped;
+        }
+        if document.text_styles.iter().any(|style| style.annotative)
+            || document.dim_styles.iter().any(|style| style.annotative)
+        {
+            skipped.remove("ACADANNOTATIVE");
+        }
+        let raw_use: HashSet<u64> = document
+            .eed_by_handle
+            .values()
+            .flat_map(|blocks| blocks.iter().map(|(app, _)| *app))
+            .collect();
+        skipped.retain(|name| {
+            document
+                .app_ids
+                .iter()
+                .find(|app| app.name.eq_ignore_ascii_case(name))
+                .is_none_or(|app| !raw_use.contains(&app.handle.value()))
+        });
+        skipped
     }
 
     fn build_block_users(document: &CadDocument) -> std::collections::HashMap<Handle, Vec<Handle>> {
@@ -473,6 +504,7 @@ impl<'a> DwgObjectWriter<'a> {
             .document
             .app_ids
             .iter()
+            .filter(|a| !self.skipped_app_ids.contains(&a.name.to_ascii_uppercase()))
             .map(|a| (a.name.eq_ignore_ascii_case("ACAD"), a.handle))
             .collect();
         appid_handles.sort_by_key(|(is_acad, _)| !*is_acad);
@@ -790,15 +822,23 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_layer(&mut self, layer: &crate::tables::Layer) {
         let transparency_app = self.document.app_ids.get("AcCmTransparency");
-        let had_transparency_eed = self
-            .existing_xdata_values(layer.handle, "AcCmTransparency")
-            .is_some_and(|values| {
-                values.iter().any(|value| {
-                    matches!(value, crate::xdata::XDataValue::Integer32(_))
-                })
-            });
+        let source_transparency = self.existing_xdata_values(layer.handle, "AcCmTransparency");
+        let had_transparency_eed = source_transparency.as_ref().is_some_and(|values| {
+            values
+                .iter()
+                .any(|value| matches!(value, crate::xdata::XDataValue::Integer32(_)))
+        });
+        // A retained value that still decodes to the layer's transparency is written as it was (a packed zero is the
+        // opaque default, which would otherwise come back as the explicit 33554687).
+        let transparency_unchanged = source_transparency.as_ref().is_some_and(|values| {
+            values.iter().any(|value| {
+                matches!(value, crate::xdata::XDataValue::Integer32(packed)
+                    if crate::types::Transparency::from_layer_alpha_value(*packed as u32)
+                        == Some(layer.transparency))
+            })
+        });
         let transparency_eed = transparency_app.and_then(|app| {
-            (!layer.transparency.is_opaque() || had_transparency_eed).then(|| {
+            (!transparency_unchanged && (!layer.transparency.is_opaque() || had_transparency_eed)).then(|| {
                 let mut bytes = vec![71];
                 bytes.extend_from_slice(&layer.transparency.to_dxf_value().to_le_bytes());
                 (app.handle.value(), bytes)
@@ -858,7 +898,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_variable_text(&layer.name);
 
         // Xref-dependant bit
-        self.write_xref_dependant_bit_value(layer.flags.xref_dependent);
+        self.write_xref_flags_with_source(layer.source_flags, layer.flags.xref_dependent);
 
         if self.version.r2000_plus() {
             let lw_index = layer.line_weight.to_dwg_index() as i16;
@@ -978,7 +1018,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_variable_text(&style.name);
 
         // Xref-dependent flag
-        self.write_xref_dependant_bit_value(style.xref_dependent);
+        self.write_xref_flags_with_source(style.source_flags, style.xref_dependent);
 
         // Shape file flag
         self.writer.write_bit(style.is_shape_file);
@@ -1035,7 +1075,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_variable_text(&ltype.name);
         // Xref-dependent flag (linetypes that came in through an xref keep it,
         // otherwise AUDIT renames every "xref|name" record).
-        self.write_xref_dependant_bit_value(ltype.xref_dependent);
+        self.write_xref_flags_with_source(ltype.source_flags, ltype.xref_dependent);
         // Description
         self.writer.write_variable_text(&ltype.description);
         // Pattern length
@@ -1462,7 +1502,13 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_appid_entries(&mut self) {
-        let mut entries: Vec<_> = self.document.app_ids.iter().map(|a| a.clone()).collect();
+        let mut entries: Vec<_> = self
+            .document
+            .app_ids
+            .iter()
+            .filter(|a| !self.skipped_app_ids.contains(&a.name.to_ascii_uppercase()))
+            .cloned()
+            .collect();
         entries.sort_by_key(|app| !app.name.eq_ignore_ascii_case("ACAD"));
         for app in &entries {
             self.write_appid(app);
@@ -1502,7 +1548,7 @@ impl<'a> DwgObjectWriter<'a> {
             })
             .collect();
         self.writer.write_variable_text(&name);
-        self.write_xref_dependant_bit();
+        self.write_xref_flags_with_source(app.source_flags, false);
 
         // Unknown byte (group 71)
         self.writer.write_byte(0);
@@ -2059,6 +2105,7 @@ impl<'a> DwgObjectWriter<'a> {
             prev_handle: None,
             next_handle: None,
             next_alloc_handle: self.next_alloc_handle,
+            skipped_app_ids: self.skipped_app_ids.clone(),
             model_space_extents: None,
             sab_entries: Vec::new(),
             pending_has_ds_data: false,
@@ -2140,13 +2187,14 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         // Entry name (DWG uses bare names without numeric suffixes)
-        let dwg_name = dwg_block_name(&record.name);
+        let stated_anonymous = self.is_dynamic_definition_stated_anonymous(record);
+        let dwg_name = if stated_anonymous { "*U" } else { dwg_block_name(&record.name) };
         self.writer.write_variable_text(dwg_name);
         // Xref dependant
         self.write_xref_dependant_bit();
 
         // Anonymous flag
-        self.writer.write_bit(record.flags.anonymous);
+        self.writer.write_bit(record.flags.anonymous || stated_anonymous);
         // Has attributes
         let has_attributes = record.entity_handles.iter().any(|handle| {
             matches!(
@@ -2276,6 +2324,19 @@ impl<'a> DwgObjectWriter<'a> {
         self.register_object(record.handle);
     }
 
+    /// Whether the record is a down-saved dynamic block definition the file stated anonymous (the bare "*U", flag 1)
+    /// while its public name is kept in the extended data (`AcDbDynamicBlockTrueName`), which the reader restores as
+    /// the record's name. The extended data is written back as it was, so the record is written as it was too:
+    /// anonymous, under the bare "*U".
+    fn is_dynamic_definition_stated_anonymous(&self, record: &BlockRecord) -> bool {
+        record.source_flags & 1 != 0
+            && !record.flags.anonymous
+            && !record.name.starts_with('*')
+            && ["AcDbDynamicBlockTrueName", "ACDBDYNAMICBLOCKTRUENAME"]
+                .iter()
+                .any(|application| self.existing_xdata_values(record.handle, application).is_some())
+    }
+
     /// Write BLOCK entity (block begin).
     fn write_block_begin(&mut self, record: &BlockRecord) {
         // New documents reserve marker handles in BlockRecord without storing
@@ -2295,10 +2356,21 @@ impl<'a> DwgObjectWriter<'a> {
             None
         };
 
-        let (handle, name, use_raw_name) = if let Some(ref b) = block {
-            (b.common.handle, b.name.as_str(), true)
+        let (handle, name) = if let Some(ref b) = block {
+            // An anonymous block states its number in the BLOCK marker (the record has the bare "*U"): the number
+            // the file had is written back. The native name is AutoCAD's numbering on reopening, and a reader that
+            // takes the marker's name (ACadSharp does) would count the blocks again from it.
+            let source_number = b.source_name.as_deref().filter(|source| {
+                b.name == record.name
+                    && b.name.starts_with('*')
+                    && source.get(..2).zip(b.name.get(..2)).is_some_and(|(a, n)| a.eq_ignore_ascii_case(n))
+            });
+            (b.common.handle, source_number.unwrap_or(b.name.as_str()))
         } else {
-            (record.block_entity_handle, record.name.as_str(), false)
+            // A synthesized marker states the record's full name ("*Paper_Space0", "*D3"), as AutoCAD's markers do;
+            // only the table record has the bare "*Paper_Space" / "*D". A reader that names a record after its
+            // marker (ACadSharp does) would otherwise find every paper space named "*Paper_Space".
+            (record.block_entity_handle, record.name.as_str())
         };
 
         let mut common = block
@@ -2342,13 +2414,7 @@ impl<'a> DwgObjectWriter<'a> {
             &common.edge_visual_style_handle,
         );
 
-        // Use the original name as-is when we have the Block entity from binary;
-        // only apply dwg_block_name() for programmatically-created blocks.
-        if use_raw_name {
-            self.writer.write_variable_text(name);
-        } else {
-            self.writer.write_variable_text(dwg_block_name(name));
-        }
+        self.writer.write_variable_text(name);
 
         self.register_object(common.handle);
     }

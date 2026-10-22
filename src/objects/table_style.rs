@@ -308,6 +308,11 @@ pub struct RowCellStyle {
     /// DXF code: 170
     pub alignment: CellAlignment,
 
+    /// The alignment word of a legacy DWG record when it is none of 1 to 9 (ACadSharp keeps it as it is;
+    /// `alignment` holds the default for it). Provenance: never part of equality.
+    #[cfg_attr(feature = "serde", serde(default, skip))]
+    pub source_alignment: super::SourceWord,
+
     /// Text color.
     /// DXF code: 62
     pub text_color: Color,
@@ -355,6 +360,7 @@ impl RowCellStyle {
             text_style_handle: None,
             text_height: 0.18,
             alignment: CellAlignment::MiddleCenter,
+            source_alignment: super::SourceWord::default(),
             text_color: Color::ByBlock,
             fill_color: Color::Index(7), // White/Black
             fill_enabled: false,
