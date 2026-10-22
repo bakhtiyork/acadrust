@@ -163,13 +163,6 @@ impl<'a> DxfWriter<'a> {
         // so entity layer/linetype lookups miss and reference a name the
         // written table no longer defines (issue #80).
         crate::io::dwg::dwg_writer::prepare_table_keys(&mut prepared);
-        // The modern cell styles of a table style have no place in the DXF TABLESTYLE record: they travel
-        // in a CELLSTYLEMAP object of its extension dictionary (an R2010+ DWG keeps them in the record).
-        if prepared.objects.values().any(|object| {
-            matches!(object, crate::objects::ObjectType::TableStyle(style) if !style.modern_overrides.is_empty())
-        }) {
-            crate::objects::store_table_style_carriers(prepared.to_mut(), output_version);
-        }
         // Table entries added after the document was built or read
         // (`Layer::new` + `layers.add`, `AppId::new` + `app_ids.add`) still
         // carry NULL handles. Written as they are, each becomes a `5 / 0`
@@ -180,7 +173,11 @@ impl<'a> DxfWriter<'a> {
             prepared.to_mut().assign_table_entry_handles();
         }
         crate::io::dwg::dwg_writer::prepare_active_viewport_elevation(&mut prepared);
-        self.write_prepared_dxf(writer, prepared.as_ref(), output_version)
+        // The modern cell styles of a table style have no place in the DXF TABLESTYLE record: they travel
+        // in a CELLSTYLEMAP object of its extension dictionary (an R2010+ DWG keeps them in the record). The
+        // output states those objects besides the document's own; the document is not copied for them.
+        let carriers = crate::objects::plan_table_style_carriers(prepared.as_ref(), output_version);
+        self.write_prepared_dxf(writer, prepared.as_ref(), output_version, carriers)
     }
 
     fn write_prepared_dxf<W: DxfStreamWriter>(
@@ -188,8 +185,13 @@ impl<'a> DxfWriter<'a> {
         writer: &mut W,
         document: &CadDocument,
         output_version: crate::types::DxfVersion,
+        carriers: Option<crate::objects::TableStyleCarriers>,
     ) -> Result<()> {
-        let handle_start = compute_max_handle(document);
+        let carrier_max_handle = carriers.as_ref().map_or(0, |carriers| carriers.max_handle());
+        // The handles the carriers took from the allocator are used handles.
+        let handle_start = compute_max_handle(document)
+            .max(carriers.as_ref().and_then(|carriers| carriers.next_handle).unwrap_or(0))
+            .max(carrier_max_handle + 1);
         // Count against the version actually emitted, not the one the document
         // was loaded as, so the handle budget matches what the writer produces.
         let extra_handles = count_extra_handles(
@@ -200,11 +202,14 @@ impl<'a> DxfWriter<'a> {
         // written: the native seed advances while the reader creates default objects, and writing it back would
         // grow it with every round trip.
         let handle_seed = match document.header.source_handle_seed {
-            Some(source) if extra_handles == 0 => source.max(max_written_handle(document) + 1),
+            Some(source) if extra_handles == 0 => source.max(max_written_handle(document).max(carrier_max_handle) + 1),
             _ => handle_start + extra_handles + 1,
         };
         let mut section_writer = SectionWriter::new(writer, handle_start, handle_seed);
         section_writer.set_version(output_version);
+        if let Some(carriers) = carriers {
+            section_writer.set_carriers(carriers);
+        }
         section_writer.set_dwg_source(document.dwg_source_version);
         section_writer.set_layer_names(document);
         section_writer.build_valid_handles(document);

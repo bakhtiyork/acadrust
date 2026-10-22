@@ -632,6 +632,9 @@ impl DxfReader {
         drop_decoded_typefaces(&mut document);
         name_viewport_override_layers(&mut document);
         name_dynamic_block_classes(&mut document);
+        normalize_by_block_material(&mut document);
+        // The current annotation scale is the CANNOSCALE entry of the variable dictionary, in a DXF as in a DWG.
+        crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::reflect_annotation_scale(&mut document);
         resolve_table_style_text_styles(&mut document);
         rewire_dangling_layout_block_records(&mut document);
         document.ensure_model_layout();
@@ -640,6 +643,21 @@ impl DxfReader {
             for entity in document.entities_mut_keep_raw() {
                 if let EntityType::Viewport(viewport) = entity {
                     crate::io::dwg::legacy_viewport::restore_r12(viewport, |name| layers.get(&name.to_uppercase()).copied());
+                }
+            }
+        } else if document.version <= crate::types::DxfVersion::AC1014 {
+            // The view parameters of an R13/R14 viewport are in its MVIEW extended data, as in the DWG.
+            let layers: HashMap<_, _> = document.layers.iter().map(|layer| (layer.name.to_uppercase(), layer.handle)).collect();
+            for entity in document.entities_mut_keep_raw() {
+                match entity {
+                    EntityType::Viewport(viewport) => {
+                        crate::io::dwg::legacy_viewport::restore(viewport, |name| layers.get(&name.to_uppercase()).copied());
+                    }
+                    // The by-block colour of an R13/R14 leader is group 77, as its DWG record states it.
+                    EntityType::Leader(leader) => {
+                        leader.byblock_color = leader.override_color.index().map_or(0, |index| index as i16);
+                    }
+                    _ => {}
                 }
             }
         }
@@ -680,6 +698,7 @@ impl DxfReader {
         document.source_path = self.source_path.take();
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
+        crate::entities::table::restore_table_roundtrip(&mut document);
         Ok(crate::io::read::ReadOutcome::new(document, stats))
     }
 
@@ -1241,6 +1260,35 @@ fn rewire_dangling_layout_block_records(document: &mut CadDocument) {
             .find(|record| record.handle.value() == target)
         {
             record.layout = layout_handle;
+        }
+    }
+}
+
+/// An entity whose group 347 names the built-in `ByBlock` material has the material flag "ByBlock" (what a DWG
+/// stores in two bits), not a handle of its own: the DXF writer states the flag as that handle, so the same
+/// entity reads back the same from DXF and from DWG.
+fn normalize_by_block_material(document: &mut CadDocument) {
+    if document.version < crate::types::DxfVersion::AC1021 {
+        return;
+    }
+    let Some(by_block) = document.objects.iter().find_map(|(handle, object)| match object {
+        crate::objects::ObjectType::Material(material) if material.name.eq_ignore_ascii_case("ByBlock") => Some(*handle),
+        _ => None,
+    }) else {
+        return;
+    };
+    let names_it = |entity: &EntityType| {
+        let common = entity.common();
+        common.material_flags == 0b11 && common.material_handle == Some(by_block)
+    };
+    if !document.entities().any(names_it) {
+        return;
+    }
+    for entity in document.entities_mut_keep_raw() {
+        if names_it(entity) {
+            let common = entity.common_mut();
+            common.material_flags = 1;
+            common.material_handle = None;
         }
     }
 }

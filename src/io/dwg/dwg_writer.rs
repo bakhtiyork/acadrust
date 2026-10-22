@@ -476,7 +476,8 @@ pub(crate) fn prepare_database_references(document: &mut std::borrow::Cow<'_, Ca
                 .filter_map(|(key, handle)| {
                     layout_names
                         .get(handle)
-                        .filter(|name| *name == key)
+                        // Layout names are symbol names: a DWG before R2000 keys them in upper case.
+                        .filter(|name| name.eq_ignore_ascii_case(key))
                         .map(|_| *handle)
                 })
                 .collect();

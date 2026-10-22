@@ -169,6 +169,13 @@ pub(in super::super) fn content_fields(
         };
         styles.as_ref().map_or(Value::Null, |s| s[key].clone())
     };
+    // A table a DXF reader completed from its TABLECONTENT object is projected as the oracle's DXF reader sees it:
+    // from the legacy entity only.
+    let legacy = table.dxf_legacy.0.as_deref().filter(|_| source.dxf);
+    let base_style = legacy.map_or(table.base_style.as_ref(), |l| l.base_style.as_ref());
+    let base_style_type = legacy.map_or(table.base_style_type, |l| l.base_style_type);
+    let table_columns = legacy.map_or(&table.columns, |l| &l.columns);
+    let table_rows = legacy.map_or(&table.rows, |l| &l.rows);
     vec![
         (
             "Style",
@@ -178,16 +185,11 @@ pub(in super::super) fn content_fields(
         ),
         (
             "CellStyleOverride",
-            style(
-                table.base_style.as_ref(),
-                table.base_style_type,
-                source,
-                true,
-            ),
+            style(base_style, base_style_type, source, true),
         ),
         (
             "Columns",
-            array(table.columns.iter().map(|c| {
+            array(table_columns.iter().map(|c| {
                 props(
                     "TableEntity.Column",
                     [
@@ -216,7 +218,7 @@ pub(in super::super) fn content_fields(
         ),
         (
             "Rows",
-            array(table.rows.iter().map(|r| {
+            array(table_rows.iter().map(|r| {
                 props(
                     "TableEntity.Row",
                     [

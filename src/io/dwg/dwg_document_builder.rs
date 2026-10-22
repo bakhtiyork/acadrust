@@ -3559,7 +3559,7 @@ impl DwgDocumentBuilder {
     /// AcDbVariableDictionary — the DWG header stream omits it. Sets the scale
     /// name and, from the referenced AcDbScale, the numeric value
     /// (paper units / drawing units, e.g. "1:70" → 1/70).
-    fn reflect_annotation_scale(document: &mut CadDocument) {
+    pub(crate) fn reflect_annotation_scale(document: &mut CadDocument) {
         let var_handle = document.objects.values().find_map(|o| match o {
             crate::objects::ObjectType::Dictionary(d) => d
                 .entries
@@ -4235,6 +4235,11 @@ impl DwgDocumentBuilder {
                     e.arrowhead_type = data.arrowhead_type;
                     e.arrow_size = data.dimasz;
                     e.byblock_color = data.byblock_color;
+                    // The R13/R14 record's by-block colour is what DXF group 77 states (the colour used when the
+                    // leader's DIMCLRD is BYBLOCK).
+                    if self.obj_reader.version().r13_14_only() {
+                        e.override_color = crate::types::Color::from_index(data.byblock_color);
+                    }
                     e.dwg_unknown_bit1 = data.unknown_bit;
                     e.dwg_unknown_bit2 = data.unknown_bit2;
                     e.dwg_unknown_bit3 = data.unknown_bit3;

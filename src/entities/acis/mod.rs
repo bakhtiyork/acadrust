@@ -53,6 +53,19 @@ pub use sab::{SabReader, SabWriter};
 pub use types::*;
 pub use writer::SatWriter;
 
+/// Whether binary ACIS data (`sab`) and SAT text (`sat`) state the same model: both parse, and both print the same
+/// SAT text. A DXF of R2000-R2010 carries SAT only, so a DWG's binary data is written as text; the round-trip gate
+/// (`acad-dump acis-same`) uses this to verify that the conversion lost nothing. `Err` names the first difference.
+pub fn sab_matches_sat(sab: &[u8], sat: &str) -> Result<(), String> {
+    let binary = SabReader::read(sab).map_err(|error| format!("the binary data does not parse: {error}"))?;
+    let text = SatParser::parse(sat).map_err(|error| format!("the SAT text does not parse: {error}"))?;
+    if binary.to_sat_string() == text.to_sat_string() {
+        Ok(())
+    } else {
+        Err("the models print different SAT text".to_string())
+    }
+}
+
 /// Downgrade ACIS v600+ record token layouts to v400 format.
 ///
 /// ACIS 6.0 added extra fields to some entity types (most notably `edge`).
@@ -91,5 +104,29 @@ pub fn downgrade_records_to_v400(records: &mut Vec<SatRecord>) {
                 record.tokens.remove(2); // remove start_param (was index 2)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sab_sat_tests {
+    use super::*;
+
+    const SAT: &str = "21200 2 1 26\n0  0  0 \n1 0.000001 0.0000000001\n\
+        face $-1 -1 $-1 $-1 $-1 $-1 forward double out #\n\
+        transform $-1 -1 1 0 0 0 1 0 0 0 1 5 6 7 1 no_rotate no_reflect no_shear #\n\
+        End-of-ACIS-data\n";
+
+    #[test]
+    fn binary_data_matches_its_text_and_nothing_else() {
+        let document = SatDocument::parse(SAT).unwrap();
+        let sab = SabWriter::write(&document);
+        let text = document.to_sat_string();
+        assert_eq!(sab_matches_sat(&sab, &text), Ok(()));
+        // The same model, wrapped between tokens as the DXF writer wraps long records.
+        assert_eq!(sab_matches_sat(&sab, &text.replace(" forward ", "\n forward ")), Ok(()));
+        // Another model, another file, and nonsense.
+        assert!(sab_matches_sat(&sab, &text.replace("forward", "reversed")).is_err());
+        assert!(sab_matches_sat(&sab, "not sat").is_err());
+        assert!(sab_matches_sat(&sab[..sab.len() / 2], &text).is_err());
     }
 }

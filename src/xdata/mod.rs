@@ -183,11 +183,12 @@ impl ExtendedData {
         &mut self.records
     }
 
-    /// Get a record by application name
+    /// Get a record by application name. Application names are symbol names, which CAD applications compare
+    /// without regard to case (a DWG before R2000 stores them in upper case).
     pub fn get_record(&self, application_name: &str) -> Option<&ExtendedDataRecord> {
         self.records
             .iter()
-            .find(|r| r.application_name == application_name)
+            .find(|r| r.application_name.eq_ignore_ascii_case(application_name))
     }
 
     /// Get the number of records
@@ -209,6 +210,15 @@ impl ExtendedData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_record_is_found_by_its_application_name_without_regard_to_case() {
+        let mut data = ExtendedData::new();
+        data.add_record(ExtendedDataRecord::new("ACAECLAYERSTANDARD"));
+        assert!(data.get_record("AcAecLayerStandard").is_some());
+        assert!(data.get_record("acaeclayerstandard").is_some());
+        assert!(data.get_record("AcCmTransparency").is_none());
+    }
 
     #[test]
     fn test_xdata_record_creation() {

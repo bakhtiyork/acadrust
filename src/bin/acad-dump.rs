@@ -79,10 +79,45 @@ fn native_dump(args: &[std::ffi::OsString]) -> i32 {
     }
 }
 
+/// `acis-same <sab.hex> <sat.txt>`: whether the binary ACIS data in the first file (hex digits) and the SAT text in
+/// the second state the same model: both parse, and both print the same SAT text. Used by the round-trip gate
+/// (`Tools/g4-native-compare.py`) to verify that a SAB written as SAT lost nothing. Exit 0 same, 1 different (the
+/// reason on stdout), 2 usage or unreadable input.
+fn acis_same(args: &[std::ffi::OsString]) -> i32 {
+    if args.len() != 4 {
+        eprintln!("usage: acad-dump acis-same <sab.hex> <sat.txt>");
+        return 2;
+    }
+    let (Ok(hex), Ok(text)) = (std::fs::read_to_string(&args[2]), std::fs::read_to_string(&args[3])) else {
+        eprintln!("unreadable input");
+        return 2;
+    };
+    let digits: Vec<u8> = hex.trim().bytes().collect();
+    if digits.len() % 2 != 0 || !digits.iter().all(u8::is_ascii_hexdigit) {
+        eprintln!("not hex digits");
+        return 2;
+    }
+    let value = |digit: u8| (digit as char).to_digit(16).unwrap_or(0) as u8;
+    let sab: Vec<u8> = digits.chunks(2).map(|pair| value(pair[0]) << 4 | value(pair[1])).collect();
+    match acadrust::entities::acis::sab_matches_sat(&sab, &text) {
+        Ok(()) => {
+            println!("same");
+            0
+        }
+        Err(reason) => {
+            println!("differ: {reason}");
+            1
+        }
+    }
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<_> = std::env::args_os().collect();
     if args.len() > 1 && args[1] == "native-dump" {
         std::process::exit(native_dump(&args));
+    }
+    if args.len() > 1 && args[1] == "acis-same" {
+        std::process::exit(acis_same(&args));
     }
     if args.len() > 1 && args[1] == "write-dxf" {
         std::process::exit(write_dxf(&args));

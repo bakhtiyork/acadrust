@@ -97,6 +97,7 @@ pub const EXCLUDED_FIELDS: &[(&str, &str, &str)] = &[
     ("HeaderVariables", "dxf_source_variables", "provenance: 'variables present in a source DXF HEADER section'"),
     ("HeaderVariables", "source_handle_seed", "provenance: 'original HANDSEED before document registration advances the allocator'"),
     ("Vertex2D", "source_widths", "provenance: 'raw DXF widths before native inheritance/normalization, when read from DXF'"),
+    ("Table", "dxf_legacy", "provenance: crate-private compatibility copy of the columns, rows and base style the legacy ACAD_TABLE entity of a DXF stated before the DXF reader completed the table from TABLECONTENT/TABLEGEOMETRY; superseded by the completed model, which is dumped; absent on a DWG read"),
     ("TableCell", "source_style_type", "provenance: 'source cell-style type, retained when the source had no style data'"),
     ("TableRow", "source_style_type", "provenance: 'source row-style type, retained when the source had no style data'"),
     ("TableColumn", "source_style_type", "provenance: 'source column-style type, retained when the source had no style data'"),

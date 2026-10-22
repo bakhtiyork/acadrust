@@ -75,3 +75,34 @@ fn write_dxf_reports_read_failures_and_usage_errors_with_distinct_exit_codes() {
     let result = run(&["write-dxf".as_ref(), garbage.as_os_str()]);
     assert_eq!(result.status.code(), Some(2));
 }
+
+#[test]
+fn acis_same_judges_binary_acis_data_against_sat_text() {
+    use acadrust::entities::acis::{SabWriter, SatDocument};
+    let sat = "21200 2 1 26\n0  0  0 \n1 0.000001 0.0000000001\n\
+        face $-1 -1 $-1 $-1 $-1 $-1 forward double out #\n\
+        transform $-1 -1 1 0 0 0 1 0 0 0 1 5 6 7 1 no_rotate no_reflect no_shear #\n\
+        End-of-ACIS-data\n";
+    let document = SatDocument::parse(sat).unwrap();
+    let hex: String = SabWriter::write(&document).iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex_file = scratch("acis.hex");
+    let sat_file = scratch("acis.sat");
+    std::fs::write(&hex_file, &hex).unwrap();
+    // The same model, and the same model with a record wrapped between tokens, are the same.
+    for text in [document.to_sat_string(), document.to_sat_string().replace(" forward ", "\n forward ")] {
+        std::fs::write(&sat_file, text).unwrap();
+        let result = run(&["acis-same".as_ref(), hex_file.as_os_str(), sat_file.as_os_str()]);
+        assert_eq!(result.status.code(), Some(0), "{}", String::from_utf8_lossy(&result.stdout));
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "same");
+    }
+    // Another model, and text that is not SAT, are not.
+    for text in [document.to_sat_string().replace("forward", "reversed"), "not sat".to_string()] {
+        std::fs::write(&sat_file, text).unwrap();
+        let result = run(&["acis-same".as_ref(), hex_file.as_os_str(), sat_file.as_os_str()]);
+        assert_eq!(result.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&result.stdout).starts_with("differ:"));
+    }
+    // Hex that is not hex is a usage error.
+    std::fs::write(&hex_file, "zz").unwrap();
+    assert_eq!(run(&["acis-same".as_ref(), hex_file.as_os_str(), sat_file.as_os_str()]).status.code(), Some(2));
+}

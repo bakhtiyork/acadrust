@@ -1217,8 +1217,10 @@ pub fn read_dimstyle(
         dimltype_handle: 0,
         dimltex1_handle: 0,
         dimltex2_handle: 0,
-        dimfxl: 0.0,
-        dimjogang: 0.0,
+        // A record before R2007 has no fixed extension length or jog angle: the model's defaults stand, as when a
+        // DXF omits the groups.
+        dimfxl: 1.0,
+        dimjogang: std::f64::consts::FRAC_PI_4,
         dimtfill: 0,
         dimtfillclr: Color::from_index(0),
         dimarcsym: 0,

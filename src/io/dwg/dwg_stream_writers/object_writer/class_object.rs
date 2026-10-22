@@ -747,6 +747,9 @@ impl<'a> DwgObjectWriter<'a> {
                             DataTableCellType::ObjectId => self
                                 .writer
                                 .write_handle(DwgReferenceType::SoftPointer, row.handle.value()),
+                            DataTableCellType::HardOwnerId => self
+                                .writer
+                                .write_handle(DwgReferenceType::HardOwnership, row.handle.value()),
                             _ => unreachable!("DATATABLE validated by object writer"),
                         }
                     }

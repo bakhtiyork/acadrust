@@ -199,7 +199,8 @@ fn object_id_cells_follow_handle_collision_repairs() {
 
 #[test]
 fn writers_reject_unsupported_cells_and_inconsistent_row_counts() {
-    for (value_type, row_count) in [(6, 1), (99, 1), (1, 2), (1, -1)] {
+    // Type 6 (hard-owned handles) has a codec since R5a-5; 7 (soft-owned handles) has none.
+    for (value_type, row_count) in [(7, 1), (99, 1), (1, 2), (1, -1)] {
         let mut document = CadDocument::new();
         let mut object = ClassObject::new(ClassObjectData::DataTable(DataTable {
             row_count,
@@ -221,7 +222,7 @@ fn writers_reject_unsupported_cells_and_inconsistent_row_counts() {
 
 #[test]
 fn unsupported_dwg_cell_types_preserve_the_complete_record() {
-    for cell_type in [6, 99] {
+    for cell_type in [7, 99] {
         let mut document = native_document(true);
         let handle = table_handle(&document);
         let mut record = table_record(include_bytes!("datatable/point_object_id.dwg"), handle);

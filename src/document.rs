@@ -2518,25 +2518,10 @@ impl CadDocument {
         used
     }
 
-    /// The lowest handle above `above` that is not in `used` and is below the allocator's next handle (a gap
-    /// in the handle space, such as a deleted object leaves), or a fresh handle when there is none. The handle
-    /// taken is added to `used`.
-    pub(crate) fn allocate_handle_in_gap(
-        &mut self,
-        above: Handle,
-        used: &mut std::collections::HashSet<u64>,
-    ) -> Handle {
-        let top = self.next_handle.max(self.header.handle_seed);
-        let mut candidate = above.value().saturating_add(1);
-        while candidate < top {
-            if used.insert(candidate) {
-                return Handle::new(candidate);
-            }
-            candidate += 1;
-        }
-        let fresh = self.allocate_handle();
-        used.insert(fresh.value());
-        fresh
+    /// Set the allocator to `next` (what `allocate_handle` leaves after the calls that took handles up to it).
+    pub(crate) fn set_handle_allocator(&mut self, next: u64) {
+        self.next_handle = next;
+        self.header.handle_seed = next;
     }
 
     /// Allocate a new unique handle
