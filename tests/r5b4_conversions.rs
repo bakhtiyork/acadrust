@@ -55,13 +55,30 @@ fn a_material_of_an_older_dwg_states_the_channels_of_its_maps_in_r2010() {
     }
     let source = source_at(document, DxfVersion::AC1018);
     let converted = write_and_read(&source, DxfVersion::AC1024);
-    for (name, _, flags) in cases {
-        let found = converted.objects.values().find_map(|o| match o {
+    let flags_of = |document: &CadDocument, name: &str| {
+        document.objects.values().find_map(|o| match o {
             ObjectType::Material(m) if m.name == name => Some(m.channel_flags),
             _ => None,
-        });
-        assert_eq!(found, Some(flags), "{name}");
+        })
+    };
+    for (name, _, flags) in cases {
+        assert_eq!(flags_of(&converted, name), Some(flags), "{name}");
     }
+    // A value an R2007+ record states is kept, also where it differs from the maps (review of R5b-4)
+    let mut stated = CadDocument::with_version(DxfVersion::AC1024);
+    let mut material = acadrust::objects::Material::new();
+    material.name = "STATED".into();
+    material.handle = stated.allocate_handle();
+    material.owner = stated.header.named_objects_dict_handle;
+    material.channel_flags = 5;
+    let handle = material.handle;
+    stated.objects.insert(handle, ObjectType::Material(material));
+    let root = stated.header.named_objects_dict_handle;
+    if let Some(ObjectType::Dictionary(entries)) = stated.objects.get_mut(&root) {
+        entries.add_entry("M_STATED", handle);
+    }
+    let stated = source_at(stated, DxfVersion::AC1024);
+    assert_eq!(flags_of(&write_and_read(&stated, DxfVersion::AC1032), "STATED"), Some(5));
 }
 
 /// AutoCAD's own R14, R2000, R2004 and R2010 files keep a visual style's properties beyond the layout in an ACAD_XREC_ROUNDTRIP

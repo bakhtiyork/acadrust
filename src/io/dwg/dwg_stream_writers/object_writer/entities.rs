@@ -1573,8 +1573,8 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_long(scenario);
             self.writer.write_bit_long(flags1);
             // A spline without fit points has no parameterization of its fit: AutoCAD's own R2013 file states "custom" (15)
-            // for the control-point splines of a drawing it converts from R2010 or earlier (sample_AC1024.dwg to
-            // sample_AC1027.dwg: both splines 15), and the pre-R2013 records the fork reads leave it 0.
+            // for the control-point spline of the drawing (#433 in sample_AC1027.dwg, 15 in sample_AC1024.dwg too), and the
+            // pre-R2013 records the fork reads leave it 0.
             let from_older_dwg = self.document.dwg_source_version.is_some_and(|source| source < crate::types::DxfVersion::AC1027);
             let knot_parameterization = if from_older_dwg && scenario == 1 && e.knot_parameterization == 0 {
                 15

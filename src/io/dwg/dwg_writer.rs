@@ -805,7 +805,7 @@ pub(crate) fn entity_class_name(entity: &crate::entities::EntityType) -> &str {
 /// record without a valid type code, so it is kept, after the profile.
 fn prepare_legacy_classes(document: &mut CadDocument) {
     let entity_classes = document.entities().map(entity_class_name);
-    let object_classes = document.objects.values().flat_map(
+    let object_classes = objects_in_handle_order(document).flat_map(
         crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names,
     );
     // FIELD / FIELDLIST records exist from R2004 on and are written from the
@@ -834,6 +834,14 @@ fn prepare_legacy_classes(document: &mut CadDocument) {
     }
 }
 
+/// The document's objects in handle order: the classes the writer appends follow the records that need them, and the
+/// object map's own iteration order changes from one process to the next (a pinned write must be byte-identical).
+fn objects_in_handle_order(document: &CadDocument) -> impl Iterator<Item = &crate::objects::ObjectType> {
+    let mut objects: Vec<_> = document.objects.iter().collect();
+    objects.sort_unstable_by_key(|(handle, _)| handle.value());
+    objects.into_iter().map(|(_, object)| object)
+}
+
 /// Whether the document states a class list of its own that the DWG class table follows: it was read from a DXF
 /// (the CLASSES section as written by the host application) and is written at that version or at one that has
 /// no older profile to shrink to (R2013 and later). A DXF written for an older profile than the target keeps the
@@ -847,7 +855,7 @@ fn states_dxf_classes(document: &CadDocument) -> bool {
 /// The classes a record of the document is written under (entities, objects, fields).
 fn required_class_names(document: &CadDocument) -> Vec<String> {
     let entity_classes = document.entities().map(entity_class_name);
-    let object_classes = document.objects.values().flat_map(
+    let object_classes = objects_in_handle_order(document).flat_map(
         crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names,
     );
     let field_classes: &[&str] = if document.version >= DxfVersion::AC1018 {
@@ -969,9 +977,7 @@ fn prepare_dwg_source_classes(document: &mut CadDocument) {
 /// later version's fixed code, which strict readers reject.
 fn add_missing_object_classes(document: &mut CadDocument) {
     let defaults = crate::classes::default_classes();
-    let missing: Vec<_> = document
-        .objects
-        .values()
+    let missing: Vec<_> = objects_in_handle_order(document)
         .map(crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names)
         .filter(|names| !names.iter().any(|name| document.classes.contains(name)))
         .filter_map(|names| {
