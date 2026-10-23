@@ -1694,7 +1694,7 @@ impl<'a> DwgObjectWriter<'a> {
             // DIMGAP BD 147
             self.writer.write_bit_double(ds.dimgap);
             // DIMPOST T 3
-            self.writer.write_variable_text(ds.dwg_dimpost());
+            self.writer.write_variable_text(&ds.dimpost);
             // DIMAPOST T 4
             self.writer.write_variable_text(&ds.dimapost);
             // DIMBLK T 5
@@ -1716,7 +1716,7 @@ impl<'a> DwgObjectWriter<'a> {
         // DwgObjectWriter.writeDimensionStyle() exactly.
         if self.version.r2000_plus() {
             // DIMPOST TV 3
-            self.writer.write_variable_text(ds.dwg_dimpost());
+            self.writer.write_variable_text(&ds.dimpost);
             // DIMAPOST TV 4
             self.writer.write_variable_text(&ds.dimapost);
             // DIMSCALE BD 40

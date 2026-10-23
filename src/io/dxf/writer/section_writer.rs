@@ -2631,10 +2631,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         }
 
         // Postfix / suffix
-        // An empty DIMPOST is stated (AutoCAD writes it so); the native default "<>" is what an absent group reads as.
-        if dimstyle.dimpost != "<>" {
-            self.writer.write_string(3, &dimstyle.dimpost)?;
-        }
+        // The suffix is always stated: a record read from a DXF without group 3 has an empty suffix (AutoCAD omits
+        // it), so "<>" must be written to read back as "<>".
+        self.writer.write_string(3, &dimstyle.dimpost)?;
         // An R12 record states the suffix and the three arrow block names whether they are empty or not.
         if self.r12 || !dimstyle.dimapost.is_empty() {
             self.writer.write_string(4, &dimstyle.dimapost)?;

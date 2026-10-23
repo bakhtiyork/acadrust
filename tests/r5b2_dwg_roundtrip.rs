@@ -209,21 +209,47 @@ fn a_dxf_source_writes_arrow_blocks_and_dimension_line_types_by_name() {
     }
 }
 
-/// A DIMSTYLE record of a DXF omits group 3 when the suffix is empty, and AutoCAD's DWG states the empty text (the
-/// native default of an absent group is `<>`).
+/// A DIMSTYLE record of a DXF omits group 3 when the suffix is empty, and AutoCAD's DWG states the empty text: a record
+/// read without group 3 has an empty suffix, and the suffix `<>` is stated so that it reads back as `<>`.
 #[test]
 fn an_omitted_dimension_postfix_is_written_empty() {
     for version in R2000_PLUS {
         let mut document = CadDocument::with_version(version);
         let mut style = DimStyle::new("NOPOST");
         style.handle = document.allocate_handle();
+        style.dimpost = "".into();
+        document.dim_styles.add(style).unwrap();
+        let mut style = DimStyle::new("MEASURE");
+        style.handle = document.allocate_handle();
         style.dimpost = "<>".into();
         document.dim_styles.add(style).unwrap();
-        let source = dxf_source(&document);
-        // The DXF writer omits the default; the reader keeps `<>` for the absent group.
-        assert_eq!(source.dim_styles.get("NOPOST").unwrap().dimpost, "<>");
+        let text = String::from_utf8(DxfWriter::new(&document).write_to_vec().unwrap()).unwrap();
+        // Take group 3 out of the NOPOST record, as AutoCAD's DXF does.
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut kept: Vec<&str> = Vec::new();
+        let (mut in_record, mut at) = (false, 0);
+        while at + 1 < lines.len() {
+            let (code, value) = (lines[at].trim(), lines[at + 1].trim());
+            if code == "0" {
+                in_record = false;
+            }
+            if code == "2" && value == "NOPOST" {
+                in_record = true;
+            }
+            if in_record && code == "3" {
+                at += 2;
+                continue;
+            }
+            kept.push(lines[at]);
+            kept.push(lines[at + 1]);
+            at += 2;
+        }
+        let source = DxfReader::from_reader(Cursor::new(kept.join("\n").into_bytes())).unwrap().read().unwrap();
+        assert_eq!(source.dim_styles.get("NOPOST").unwrap().dimpost, "", "{version:?}: an absent group is the empty suffix");
+        assert_eq!(source.dim_styles.get("MEASURE").unwrap().dimpost, "<>", "{version:?}: `<>` is stated");
         let read = write_and_read(&source, version);
         assert_eq!(read.dim_styles.get("NOPOST").unwrap().dimpost, "", "{version:?}");
+        assert_eq!(read.dim_styles.get("MEASURE").unwrap().dimpost, "<>", "{version:?}");
         // A suffix the DXF states is written as stated.
         let mut document = CadDocument::with_version(version);
         let mut style = DimStyle::new("MM");
@@ -490,7 +516,7 @@ fn materials_of_a_dxf_source_keep_their_map_files() {
             at += 2;
         }
         let source = DxfReader::from_reader(Cursor::new(kept.join("\n").into_bytes())).unwrap().read().unwrap();
-        assert!(source.objects.values().any(|o| matches!(o, ObjectType::Material(m) if m.name == "TILES" && m.diffuse_map.source == 0)), "{version:?}: read from the DXF without group 72");
+        assert!(source.objects.values().any(|o| matches!(o, ObjectType::Material(m) if m.name == "TILES" && m.diffuse_map.source == 1)), "{version:?}: read from the DXF without group 72 (the image file)");
         let read = write_and_read(&source, version);
         let material = read
             .objects

@@ -38,11 +38,17 @@ fn projected(doc: &CadDocument, reader: &str) -> Value {
 }
 
 #[test]
-fn omitted_dxf_material_fields_use_view_defaults_without_changing_native_values() {
+fn omitted_dxf_material_fields_use_view_defaults_and_omitted_map_sources_are_the_image_file() {
     let doc = read("");
     let native = material(&doc);
     assert_eq!(native.channel_flags, 127);
-    assert_eq!(native.diffuse_map.source, 0);
+    // An omitted source group of the diffuse, specular, reflection, opacity or bump map (72, 77, 171, 175, 179) is the
+    // DXF default, the image file (1), which AutoCAD's own DWG of such a drawing states (R5b-3); the refraction map keeps
+    // 0, as AutoCAD's DWG does. The other omitted groups keep the native defaults, which the view replaces.
+    for map in [&native.diffuse_map, &native.specular_map, &native.reflection_map, &native.opacity_map, &native.bump_map] {
+        assert_eq!(map.source, 1);
+    }
+    assert_eq!(native.refraction_map.source, 0);
     assert_eq!(native.diffuse_map.projection, 2);
     assert!(native.ambient_color.rgb.is_none());
     let p = projected(&doc, "dxf");

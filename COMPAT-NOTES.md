@@ -267,8 +267,8 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5b-2 class table of a DXF source | A document read from a DXF that states a CLASSES section writes that list in its order with its own flags and names, inserts LAYOUT and ACDBPLACEHOLDER after ACDBDICTIONARYWDFLT (as AutoCAD's DWG does), appends the classes the written objects need and are missing, and skips MLINE and OLE2FRAME (fixed type codes). For a valid same-version source (DWG or DXF) the stated instance counts and live flags are kept; otherwise the census stays. | The DWG of a DXF source stated a census of its own (3,549 class rows in the baseline of the 21 DXF same-version cells). Upstream-PR candidate for the order and flags. |
 | R5b-2 BLOCK / ENDBLK of a DXF source | The BLOCK and ENDBLK entities of a document read from DXF are written from the record's `block_entity_common` / `block_end_common` (colour, layer, linetype, ...), without an entity mode (derived from the owner). | The DWG of a DXF source wrote default marker properties (BLOCK/ENDBLK colour rows). |
 | R5b-2 DXF-source current styles and names | For a DXF source `prepare_header` resolves the header's current layer / text style / dimstyle / linetype, `$DIMBLK*` arrow blocks (also `_name` blocks) and the dimension linetypes by name; a constructed document keeps handle precedence. | The DXF states names and the DWG header states handles; the handles of a DXF read were not those of the written tables. |
-| R5b-2 material map source | The DWG writer states map source 1 for the diffuse, specular, reflection, opacity and bump maps when the DXF omitted groups 72/77/171/175/179; the native default (0) is kept. | AutoCAD's DWG of the same drawing states 1 (twin dumps). DXF reader defaults would have changed pinned tests, so the writer holds the rule. |
-| R5b-2 DIMSTYLE DIMPOST | `DimStyle::dwg_dimpost()`: the DXF record that omits group 3 is written with an empty `DIMPOST` (the native default "<>" is kept for the model). | AutoCAD omits group 3 for an unset DIMPOST and its DWG states an empty string. |
+| R5b-2 material map source | (Superseded in R5b-3 by "R5b-3 DXF material map source": the DXF reader now states the source.) The DWG writer stated map source 1 for the diffuse, specular, reflection, opacity and bump maps when the DXF omitted groups 72/77/171/175/179, and kept the native default (0). | AutoCAD's DWG of the same drawing states 1 (twin dumps). |
+| R5b-2 DIMSTYLE DIMPOST | (Superseded in R5b-3 by "R5b-3 DIMSTYLE DIMPOST"; `DimStyle::dwg_dimpost()` is gone.) The DXF record that omits group 3 was written with an empty `DIMPOST` while the model kept the native default "<>". | AutoCAD omits group 3 for an unset DIMPOST and its DWG states an empty string. |
 | R5b-2 hatch gradient name | A hatch read from DXF without a gradient is written with the gradient name LINEAR. | AutoCAD's DWG states LINEAR for non-gradient hatches (twin dumps). UNVERIFIED in AutoCAD itself. |
 | R5b-2 TABLE covered cells | R2010+ content items that are empty and covered by a one-row merge (`Table::is_merged_away`, `CellContent::is_empty_item`) are not written. | AutoCAD states no content for cells a merge covers; the writer wrote an item per cell. |
 | R5b-2 template section and maintenance versions | AC1018 files write the all-zero single-page Template section when the source had one (none for a same-version DWG without it); the maintenance version of the AUXHEADER is 104 (AC1018), 226 (AC1024), 125 (AC1027). | AutoCAD's samples state these values (AC1021 25 and AC1032 4 unchanged). UNVERIFIED in AutoCAD itself. |
@@ -276,7 +276,14 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5b-2 VisualStyle and TABLESTYLE round trip | The retained R2010+ VisualStyle stores 24- or 28-property styles (PropertyOp group added), `upgrade_r2010_visual_styles` runs for >= AC1027, and the PRE2007 TABLESTYLE carrier is dropped for every modern write; the R2010+ TABLESTYLE keeps bit 8 of its first long: the reader keeps it out of `flags` (it stays in `modern_unknown_long1`) and the writer states it again. | A re-read style differed from the first read (VisualStyle properties, TableStyle flags). AutoCAD states 8 in the first long in every R2010 to R2018 sample. |
 | R5b-2 MTEXT source spelling in DWG | The DWG writer writes an MTEXT's text as the source spelled it (`MText::unchanged_source_value`: `\U+00B0` escapes) while the value is still the decoded form of that spelling, as the DXF writer does since R5a; an edited value is written as it is. | AutoCAD keeps the escape in the MTEXT of its own DWG of every version (C# dumps of sample_AC1014..AC1032.dwg: `94\U+00B0`); the writer wrote the decoded character, which the R5b-2 rules G5-RC-014/015 accepted (deleted in the review). Upstream-PR candidate together with the R5a DXF row. |
 | R5b-2 viewport-override layer and multi-line attributes | An entity on a layer with a viewport override writes the record handle of the override (`pending_layer_handle`); the DWG writer writes a multi-line attribute's source tag (`source_tag`) and own value like the DXF writer. | The dangling layer handle and the attribute tag/value rows of the same-version DWG cells. |
-
+| R5b-3 DXF material map source | The DXF reader sets map source 1 (image file) on the diffuse, specular, reflection, opacity and bump maps whose groups 72 / 77 / 171 / 175 / 179 are omitted (`read_material`); the refraction and normal maps keep the native 0. The DWG writer's special case for this (R5b-2) is gone. Test `acadsharp_materials::omitted_dxf_material_fields_use_view_defaults_and_omitted_map_sources_are_the_image_file` (renamed in the review from `..._without_changing_native_values`, which no longer described it) pins 1 for the five maps and 0 for the refraction map (it pinned the old default 0 for the diffuse map). | A DXF omits the group for the default, the image file; AutoCAD's DWG of the same drawing states 1 (twin dumps), and the ACadSharp view already reports 1 for an omitted group, so the native model of a DXF read and of its DWG are now the same. Owner confirmation wanted: R5b-2 kept the writer rule because a reader default conflicted with a pinned test; the pinned assertion is that one (the full suite passes with it updated). |
+| R5b-3 DIMSTYLE DIMPOST | The DXF reader gives a DIMSTYLE record without group 3 an empty `dimpost` (it was the native default `<>`), and the DXF writer always states group 3 (it omitted `<>`). `DimStyle::dwg_dimpost()` is removed; the DWG writers state `dimpost`. | AutoCAD omits group 3 for an unset suffix (empty), so `<>` is a stated value and must be written to be read back as `<>`; a DWG states the text. The native model of a DXF read and of its DWG are the same. |
+| R5b-3 MTEXT default direction in a DWG read | `mtext_from_data` keeps `dwg_x_direction` unless it is exactly (1, 0, 0) on the normal (0, 0, 1) (it was always `Some`; the agent's version dropped (1, 0, 0) on any plane, narrowed in the review). The DXF reader keeps a stated group 11 as it was. | A DXF MTEXT states group 11 for a turned text only; a DWG always states a direction. The writers derive the same direction from `rotation`; the ACadSharp view falls back to cos/sin of the rotation. On another plane the default axis of a DXF without group 11 is the plane's own X axis, so a stated (1, 0, 0) is kept there and the DXF writer states it (test `an_mtext_on_another_plane_keeps_its_stated_x_axis`). |
+| R5b-3 $CMLSTYLE name from a DWG | The header name of the current multiline style is the key of the style in its owner dictionary (`ACAD_MLINESTYLE`); the style's own name is the fallback (it was always the style's name). | `$CMLSTYLE` names the style by its dictionary key; AutoCAD's DXF keys it `Standard` and names the style `STANDARD`. The ACadSharp view is unchanged (it states `Standard` for a DWG). The R14 sample keys it `STANDARD`, which G4-494 still maps. |
+| R5b-3 R14 VX table of a DXF source | `prepare_legacy_document` gives the VX table a handle (the header's `vpent_hdr_control_handle`, or a new one) when it makes records for a document that has none, and makes one record per viewport for a document without VX records; a drawing with its own VX table (an R14 DWG) keeps its records and gains one only for a viewport of the active paper space that lacks one (review; the agent's version never added one, so a viewport added to an R14 drawing's paper space had none). | A DXF has no VX table: the records were written without the control object (the control is written for a table with a handle), so the next read had no `vx_control_entries`, and a second write numbered the viewports differently (idem failed at AC1014, 10 cells). AutoCAD's R14 file holds records for the viewports of the active paper space only (sample_AC1014.dwg: records for viewports 615 and 619 of `*PAPER_SPACE` 259, none for the four of the other layouts' blocks 58 and 5D), so the writer's record per viewport changed sample_AC1014.dwg (4 records, handle seed +4, viewport ids). Test `a_partial_vx_table_of_an_r14_drawing_is_filled_for_the_active_paper_space_only`. |
+| R5b-3 EED block order | `write_extended_data_with` writes the blocks in the order of the modeled records and takes the verbatim block of an application where it has one; a verbatim block no record restates comes first. | The reader turns the ACAD `DesignCenter Data` block of a block record into `units` and drops its verbatim copy, so the block, written again from the field, went after the others (R14 `BlockRecord.ExtendedData` order differed from the source). |
+| R5b-3 R14 dictionary byte | The R14 DICTIONARY states `hard_owner` in the byte ACadSharp calls unknown and writes as 0 (`write_dictionary`). | AutoCAD's own R14 file states 1 in 179 dictionaries (the hard-owner flag of R2000+, which the reader reads from that byte); sample_AC1014.dwg now round-trips natively exact. |
+| R5b-3 block scalability of an unstated record | **Reverted in the review.** The agent's writer stated byte 1 (uniform scaling only) for a block record read from a DWG before R2007 or from a DXF without group 281. The writer again states `scale_uniformly` (0 for such a record); test `a_block_that_never_stated_its_scaling_keeps_any_scaling_in_a_later_version` (fails with the agent's version). | The claimed evidence was wrong: AutoCAD states 0 for 23 of the 27 block records of its own sample_AC1024.dwg and sample_AC1032.dwg (1 for 4; DXF group 281 likewise), so the change made the sample_V comparison worse (22 CanScale rows per AC1018 -> AC1024+ cell instead of 4), and the generated no-loss rule G5-RC-S085 (ACadSharp's default CanScale true for an R2004 source) accepted the new rows. |
 
 ## ACadSharp differential dump
 
@@ -1075,3 +1082,121 @@ Open doubts (owner): the same-version rules (`is_source_version`) now also apply
 same-version source (DWG or DXF) now keeps its stated class instance counts instead of the census (stale after an edit; the
 counts are advisory); TABLE covered-cell items, the gradient name LINEAR and the material map source are writer outputs keyed to
 DXF provenance that make G5-RR differ from the native model.
+
+## R5b-3: same-version G5 for DXF sources, idem and the sample_V cells (2026-10-23)
+
+Fork tree: r5a at ab82a76 + this job's working-tree changes; CadKit `Tools/g4-native-compare.py`, `Tools/g5-roundtrip.py`,
+`Tools/g5-rr-allowlist.json`, `Tools/g5-rc-allowlist.json`, `Tools/g4-allowlist.json` (G4-494 reason). Definitions of R5b-2 unchanged
+(G5-RR native, G5-RC vs D / sample_V, G5-idem; the same-version rules still apply to DXF sources: open owner decision, not touched).
+
+### Counts (clean build of the final tree, 288 cells; before = R5b-2 review)
+
+| | before | after |
+|---|---|---|
+| G5-RR (288) | 19 (DXF sources 0 / 21) | **41** (20 exact + 21 through hand rules); same-version 41 / 42, the cross-version cells 0 / 246 |
+| G5-RC same-version (42) | 35 (DWG 20 / 21, DXF 15 / 21) | **42** (DWG 21 / 21, DXF 21 / 21) |
+| G5-RC sample_V (36) | 5 (diagonal) | **6** (the diagonal, AC1014 now included); the 30 off-diagonal cells cannot pass (below) |
+| G5-idem (288) | 273 (10 mismatch + 5 error) | **283** (0 mismatch, 5 error = AecObjects) |
+| C# -> fork | 204 | 204 |
+| G4 | RR 94, RC 94, idem 96 / 96 | unchanged (only AecObjects fails; per-cell statuses identical) |
+| G1 | 45 / 49 | 45 / 49 |
+
+Per version (RR / RC same / RC sample_V / idem): AC1014 1/48, 1/1, 1/6, 47/48; AC1015 3/48, 3/3, 1/6, 47/48; AC1018 3/48, 3/3, 1/6, 47/48; AC1024 3/48, 3/3, 1/6, 47/48;
+AC1027 3/48, 3/3, 1/6, 47/48; AC1032 28/48, 29/29, 1/6, 48/48. Before: RR 0, 1, 1, 1, 1, 15; RC same 0/1, 1/3, 3/3, 3/3, 1/3, 27/29; idem 37, 47, 47, 47, 47, 48.
+Rule subsets (rows files of the final run): RR no rules 20, all rules 41 (the RR list is hand rules only; the pinned header and summary values are left
+out by the tool); RC same-version no rules 0, pinned-field rules only (G5-RC-001..010) 21, all hand rules 21, all rules 42 (DXF sources through the twin rules);
+RC sample_V no rules 0, pinned-field rules 6, all hand rules 6, all rules 6. The only same-version RR cell that still fails is `aec_objects/AecObjects.dwg` at AC1032
+(its two BLOCK / ENDBLK entities have no block record in the file, so no DWG can hold them; the other five AecObjects cells cannot be written, see R5b-2).
+
+### Fixes (R = reader, W = writer; lines of this tree)
+
+R+W DIMPOST, R material map source, R MText default direction, R $CMLSTYLE name, W VX control of a DXF source and no filling of an R14 VX table, W EED block order,
+W R14 dictionary byte (W block scalability of an unstated record: reverted in the review): the behaviour rows above, "R5b-3 ...". Places: `io/dxf/reader/section_reader.rs:8637,11125`,
+`io/dxf/writer/section_writer.rs:2634`, `io/dwg/dwg_document_builder.rs:476`, `io/dwg/dwg_reader.rs:893`, `io/dwg/dwg_writer.rs:933,944`,
+`object_writer/common.rs:1074`, `object_writer/objects.rs:1576`, `object_writer/mod.rs:2272`. Tests (`tests/r5b3_dwg_roundtrip.rs`, 7; each fails with its fix reverted, checked one by one):
+the default X axis of an MTEXT, the current multiline style named by its key, the VX records of a DXF source hang below their control, a partial VX table is not
+filled up (review: filled for the active paper space only), the order of the xdata applications of a block record in R14, the R14 dictionary hard-owner flag, an unstated block scalability (review: replaced by the
+test of the reverted behaviour). The assertions of
+`r5b2_dwg_roundtrip::an_omitted_dimension_postfix_is_written_empty`, `::materials_of_a_dxf_source_keep_their_map_files`, `r5a3_tests::an_empty_dimension_postfix_and_the_default_are_both_stated`
+(renamed) and `acadsharp_materials::omitted_dxf_material_fields_use_view_defaults_without_changing_native_values` (renamed in the review) follow the new reader defaults (they pinned the old ones).
+`cargo test --features acadsharp-compat --no-fail-fast`: 2,547 passed, 0 failed, 60 ignored; 0 warnings in `cargo build --lib` and the feature build.
+
+### Same-version G5-RR of the 21 DXF sources: every family, fix or rule
+
+Fixed in the fork (reader or writer defect, or a model default the DWG states differently): Material `*_map.source` (R), DimStyle `dimpost` (R+W), MText `dwg_x_direction` (R),
+header `multiline_style` (R), the VX table (W, idem at AC1014), R14 xdata order and dictionary byte (W, sample_AC1014.dwg); block scalability (W, sample_V) was reverted in the review.
+Hand RR rules (`g5-rr-allowlist.json` G5-RR-005..050; each names type, property, relation, target versions, source `dxf`, a reason and a self-tested example;
+evidence is a cited ACadSharp source line, the DWG format, or the C# dumps of AutoCAD's own DWG/DXF twins, never the fork's reader; see the review below for
+010, 021, 030, 044 and 049):
+provenance the DWG has no place for: Layer / TextStyle `source_flags` (005, 006, group 70 words), `raw_plot_settings_codes` / `raw_dxf_codes` of Layout, SortEntitiesTable, TableStyle (007..009),
+Table `dxf_insert_*` (019..021), TableStyle `cell_style_map_handle` and `modern_style` (010, 011), Spline `dxf_flags`, `planar`, `dwg_flags1`, `knot_parameterization` (014..018), Leader `hookline_enabled`, box size
+(031..033), Shape name (034); legacy TABLE fields an R2010+ record lacks (022..028; 029 the cell value size; 030 the empty item of a covered cell); case or spelling the format resolves
+(012 line type case, 041 / 042 `_BoxBlank`, 039 / 040 `ByBlock`, 013 gradient name LINEAR, 038 unstated `$DIMMZS`), header words (043 `$ACADMAINTVER`); ACIS empty bit (035, 036);
+VPORT aspect ratio ulp (037); the numbering of anonymous blocks (044, 049 dynamic definition named, both judged together with the Insert rows that name the blocks); the classes (050 DATATABLE);
+MLEADER line properties and background colour before R2010 (045..048). No rule accepts a missing object other than the anonymous / covered-cell / class pairs above, whose relations check the counterpart.
+RC rules (`g5-rc-allowlist.json`): 025 / 026 BookColor of a DXF that states no colour (index 0 in D, 256 in the fork's file; cited ACadSharp source), 027 Spline `Flags1` (ACadSharp's DXF reader never sets it).
+G4-494 (RC, G4) stays for the R14 sample only (its dictionary key is `STANDARD`).
+
+### sample_V cells: why the 30 off-diagonal cells cannot pass, and what was done
+
+AutoCAD's sample_W and sample_V are one drawing saved at two versions but not the same object set: sample_AC1024.dwg holds 84 objects sample_AC1018.dwg lacks and sample_AC1018.dwg holds 133 that sample_AC1024.dwg lacks
+(objects only in W / only in V by handle: AC1014 to AC1032 387 / 42, AC1024 to AC1018 84 / 133, AC1027 to AC1032 26 / 11, AC1032 to AC1027 11 / 26). Every one of the 30 cells has rows of whole objects that only one of the two files
+holds (9,393 of 14,318 unexplained rows, 66 %): no conversion of sample_W can create or remove them, and the rules never accept a missing object. So G5-RC sample_V as defined is
+unreachable off the diagonal whatever the writer does; a definition that compares the objects both files hold (`common` rows) would be reachable in principle (4,932 rows now, 3 to 5 in the four nearest
+cells: classes, `TABLECONTENT` counts, `KnotParametrization`). **Corrected in the review** (below): of the 9,393 rows only 4,158 are objects that sample_W lacks; 1,905 are objects both AutoCAD files
+hold that the fork's file lacks (conversion losses), and a common-objects-only comparison would hide them. `Tools/g5-roundtrip.py` now records and reports that split (`sv_rows`, informational). Writer defects found and fixed: the R14
+dictionary byte (the unstated block scalability was no defect: reverted in the review); found and **not** fixed: the pre-R2010 TABLE has table-level border colour / weight / visibility arrays that an R2010+ source never fills
+(about 700 rows: `StyleOverride.*Border.Color / LineWeight`, AutoCAD's own down-save keeps the borders), the pre-R2010 -> R2010+ cell formats (FormattedValue, ValueDataType, TextHeight,
+border override flags), entity transparency of pre-R2004 sources (AutoCAD states ByBlock for 37 lines the fork leaves ByLayer), material `ChannelFlags` (127 against AutoCAD's content-derived 63 / 17), class numbering and instance
+counts (AutoCAD's order is its own), MLEADERSTYLE / TABLESTYLE dictionaries before R2007 (open owner decision), `KnotParametrization` of an R2010 spline converted to R2013+ (AutoCAD states 15 for a control-point spline; writing it
+would need the inverse rule for DXF sources).
+
+### Doubts and UNVERIFIED
+
+* UNVERIFIED (no AutoCAD here): that AutoCAD opens the fork's R14 files with the hard-owner byte set (AutoCAD wrote it itself in its sample), the VX control object for a DXF source, the DIMSTYLE group 3 `<>` in DXF,
+  `ACAD_TABLE` files, and the maintenance bytes (R5b-2).
+* The Material reader default changes a pinned assertion (see the row); the DIMPOST writer change adds group 3 `<>` to every written DIMSTYLE whose suffix is `<>` (it was omitted).
+* Several RR rules use broad relations (`input_type_output_const`: any number to a constant); each is limited by type, property, target version and source kind, and its reason names why the format has no place for the value
+  (review: kept where the evidence is the format or a provenance carrier, so it covers every input value; 010 and 030 narrowed).
+* G8 (speed / memory) was not re-run: the reader changes are five comparisons in the MATERIAL reader, one in the DIMSTYLE reader and one in the DWG MTEXT builder; the rest is writer-side.
+
+### Review of R5b-3 (2026-10-23)
+
+Clean build (`cargo clean -p acadrust`, feature build), full G5 (288 cells) and G4 (96 cells) on the reviewed tree; per cell the G5 and G4 statuses equal the agent's run
+(`build.noindex/roundtrip-rs-dwg-agent3`, `roundtrip-rs-g4-agent3`): 0 cells differ.
+
+* **Reverted: block scalability of an unstated record** (`object_writer/mod.rs` R2007+ BLOCK_HEADER byte). The claim "AutoCAD states scalable for an ordinary block"
+  was false: AutoCAD states 0 (any scaling) for 23 of the 27 records of sample_AC1024.dwg / sample_AC1032.dwg (DXF group 281: 23 x 0, 4 x 1). The change gave every
+  record of a pre-R2007 source byte 1 (uniform scaling only), which made the sample_V cells AC1014/AC1015/AC1018 -> AC1024+ worse (22 CanScale rows per cell instead of 4);
+  the generated no-loss rule G5-RC-S085 (ACadSharp's default CanScale true for the R2004 source) accepted them. The agent's
+  test is replaced by `a_block_that_never_stated_its_scaling_keeps_any_scaling_in_a_later_version` (fails with the agent's writer).
+* **Narrowed: MTEXT default direction** (`dwg_document_builder.rs` `mtext_from_data`): the direction is dropped only for (1, 0, 0) on the normal (0, 0, 1). On another
+  plane the default X axis of a DXF without group 11 is the plane's own, so dropping (1, 0, 0) lost the direction in a DWG -> DXF conversion. Test
+  `an_mtext_on_another_plane_keeps_its_stated_x_axis` (fails with the agent's version).
+* **Narrowed: R14 VX records** (`dwg_writer.rs` `prepare_legacy_document`): a drawing with its own VX table still gains a record for a viewport of the active paper space
+  that lacks one (AutoCAD's sample_AC1014.dwg holds records exactly for the viewports of `*PAPER_SPACE`); the agent's version never added one, so a viewport added to an R14
+  drawing got none. The agent's test now drops one record of each kind (`a_partial_vx_table_of_an_r14_drawing_is_filled_for_the_active_paper_space_only`, fails with the
+  agent's version).
+* Kept after checking against AutoCAD's files (C# dumps, no fork reader): DIMPOST (AutoCAD's R2000+ DXFs omit group 3 for the empty suffix, its R12 DXF states it empty;
+  ACadSharp's default PostFix is empty and its writer always states group 3; no AutoCAD sample states `<>`), material map source (AutoCAD's DXFs omit 72 for the image file
+  and state 77 / 171 / 175 = 0 for the current scene; its DWGs state 1 for the five maps, 0 for the refraction map), `$CMLSTYLE` (AutoCAD's DXFs: `$CMLSTYLE Standard`,
+  dictionary key `Standard`, style name `STANDARD`), R14 dictionary byte and EED order (write back what was read; no data dropped: the same set of blocks is written).
+  The four changed older assertions state AutoCAD's behaviour and are as strict as before; the materials test was renamed (its old name, "without changing native
+  values", no longer held for the map sources) and now pins all five map sources and the refraction map.
+* **RR rules** (CadKit `g5-rr-allowlist.json`): G5-RR-010 narrowed from "input null, output any" to the new relation `table_style_default_base_style` (exactly the base
+  style the writer states, built from the input style's margins; self-tested); G5-RR-030 now requires the cell to be covered by a merged range of one row (evidence
+  corrected: AutoCAD's sample_AC1032.dwg has no content in such cells, the two-row merge keeps its items; self-tested); reasons corrected for 021 (`dxf_insert_scale` is the
+  carrier of ACadSharp's misreading of the AcDbTable group 41, the cell margin), 044 (the DWG record states the bare `*U`, ACadSharp DwgObjectReader.cs:686-687; the
+  number lives in the BLOCK entity, and the fork's reader numbers by position by upstream design) and 049 (the stated anonymous bit is compared through `source_flags`).
+  The other rules were checked against the format or the twins and kept; the "any value" relations that remain (raw DXF code lists, `dxf_insert_*`, legacy TABLE fields,
+  Leader box size, MLEADER line properties before R2010, Shape name, `$ACADMAINTVER`) rest on the format or on a provenance carrier, so their evidence covers every input
+  value. No cell was lost.
+* **RC rules** G5-RC-025..027 kept: sample_AC1015_ascii.dxf DBCOLOR 996 states no colour (sample_AC1015.dwg: 42; BookColor.cs:70-71), ACadSharp's DXF reader never
+  sets Flags1 (Spline.cs "only valid for dwg"; no Flags1 in IO/DXF); AutoCAD's own DWG states 9 where the DXF has fit-point bit 1024 but no fit points.
+* **sample_V split corrected** (`g5-roundtrip.py` `sv_rows_split`): the agent counted every `<...>` row, class rows included, as "objects only one of AutoCAD's files
+  holds". Split against the objects of sample_W (C# dump of the source), the 14,318 unexplained rows of the 30 cells are: unreachable 4,158 (objects sample_W lacks),
+  **dropped 1,905** (objects both AutoCAD files hold that the fork's file lacks: in the 15 cells whose target is AC1014, AC1015 or AC1018,
+  119 to 137 objects each: Materials, VisualStyles, their dictionaries and XRecords, MLeaderStyles; the writer writes VisualStyle and Material before R2007
+  for same-version sources only, R5b-2), kept 3,105 (objects of sample_W that AutoCAD's conversion dropped), added 41, common 5,109 (class rows included). Every one of
+  the 30 cells has unreachable rows, so the conclusion "cannot pass as defined" stands; but a common-objects-only gate would hide the dropped objects and is not sound
+  without the `dropped` column.
