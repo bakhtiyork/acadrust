@@ -8633,6 +8633,19 @@ impl<'a> SectionReader<'a> {
                 _ => {}
             }
         }
+        // A DXF states the source of a map (groups 72, 77, 171, 175, 179 for the diffuse, specular, reflection, opacity
+        // and bump maps) only when it is not the default, the image file (1): an omitted group is the image file.
+        for (map, code) in [
+            (&mut obj.diffuse_map, 72),
+            (&mut obj.specular_map, 77),
+            (&mut obj.reflection_map, 171),
+            (&mut obj.opacity_map, 175),
+            (&mut obj.bump_map, 179),
+        ] {
+            if !source.contains(code) {
+                map.source = 1;
+            }
+        }
         obj.dxf_source = Some(Box::new(source));
         Ok(Some(obj))
     }
@@ -11109,6 +11122,11 @@ impl<'a> SectionReader<'a> {
             }
         }
 
+        // A DIMSTYLE record omits group 3 when the suffix is empty (AutoCAD's own files do); the native
+        // default of a constructed style is `<>`, which the writer states.
+        if !ds.dxf_code_present(3) {
+            ds.dimpost.clear();
+        }
         Ok(Some(ds))
     }
 

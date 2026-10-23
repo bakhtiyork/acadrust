@@ -520,17 +520,6 @@ impl DimStyle {
         }
     }
 
-    /// The DIMPOST text a DWG states. A DXF DIMSTYLE record omits group 3 when the suffix is empty (AutoCAD's own DWG of
-    /// the drawing states the empty text), while the native default of an absent group is `<>`: a record read from a
-    /// DXF without group 3 states the empty text.
-    pub fn dwg_dimpost(&self) -> &str {
-        if self.dxf_present_codes.is_some() && !self.dxf_code_present(3) {
-            ""
-        } else {
-            &self.dimpost
-        }
-    }
-
     /// Record the last DXF unit-format group encountered in the source.
     pub(crate) fn record_dxf_linear_unit_code(&mut self, code: i32) {
         if matches!(code, 270 | 277) {

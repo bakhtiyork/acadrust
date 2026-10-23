@@ -344,7 +344,7 @@ fn angles_are_written_as_the_degrees_that_read_back_exactly() {
 }
 
 #[test]
-fn an_empty_dimension_postfix_is_stated_and_the_default_is_not() {
+fn an_empty_dimension_postfix_and_the_default_are_both_stated() {
     let mut doc = CadDocument::with_version(DxfVersion::AC1032);
     let mut empty = DimStyle::new("Plain");
     empty.handle = Handle::new(0x90);
@@ -357,7 +357,7 @@ fn an_empty_dimension_postfix_is_stated_and_the_default_is_not() {
     let styles = records(&text, "DIMSTYLE");
     let find = |name: &str| styles.iter().copied().find(|r| first(r, 2).as_deref() == Some(name)).unwrap();
     assert_eq!(values(find("Plain"), 3), vec![String::new()], "an empty DIMPOST is written");
-    assert!(values(find("Default"), 3).is_empty(), "the default `<>` is what an absent group reads as");
+    assert_eq!(values(find("Default"), 3), vec!["<>".to_string()], "`<>` is stated: an absent group reads as empty");
     let back = read(&text);
     assert_eq!(back.dim_styles.get("Plain").unwrap().dimpost, "");
     assert_eq!(back.dim_styles.get("Default").unwrap().dimpost, "<>");

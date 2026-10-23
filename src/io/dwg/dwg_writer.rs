@@ -930,21 +930,37 @@ fn add_missing_object_classes(document: &mut CadDocument) {
 /// objects: TABLESTYLE in R2004 and MLEADERSTYLE in R2007.
 fn prepare_legacy_document(document: &mut CadDocument) {
     use crate::objects::ObjectType;
+    // A document without VX records (a DXF, or a DWG of a later version) gets one per viewport. A drawing that has VX records
+    // of its own (an R14 DWG) keeps them: AutoCAD's R14 files hold records for the viewports of the active paper space only
+    // (sample_AC1014.dwg: none for the viewports of the other layouts' blocks), so only a viewport of the active paper space
+    // that lacks one gets one.
     if document.version <= DxfVersion::AC1014 {
+        let own_records = !document.vx_table.is_empty();
+        let paper_space = document.header.paper_space_block_handle;
         let missing: Vec<_> = document
             .entities()
             .filter_map(|entity| match entity {
                 crate::entities::EntityType::Viewport(viewport)
-                    if !document
-                        .vx_table
-                        .iter()
-                        .any(|record| record.viewport == viewport.common.handle) =>
+                    if !own_records
+                        || (viewport.common.owner_handle == paper_space
+                            && !document.vx_table.iter().any(|record| record.viewport == viewport.common.handle)) =>
                 {
                     Some((viewport.common.handle, viewport.is_on()))
                 }
                 _ => None,
             })
             .collect();
+        // The records hang below the table's control object, which is written only for a table that has a handle (a
+        // DXF has no such table; its header names the standard control handle, which the table then takes).
+        if !missing.is_empty() && document.vx_table.handle().is_null() {
+            let handle = if document.header.vpent_hdr_control_handle.is_null() {
+                document.allocate_handle()
+            } else {
+                document.header.vpent_hdr_control_handle
+            };
+            document.vx_table.set_handle(handle);
+            document.header.vpent_hdr_control_handle = handle;
+        }
         if !missing.is_empty() && document.vx_table.is_empty() {
             let mut reserved = crate::tables::VxTableRecord::new("");
             reserved.handle = document.allocate_handle();

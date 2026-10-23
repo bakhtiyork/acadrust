@@ -1039,26 +1039,16 @@ impl<'a> DwgObjectWriter<'a> {
         );
         self.writer.write_variable_text(&value.name);
         self.writer.write_variable_text(&value.description);
-        // A DXF states the source of a map (groups 72, 77, 171, 175, 179 for the diffuse, specular, reflection, opacity and
-        // bump maps) only when it is not the default, which AutoCAD's own DWG of the same drawing states as the image
-        // file for these five maps (the refraction and normal maps keep the current scene). The native model keeps the
-        // default of a constructed map for the omitted groups.
-        let source_of = |map: &MaterialMap, code: usize| -> u8 {
-            match &value.dxf_source {
-                Some(source) if map.source == 0 && !source.contains(code) => 1,
-                _ => map.source,
-            }
-        };
         self.write_material_color(&value.ambient_color);
         self.write_material_color(&value.diffuse_color);
-        self.write_material_map(&value.diffuse_map, source_of(&value.diffuse_map, 72));
+        self.write_material_map(&value.diffuse_map, value.diffuse_map.source);
         self.write_material_color(&value.specular_color);
-        self.write_material_map(&value.specular_map, source_of(&value.specular_map, 77));
+        self.write_material_map(&value.specular_map, value.specular_map.source);
         self.writer.write_bit_double(value.specular_gloss_factor);
-        self.write_material_map(&value.reflection_map, source_of(&value.reflection_map, 171));
+        self.write_material_map(&value.reflection_map, value.reflection_map.source);
         self.writer.write_bit_double(value.opacity_percent);
-        self.write_material_map(&value.opacity_map, source_of(&value.opacity_map, 175));
-        self.write_material_map(&value.bump_map, source_of(&value.bump_map, 179));
+        self.write_material_map(&value.opacity_map, value.opacity_map.source);
+        self.write_material_map(&value.bump_map, value.bump_map.source);
         self.writer.write_bit_double(value.refraction_index);
         self.write_material_map(&value.refraction_map, value.refraction_map.source);
         if self.version.r2007_plus() {
@@ -1583,9 +1573,10 @@ impl<'a> DwgObjectWriter<'a> {
         // Number of entries (BL)
         self.writer.write_bit_long(entries.len() as i32);
 
-        // R14 Only: Unknown byte (always 0)
+        // R14 Only: a byte that ACadSharp calls unknown and always 0. AutoCAD's own R14 files state 1 in the dictionaries
+        // that hold hard-owned entries (the hard-owner flag of R2000 and later), and the reader reads it as that flag.
         if self.dxf_version == DxfVersion::AC1014 {
-            self.writer.write_byte(0);
+            self.writer.write_byte(if dict.hard_owner { 1 } else { 0 });
         }
 
         // R2000+: Cloning flag (BS 281) + Hard-owner flag (RC)

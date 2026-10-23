@@ -1066,20 +1066,39 @@ impl<'a> DwgObjectWriter<'a> {
         // unregistered app is skipped rather than emitting a dangling handle.
         // An app already present verbatim in `raw_blocks` wins, so a clean DWG
         // round-trip stays byte-for-byte and we never double-write one app.
-        let record_blocks: Vec<(u64, Vec<u8>)> = xdata
+        let encoded: Vec<(u64, Vec<u8>)> = xdata
             .records()
             .iter()
             .filter_map(|rec| self.encode_xdata_record(rec))
-            .filter(|(app, _)| !raw_blocks.iter().chain(extra).any(|(a, _)| a == app))
-            .chain(extra.iter().cloned())
             .collect();
+        // The blocks go out in the order of the modeled records, which is the order the file had them in (a block the
+        // reader turned into a typed field, as the units of a block record, has no verbatim copy and is written again from
+        // the field: it stays where the file had it); a verbatim block no record restates comes first.
+        let mut blocks: Vec<(u64, Vec<u8>)> = raw_blocks
+            .iter()
+            .filter(|(app, _)| !encoded.iter().any(|(a, _)| a == app))
+            .cloned()
+            .collect();
+        let mut verbatim_written: Vec<u64> = Vec::new();
+        for (app, bytes) in &encoded {
+            if extra.iter().any(|(a, _)| a == app) {
+                continue;
+            }
+            if !raw_blocks.iter().any(|(a, _)| a == app) {
+                blocks.push((*app, bytes.clone()));
+            } else if !verbatim_written.contains(app) {
+                verbatim_written.push(*app);
+                blocks.extend(raw_blocks.iter().filter(|(a, _)| a == app).cloned());
+            }
+        }
+        blocks.extend(extra.iter().cloned());
 
-        if raw_blocks.is_empty() && record_blocks.is_empty() {
+        if blocks.is_empty() {
             // No EED: write BS 0 terminator
             self.writer.write_bit_short(0);
             return;
         }
-        for (app_handle, raw_bytes) in raw_blocks.iter().chain(record_blocks.iter()) {
+        for (app_handle, raw_bytes) in blocks.iter() {
             // BS size of this application's data block
             self.writer.write_bit_short(raw_bytes.len() as i16);
             // Application handle — always in main stream (HardPointer reference type)

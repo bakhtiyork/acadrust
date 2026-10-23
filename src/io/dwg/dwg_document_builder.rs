@@ -471,7 +471,13 @@ fn mtext_from_data(data: entities::MTextData, common: EntityCommon, maps: &Handl
         _ => DrawingDirection::LeftToRight,
     };
     e.rotation = data.x_direction.y.atan2(data.x_direction.x);
-    e.dwg_x_direction = Some(data.x_direction);
+    // The direction is kept only where it states more than the rotation: a DXF omits the default X axis (group 11),
+    // and the DXF reader leaves it unstated. The default is the X axis of the text's plane, which is (1, 0, 0) only for
+    // the normal (0, 0, 1): on another plane the stated (1, 0, 0) is kept, or a DXF written from it would omit group 11
+    // and mean the plane's own X axis.
+    let world_x = crate::types::Vector3::new(1.0, 0.0, 0.0);
+    let default_axis = data.x_direction == world_x && data.normal == crate::types::Vector3::new(0.0, 0.0, 1.0);
+    e.dwg_x_direction = (!default_axis).then_some(data.x_direction);
     e.line_spacing_factor = data.linespacing_factor;
     e.line_spacing_style = crate::entities::LineSpacingStyle::from(data.linespacing_style);
     if !(1..=2).contains(&data.linespacing_style) {

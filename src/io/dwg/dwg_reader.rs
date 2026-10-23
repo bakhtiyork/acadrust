@@ -890,9 +890,21 @@ fn resolve_header_names(document: &mut crate::document::CadDocument) {
     let arrow1 = name_of(&document.block_records, h.dim_arrow_block1_handle);
     let arrow2 = name_of(&document.block_records, h.dim_arrow_block2_handle);
     let leader_arrow = name_of(&document.block_records, h.dim_leader_arrow_block_handle);
+    // $CMLSTYLE names the style by its key in the ACAD_MLINESTYLE dictionary (the key keeps the spelling the style was
+    // registered under; the style's own name can differ in case); the style's name is the fallback.
     let multiline_style = match document.objects.get(&h.current_multiline_style_handle) {
         Some(crate::objects::ObjectType::MLineStyle(style)) if !h.current_multiline_style_handle.is_null() => {
-            Some(style.name.clone())
+            // The style's owner is its dictionary (R13/R14 headers do not name the ACAD_MLINESTYLE dictionary).
+            let owner = if style.owner.is_null() { h.acad_mlinestyle_dict_handle } else { style.owner };
+            let key = match document.objects.get(&owner) {
+                Some(crate::objects::ObjectType::Dictionary(dictionary)) => dictionary
+                    .entries
+                    .iter()
+                    .find(|(_, handle)| *handle == h.current_multiline_style_handle)
+                    .map(|(name, _)| name.clone()),
+                _ => None,
+            };
+            Some(key.unwrap_or_else(|| style.name.clone()))
         }
         _ => None,
     };
