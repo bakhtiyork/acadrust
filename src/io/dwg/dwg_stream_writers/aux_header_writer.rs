@@ -34,9 +34,13 @@ fn dwg_internal_version(version: DxfVersion) -> i16 {
 /// Must match the file header metadata maintenance byte (0x0B, 0x12).
 pub fn dwg_maintenance_version(version: DxfVersion) -> i16 {
     match version {
+        // The R2004 files AutoCAD saves state 104 in the file header (sample_AC1018.dwg, and $ACADMAINTVER of the DXF).
+        DxfVersion::AC1018 => 104, // 0x68
         DxfVersion::AC1021 => 25, // 0x19
-        DxfVersion::AC1024 => 30, // 0x1E
-        DxfVersion::AC1027 => 29, // 0x1D
+        // The values of AutoCAD's own files (the file header byte and the $ACADMAINTVER of the DXF of the same drawing in
+        // sample_AC1024 and sample_AC1027); both are above the 3 that gates the per-section extra RL of R2010 and R2013.
+        DxfVersion::AC1024 => 226, // 0xE2
+        DxfVersion::AC1027 => 125, // 0x7D
         DxfVersion::AC1032 => 4,  // 0x04
         _ => 0,
     }

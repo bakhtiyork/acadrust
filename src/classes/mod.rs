@@ -255,6 +255,18 @@ impl DxfClassCollection {
         self.source_entries = None;
     }
 
+    /// Replace the registry by an explicit class list, numbered by position (500 + index), as the DWG writer
+    /// numbers its class table. Entries keep their order and every field; the source records are kept.
+    pub(crate) fn replace_entries(&mut self, classes: Vec<DxfClass>) {
+        self.entries.clear();
+        self.name_index.clear();
+        for (index, mut class) in classes.into_iter().enumerate() {
+            class.class_number = 500 + index as i16;
+            self.name_index.insert(class.dxf_name.to_ascii_uppercase(), index);
+            self.entries.push(class);
+        }
+    }
+
     /// Retain the class table understood by pre-R2013 DWG writers.
     ///
     /// Modern proxy classes use layouts that the AC15 CLASSES stream cannot

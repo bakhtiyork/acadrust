@@ -13,6 +13,7 @@ mod r5a2_tests;
 #[cfg(test)]
 mod r5a3_tests;
 
+pub(crate) use section_writer::{attribute_own_value, source_tag};
 use r12_stream::R12Stream;
 pub use binary_writer::DxfBinaryWriter;
 pub use section_writer::SectionWriter;

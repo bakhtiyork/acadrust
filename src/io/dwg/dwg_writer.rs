@@ -89,23 +89,27 @@ impl DwgWriter {
         // the controls, entries and handle map all agree (issue #51/#64
         // class of bug).
         let mut owned;
+        let dxf_classes = states_dxf_classes(document);
         let document: &CadDocument = if document.has_null_table_entries()
             || document.version < DxfVersion::AC1027
+            || dxf_classes
         {
             owned = document.clone();
             if owned.has_null_table_entries() {
                 owned.assign_table_entry_handles();
             }
-            if owned.version < DxfVersion::AC1027 {
+            if dxf_classes {
+                prepare_dxf_source_classes(&mut owned);
+            } else if owned.version < DxfVersion::AC1027 {
                 // A table read from a file of this version is already valid
                 // for it, and the verbatim records copied from that file
                 // carry its class numbers: leave it as it is.
                 if owned.dwg_source_version != Some(owned.version) {
                     prepare_legacy_classes(&mut owned);
                 }
-                if owned.version < DxfVersion::AC1018 {
-                    add_missing_object_classes(&mut owned);
-                }
+            }
+            if owned.version < DxfVersion::AC1018 {
+                add_missing_object_classes(&mut owned);
             }
             if owned.version < DxfVersion::AC1027 {
                 prepare_legacy_document(&mut owned);
@@ -679,12 +683,27 @@ fn prepare_roundtrip_records(document: &mut std::borrow::Cow<'_, CadDocument>) {
     if document.version < DxfVersion::AC1024 {
         return;
     }
+    // The R2013 layout states every property of a visual style: the ones an R2010 file keeps in its round-trip
+    // record go into the record of properties before it is dropped below.
+    if document.version >= DxfVersion::AC1027
+        && document
+            .objects
+            .values()
+            .any(|object| matches!(object, ObjectType::VisualStyle(style) if style.properties.len() == 28))
+    {
+        crate::objects::upgrade_r2010_visual_styles(document.to_mut());
+    }
     let key_of = |value: &XRecordValue| value.as_string().map(str::to_string);
     let mut drops: Vec<(Handle, Handle, String, bool)> = Vec::new();
     for (handle, object) in &document.objects {
+        // A table style's cell styles are carried by its CELLSTYLEMAP object only once it has them; the record
+        // with the legacy rows' data types was read into the style (`restore_table_style_roundtrip`) and the
+        // R2010+ TABLESTYLE record states them itself: the record goes whether or not the style has cell styles
+        // (a file of R2000 or older carries it for a style without any).
+        let has_cell_styles = matches!(object, ObjectType::TableStyle(style) if !style.modern_overrides.is_empty());
         let roundtrip_owner = match object {
             ObjectType::VisualStyle(style) => style.properties.len() >= 58,
-            ObjectType::TableStyle(style) => !style.modern_overrides.is_empty(),
+            ObjectType::TableStyle(_) => true,
             _ => false,
         };
         if !roundtrip_owner {
@@ -700,7 +719,7 @@ fn prepare_roundtrip_records(document: &mut std::borrow::Cow<'_, CadDocument>) {
         for (name, child) in &entries.entries {
             let drop = match (name.as_str(), document.objects.get(child)) {
                 ("ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP", Some(ObjectType::DataObject(_))) => {
-                    !is_visual_style
+                    !is_visual_style && has_cell_styles
                 }
                 ("ACAD_XREC_ROUNDTRIP", Some(ObjectType::XRecord(record))) => {
                     let prefix = if is_visual_style {
@@ -802,6 +821,87 @@ fn prepare_legacy_classes(document: &mut CadDocument) {
     }
 }
 
+/// Whether the document states a class list of its own that the DWG class table follows: it was read from a DXF
+/// (the CLASSES section as written by the host application) and is written at that version or at one that has
+/// no older profile to shrink to (R2013 and later). A DXF written for an older profile than the target keeps the
+/// legacy profile (`prepare_legacy_classes`).
+fn states_dxf_classes(document: &CadDocument) -> bool {
+    document.dwg_source_version.is_none()
+        && document.classes.source_classes().is_some_and(|classes| !classes.is_empty())
+        && (document.version >= DxfVersion::AC1027 || document.dxf_source_version == Some(document.version))
+}
+
+/// The classes a record of the document is written under (entities, objects, fields).
+fn required_class_names(document: &CadDocument) -> Vec<String> {
+    let entity_classes = document.entities().map(entity_class_name);
+    let object_classes = document.objects.values().flat_map(
+        crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names,
+    );
+    let field_classes: &[&str] = if document.version >= DxfVersion::AC1018 {
+        &["FIELD", "FIELDLIST"]
+    } else {
+        &[]
+    };
+    let mut seen = std::collections::HashSet::new();
+    entity_classes
+        .map(std::borrow::Cow::Borrowed)
+        .chain(object_classes)
+        .chain(field_classes.iter().map(|name| std::borrow::Cow::Owned(name.to_string())))
+        .filter(|name| seen.insert(name.to_ascii_uppercase()))
+        .map(|name| name.into_owned())
+        .collect()
+}
+
+/// The DWG class table of a document read from DXF is the class list its source stated, in its order and with its
+/// flags and names. A DXF omits the classes of the fixed object types (LAYOUT, ACDBPLACEHOLDER) that a DWG
+/// declares right after ACDBDICTIONARYWDFLT (AutoCAD's own DWG and DXF of one drawing differ in exactly these
+/// two classes); a class a written record needs and the source does not state follows the list.
+fn prepare_dxf_source_classes(document: &mut CadDocument) {
+    use crate::objects::ObjectType;
+    let Some(source) = document.classes.source_classes() else {
+        return;
+    };
+    let mut table: Vec<crate::classes::DxfClass> = source.to_vec();
+    let has = |table: &[crate::classes::DxfClass], name: &str| {
+        table.iter().any(|class| class.dxf_name.eq_ignore_ascii_case(name))
+    };
+    let mut missing = Vec::new();
+    // MLINE and OLE2FRAME records have fixed type codes: AutoCAD's own DWG declares no class for them unless its
+    // source did.
+    const FIXED_CODE_ENTITIES: [&str; 2] = ["MLINE", "OLE2FRAME"];
+    for name in required_class_names(document) {
+        if FIXED_CODE_ENTITIES.iter().any(|fixed| fixed.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        if !has(&table, &name) {
+            if let Some(class) = document.classes.get_by_name(&name) {
+                missing.push(class.clone());
+            }
+        }
+    }
+    // The fixed object types are written under fixed type codes: no record names their class.
+    let fixed = [
+        ("ACDBPLACEHOLDER", document.objects.values().any(|object| matches!(object, ObjectType::PlaceHolder(_)))),
+        ("LAYOUT", document.objects.values().any(|object| matches!(object, ObjectType::Layout(_)))),
+    ];
+    let mut at = table
+        .iter()
+        .position(|class| class.dxf_name.eq_ignore_ascii_case("ACDBDICTIONARYWDFLT"))
+        .map_or(0, |index| index + 1);
+    for (name, used) in fixed {
+        if used && !has(&table, name) {
+            if let Some(class) = document.classes.get_by_name(name) {
+                table.insert(at, class.clone());
+                at += 1;
+            }
+        } else if let Some(index) = table.iter().position(|class| class.dxf_name.eq_ignore_ascii_case(name)) {
+            at = at.max(index + 1);
+        }
+    }
+    table.extend(missing);
+    document.classes.replace_entries(table);
+}
+
 /// Declare the class of every object added to a pre-R2004 drawing whose
 /// source file never used that class. Before R2004 such records take their
 /// type code only from the class table; without an entry they fall back to a
@@ -871,7 +971,7 @@ fn prepare_legacy_document(document: &mut CadDocument) {
     let keep_mleader_style = document.version >= DxfVersion::AC1018
         && document.classes.get_by_name("MLEADERSTYLE").is_some();
     // A file of this very version that has the dictionaries is valid for it: they stay (as they do for the tables).
-    let source_has_them = document.dwg_source_version == Some(document.version);
+    let source_has_them = document.is_source_version(document.version);
     let root_handle = document.header.named_objects_dict_handle;
     let mut obsolete = Vec::new();
     if let Some(ObjectType::Dictionary(root)) = document.objects.get_mut(&root_handle) {
@@ -945,19 +1045,27 @@ fn reconciled_classes(
         }
     };
     // A file of this very version that declares a class live without instances is valid for it: it stays so.
-    let source_is_valid = document.dwg_source_version == Some(document.version);
+    let source_is_valid = document.is_source_version(document.version);
 
     document
         .classes
         .iter()
         .cloned()
         .map(|mut class| {
+            // The counts of a class table are advisory (AutoCAD's own DWG and DXF of one drawing state different
+            // numbers, and a file counts records the census does not enumerate): a file of this version keeps the
+            // count it stated; the census states the count of a class the file did not count.
+            let stated = if source_is_valid && !class.was_zombie { Some(class.instance_count) } else { None };
             if let Some(&count) = instance_counts.get(&class.class_number) {
-                class.instance_count = count;
+                class.instance_count = stated.unwrap_or(count);
                 class.was_zombie = false;
             } else if let Some(count) = fixed_count(&class.dxf_name).filter(|_| counts_complete) {
-                class.instance_count = count;
+                class.instance_count = stated.unwrap_or(count);
                 class.was_zombie = false;
+            } else if counts_complete && source_is_valid && !class.was_zombie && class.instance_count > 0 {
+                // The records the file counts under this class are not objects the census sees (a DXF counts the
+                // history objects kept in the ACDS data, annotation context data and the like): a file of this
+                // version states them, and the count stays as it stated it.
             } else if counts_complete {
                 let declared_live_unused = source_is_valid && class.instance_count == 0 && !class.was_zombie;
                 class.instance_count = 0;
@@ -1113,6 +1221,23 @@ fn prepare_header(
     }
 
     // ── Sync current style handles (validate against actual objects) ──
+    // A document read from DXF states its current styles by name only (the handles stay the defaults'): the entry
+    // the name selects is the current one.
+    if document.dxf_source_version.is_some() {
+        macro_rules! by_name {
+            ($handle:ident, $name:ident, $table:ident) => {
+                if let Some(entry) = document.$table.get(&h.$name) {
+                    if !entry.handle.is_null() {
+                        h.$handle = entry.handle;
+                    }
+                }
+            };
+        }
+        by_name!(current_layer_handle, current_layer_name, layers);
+        by_name!(current_text_style_handle, current_text_style_name, text_styles);
+        by_name!(current_dimstyle_handle, current_dimstyle_name, dim_styles);
+        by_name!(current_linetype_handle, current_linetype_name, line_types);
+    }
     // CLAYER: must point to an actual layer; fall back to "0" if invalid
     {
         let clayer_valid = !h.current_layer_handle.is_null()
@@ -1267,6 +1392,45 @@ fn prepare_header(
         }
         if !valid_lt(h.dim_linetype2_handle) {
             h.dim_linetype2_handle = Handle::NULL;
+        }
+    }
+
+    // A DXF names its arrow blocks ($DIMBLK, $DIMBLK1, $DIMBLK2) and never states the handle; AutoCAD's built-in
+    // arrowheads are the blocks `_<name>` ("BoxBlank" is the block `_BoxBlank`).
+    if document.dxf_source_version.is_some() {
+        let block = |name: &str| -> Option<Handle> {
+            let found = |wanted: &str| {
+                document
+                    .block_records
+                    .iter()
+                    .find(|record| record.name.eq_ignore_ascii_case(wanted) && !record.handle.is_null())
+                    .map(|record| record.handle)
+            };
+            (!name.is_empty()).then(|| found(name).or_else(|| found(&format!("_{name}")))).flatten()
+        };
+        for (handle, name) in [
+            (&mut h.dim_arrow_block_handle, h.dim_arrow_block.as_str()),
+            (&mut h.dim_arrow_block1_handle, h.dim_arrow_block1.as_str()),
+            (&mut h.dim_arrow_block2_handle, h.dim_arrow_block2.as_str()),
+        ] {
+            if handle.is_null() {
+                if let Some(resolved) = block(name) {
+                    *handle = resolved;
+                }
+            }
+        }
+    }
+
+    // The same for the linetypes of the dimension lines ($DIMLTYPE, $DIMLTEX1, $DIMLTEX2): a DXF states their names.
+    if document.dxf_source_version.is_some() {
+        for (handle, name) in [
+            (&mut h.dim_linetype_handle, h.dim_linetype_name.as_str()),
+            (&mut h.dim_linetype1_handle, h.dim_linetype1_name.as_str()),
+            (&mut h.dim_linetype2_handle, h.dim_linetype2_name.as_str()),
+        ] {
+            if let Some(entry) = document.line_types.get(name).filter(|entry| !name.is_empty() && !entry.handle.is_null()) {
+                *handle = entry.handle;
+            }
         }
     }
 
@@ -1614,8 +1778,11 @@ fn write_ac18<W: Write + Seek>(
     )?;
 
     // ── Section: Template ──
-    let template = build_document_template(version, document)?;
-    fhw.add_section(output, section_names::TEMPLATE, &template, true, PAGE_SIZE)?;
+    // A file of this version that has no Template section (AutoCAD's own R2004 files have none) keeps it so.
+    if document.dwg_source_version != Some(version) || document.header.dwg_template_data.is_some() {
+        let template = build_document_template(version, document)?;
+        fhw.add_section(output, section_names::TEMPLATE, &template, true, PAGE_SIZE)?;
+    }
 
     // ── Section: Handles (last — needs objects data) ──
     let section_offset = fhw.handle_section_offset() as i32;

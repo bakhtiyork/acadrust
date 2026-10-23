@@ -57,8 +57,18 @@ pub use writer::SatWriter;
 /// SAT text. A DXF of R2000-R2010 carries SAT only, so a DWG's binary data is written as text; the round-trip gate
 /// (`acad-dump acis-same`) uses this to verify that the conversion lost nothing. `Err` names the first difference.
 pub fn sab_matches_sat(sab: &[u8], sat: &str) -> Result<(), String> {
-    let binary = SabReader::read(sab).map_err(|error| format!("the binary data does not parse: {error}"))?;
-    let text = SatParser::parse(sat).map_err(|error| format!("the SAT text does not parse: {error}"))?;
+    sab_matches_sat_with(sab, sat, false)
+}
+
+/// [`sab_matches_sat`], optionally leaving the date of the header out: a SAB written from a SAT without a date states
+/// the drawing's update date (the binary header needs one), which the text does not have.
+pub fn sab_matches_sat_with(sab: &[u8], sat: &str, ignore_header_date: bool) -> Result<(), String> {
+    let mut binary = SabReader::read(sab).map_err(|error| format!("the binary data does not parse: {error}"))?;
+    let mut text = SatParser::parse(sat).map_err(|error| format!("the SAT text does not parse: {error}"))?;
+    if ignore_header_date {
+        binary.header.date.clear();
+        text.header.date.clear();
+    }
     if binary.to_sat_string() == text.to_sat_string() {
         Ok(())
     } else {

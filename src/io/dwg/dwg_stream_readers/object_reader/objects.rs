@@ -471,9 +471,11 @@ pub fn read_table_style(reader: &mut DwgMergedReader, version: DwgVersion) -> Ta
     value.description = reader.read_variable_text();
     value.name = value.description.clone();
     value.modern_unknown_long1 = reader.read_bit_long();
-    // The R2010+ table style flags (title / header suppressed).
-    value.flags =
-        crate::objects::TableStyleFlags::from_bits_retain(value.modern_unknown_long1 as i16);
+    // The R2010+ table style flags (title / header suppressed). Bit 8 is not a style flag; it stays in
+    // `modern_unknown_long1`, which the writer restores.
+    value.flags = crate::objects::TableStyleFlags::from_bits_retain(
+        (value.modern_unknown_long1 as i16) & !8,
+    );
     value.sync_suppression_flags();
     value.modern_unknown_long2 = reader.read_bit_long();
     value.modern_cell_style_handle = Handle::from(reader.read_handle());

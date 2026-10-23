@@ -1593,6 +1593,12 @@ pub struct CadDocument {
     /// `None` when not loaded from DWG (new/DXF).
     pub dwg_source_version: Option<DxfVersion>,
 
+    /// DXF version this document was read from (`$ACADVER` of the file, set by the DXF reader); `None` when not
+    /// loaded from DXF. A DXF written by the host application of that version states a class table, table
+    /// records and dictionaries that are valid for it, so the DWG writer keeps them when it writes the same
+    /// version (it shrinks or extends them only for another version).
+    pub dxf_source_version: Option<DxfVersion>,
+
     /// Embedded preview/thumbnail image. Populated by the DWG reader from the
     /// file's preview section; the DWG writer embeds it when `Some` and emits an
     /// empty preview when `None`. Not part of DXF.
@@ -1824,6 +1830,7 @@ impl CadDocument {
             reactors_by_handle: HashMap::new(),
             block_entity_handles: HashMap::new(),
             dwg_source_version: None,
+            dxf_source_version: None,
             preview: None,
             acis_sab_handles: Vec::new(),
             raw_acds_data: None,
@@ -1942,6 +1949,13 @@ impl CadDocument {
             self.header.current_layer_handle = layer_handle;
         }
         Ok(layer_handle)
+    }
+
+    /// Whether the file this document was read from (DWG or DXF) is of `version`. Such a file states the class table,
+    /// dictionaries, styles and viewport bits that are valid for its version; they are kept when that version is
+    /// written. (Verbatim blobs are DWG-only: see [`dwg_source_version`](Self::dwg_source_version).)
+    pub fn is_source_version(&self, version: DxfVersion) -> bool {
+        self.dwg_source_version == Some(version) || self.dxf_source_version == Some(version)
     }
 
     /// Whether writing this document to `target` would lose or corrupt data

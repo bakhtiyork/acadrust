@@ -203,6 +203,7 @@ impl<'a> SemanticInventoryV1<'a> {
             reactors_by_handle,
             block_entity_handles: _,
             dwg_source_version,
+            dxf_source_version: _,
             preview,
             acis_sab_handles: _,
             raw_acds_data: _,
