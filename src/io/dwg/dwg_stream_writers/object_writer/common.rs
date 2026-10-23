@@ -316,6 +316,16 @@ impl<'a> DwgObjectWriter<'a> {
     /// old name. Fall back to layer "0", which every drawing has and which
     /// cannot be renamed or deleted, so the reference stays resolvable.
     fn entity_layer_handle(&self, layer: &str) -> Handle {
+        // An entity on a viewport-override layer record names the record by handle; its `layer` is the base layer.
+        if let Some(handle) = self.pending_layer_handle {
+            let is_record_of = |name: &str| {
+                crate::io::dwg::dwg_document_builder::viewport_override_base_layer(name)
+                    .is_some_and(|base| base.eq_ignore_ascii_case(layer))
+            };
+            if self.document.layers.iter().any(|entry| entry.handle == handle && is_record_of(&entry.name)) {
+                return handle;
+            }
+        }
         if let Some(entry) = self.document.layers.get(layer) {
             if !entry.handle.is_null() {
                 return entry.handle;

@@ -109,7 +109,7 @@ pub use semantic_property::{
     ProxyReferenceKind, RegisteredClassObject, SemanticProperty, SemanticPropertyValue,
 };
 pub use sort_entities_table::{SortEntitiesTable, SortEntsEntry};
-pub(crate) use stub_objects::{restore_visual_style_roundtrip, store_visual_style_roundtrip};
+pub(crate) use stub_objects::{restore_visual_style_roundtrip, store_visual_style_roundtrip, upgrade_r2010_visual_styles};
 pub(crate) use table_style::{
     plan_table_style_carriers, restore_table_style_roundtrip, store_table_style_roundtrip,
     TableStyleCarriers,

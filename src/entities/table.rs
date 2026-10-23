@@ -655,6 +655,19 @@ pub struct CellContent {
 }
 
 impl CellContent {
+    /// Whether the item states nothing: no value of any kind, no block, no field, no attribute.
+    pub fn is_empty_item(&self) -> bool {
+        self.block_handle.is_none()
+            && self.field_handle.is_none()
+            && self.attributes.is_empty()
+            && self.value.value_type == CellValueType::Unknown
+            && self.value.text.is_empty()
+            && self.value.formatted_value.is_empty()
+            && self.value.handle_value.is_none()
+            && self.value.binary_value.is_empty()
+            && self.value.numeric_value == 0.0
+    }
+
     pub fn sets(&self, property: CellStylePropertyFlags) -> bool {
         let bits = (self.format_property_flags | self.format_override_flags) as u32;
         bits & property.bits() == property.bits()
@@ -2427,6 +2440,16 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
 }
 
 impl Table {
+    /// Whether cell (`row`, `col`) lies inside a merged range of one row without being its first cell.
+    pub fn is_merged_away(&self, row: usize, col: usize) -> bool {
+        self.merged_ranges.iter().any(|range| {
+            range.top_row == range.bottom_row
+                && (range.top_row..=range.bottom_row).contains(&row)
+                && (range.left_col..=range.right_col).contains(&col)
+                && (row, col) != (range.top_row, range.left_col)
+        })
+    }
+
     /// Put the typed data of a TABLECONTENT object (`content`), a TABLEGEOMETRY object and the break ranges of the
     /// round-trip record on a table read from its legacy DXF form, as an R2010+ DWG holds them in the entity.
     /// `content` has the same cell grid as the table.

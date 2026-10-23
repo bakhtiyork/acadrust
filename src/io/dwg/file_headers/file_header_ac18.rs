@@ -168,7 +168,9 @@ impl DwgFileHeaderWriterAC18 {
             .collect();
         let remainder = data.len() % decomp_size;
         let offset = n_full_pages * decomp_size;
-        if remainder > 0 && !is_all_zeros(&data[offset..]) {
+        // A trailing page of zeros after full pages is padding; a section that is nothing but zeros (the TEMPLATE
+        // section of a metric-less document is the four bytes of an empty description and MEASUREMENT 0) is data.
+        if remainder > 0 && (n_full_pages == 0 || !is_all_zeros(&data[offset..])) {
             page_inputs.push((offset, remainder, &data[offset..]));
         }
 

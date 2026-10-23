@@ -111,6 +111,9 @@ pub struct DwgObjectWriter<'a> {
     /// section. `write_common_entity_data` consumes and clears it, so every
     /// other entity writes `false`.
     pub(super) pending_has_ds_data: bool,
+    /// The layer record an entity names by handle (a viewport-override layer, `<base> @ <viewport>`), for the entity being
+    /// written: its `layer` is the base layer's name, the record is the layer it is on.
+    pub(super) pending_layer_handle: Option<Handle>,
     /// Tracks which object handles have already been written to prevent duplicates.
     pub(super) visited_objects: HashSet<Handle>,
     /// Number of emitted records for every class-based type code.
@@ -274,6 +277,7 @@ impl<'a> DwgObjectWriter<'a> {
             model_space_extents: None,
             sab_entries: Vec::new(),
             pending_has_ds_data: false,
+            pending_layer_handle: None,
             visited_objects: HashSet::new(),
             class_instance_counts: HashMap::new(),
             pending_type_code: None,
@@ -1690,7 +1694,7 @@ impl<'a> DwgObjectWriter<'a> {
             // DIMGAP BD 147
             self.writer.write_bit_double(ds.dimgap);
             // DIMPOST T 3
-            self.writer.write_variable_text(&ds.dimpost);
+            self.writer.write_variable_text(ds.dwg_dimpost());
             // DIMAPOST T 4
             self.writer.write_variable_text(&ds.dimapost);
             // DIMBLK T 5
@@ -1712,7 +1716,7 @@ impl<'a> DwgObjectWriter<'a> {
         // DwgObjectWriter.writeDimensionStyle() exactly.
         if self.version.r2000_plus() {
             // DIMPOST TV 3
-            self.writer.write_variable_text(&ds.dimpost);
+            self.writer.write_variable_text(ds.dwg_dimpost());
             // DIMAPOST TV 4
             self.writer.write_variable_text(&ds.dimapost);
             // DIMSCALE BD 40
@@ -2109,6 +2113,7 @@ impl<'a> DwgObjectWriter<'a> {
             model_space_extents: None,
             sab_entries: Vec::new(),
             pending_has_ds_data: false,
+            pending_layer_handle: None,
             visited_objects: HashSet::new(),
             class_instance_counts: HashMap::new(),
             pending_type_code: None,
@@ -2373,15 +2378,25 @@ impl<'a> DwgObjectWriter<'a> {
             (record.block_entity_handle, record.name.as_str())
         };
 
+        // A document read from DXF keeps the markers' common data (colour, layer, linetype, extended data, ...) in
+        // the record; a synthesized marker is written with it, as AutoCAD writes what the DXF stated.
         let mut common = block
             .as_ref()
             .map(|b| &b.common)
             .cloned()
+            .or_else(|| {
+                // The DXF's paper-space flag of a marker (group 67) is not the DWG entity mode: the mode follows the owner.
+                record.block_entity_common.as_deref().cloned().map(|mut common| {
+                    common.entity_mode = None;
+                    common
+                })
+            })
             .unwrap_or_else(|| EntityCommon {
                 handle,
                 owner_handle: record.handle,
                 ..Default::default()
             });
+        common.handle = handle;
         // The block record is the structural owner even when a damaged or
         // loosely decoded BLOCK marker carried a different common owner.
         common.owner_handle = record.handle;
@@ -2438,11 +2453,18 @@ impl<'a> DwgObjectWriter<'a> {
 
         let mut common = block_end
             .map(|be| be.common)
+            .or_else(|| {
+                record.block_end_common.as_deref().cloned().map(|mut common| {
+                    common.entity_mode = None;
+                    common
+                })
+            })
             .unwrap_or_else(|| EntityCommon {
                 handle: record.block_end_handle,
                 owner_handle: record.handle,
                 ..Default::default()
             });
+        common.handle = record.block_end_handle;
         common.owner_handle = record.handle;
 
         self.write_common_entity_data(

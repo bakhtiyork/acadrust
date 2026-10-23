@@ -200,7 +200,7 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
 
 /// The tag as the source spelled it (a recovered multi-line attribute tag loses a numeric suffix), while the
 /// native tag still is the recovered value; an edited tag is written as it is.
-fn source_tag<'a>(source: &'a crate::entities::text::TextSource, tag: &'a str) -> &'a str {
+pub(crate) fn source_tag<'a>(source: &'a crate::entities::text::TextSource, tag: &'a str) -> &'a str {
     match &source.tag {
         Some((original, recovered)) if recovered == tag => original,
         _ => tag,
@@ -211,7 +211,7 @@ fn source_tag<'a>(source: &'a crate::entities::text::TextSource, tag: &'a str) -
 /// and keeps the record's own group 1 (which AutoCAD writes empty) as the source value; while the value is that
 /// unedited MTEXT text, the record's own group 1 is written back. Otherwise (or when no embedded MTEXT is written,
 /// before R2018) the value is.
-fn attribute_own_value<'a>(
+pub(crate) fn attribute_own_value<'a>(
     value: &'a str,
     embedded: Option<&MText>,
     source: Option<&'a crate::entities::text::TextSource>,

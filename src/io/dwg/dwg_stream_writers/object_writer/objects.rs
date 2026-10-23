@@ -1039,18 +1039,28 @@ impl<'a> DwgObjectWriter<'a> {
         );
         self.writer.write_variable_text(&value.name);
         self.writer.write_variable_text(&value.description);
+        // A DXF states the source of a map (groups 72, 77, 171, 175, 179 for the diffuse, specular, reflection, opacity and
+        // bump maps) only when it is not the default, which AutoCAD's own DWG of the same drawing states as the image
+        // file for these five maps (the refraction and normal maps keep the current scene). The native model keeps the
+        // default of a constructed map for the omitted groups.
+        let source_of = |map: &MaterialMap, code: usize| -> u8 {
+            match &value.dxf_source {
+                Some(source) if map.source == 0 && !source.contains(code) => 1,
+                _ => map.source,
+            }
+        };
         self.write_material_color(&value.ambient_color);
         self.write_material_color(&value.diffuse_color);
-        self.write_material_map(&value.diffuse_map);
+        self.write_material_map(&value.diffuse_map, source_of(&value.diffuse_map, 72));
         self.write_material_color(&value.specular_color);
-        self.write_material_map(&value.specular_map);
+        self.write_material_map(&value.specular_map, source_of(&value.specular_map, 77));
         self.writer.write_bit_double(value.specular_gloss_factor);
-        self.write_material_map(&value.reflection_map);
+        self.write_material_map(&value.reflection_map, source_of(&value.reflection_map, 171));
         self.writer.write_bit_double(value.opacity_percent);
-        self.write_material_map(&value.opacity_map);
-        self.write_material_map(&value.bump_map);
+        self.write_material_map(&value.opacity_map, source_of(&value.opacity_map, 175));
+        self.write_material_map(&value.bump_map, source_of(&value.bump_map, 179));
         self.writer.write_bit_double(value.refraction_index);
-        self.write_material_map(&value.refraction_map);
+        self.write_material_map(&value.refraction_map, value.refraction_map.source);
         if self.version.r2007_plus() {
             self.writer.write_bit_double(value.translucence);
             self.writer.write_bit_double(value.self_illumination);
@@ -1114,7 +1124,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
     }
 
-    fn write_material_map(&mut self, value: &MaterialMap) {
+    fn write_material_map(&mut self, value: &MaterialMap, source: u8) {
         self.writer.write_bit_double(value.blend_factor);
         self.writer.write_byte(value.projection);
         self.writer.write_byte(value.tiling);
@@ -1122,10 +1132,10 @@ impl<'a> DwgObjectWriter<'a> {
         for item in value.transform {
             self.writer.write_bit_double(item);
         }
-        self.writer.write_byte(value.source);
-        if value.source == 1 {
+        self.writer.write_byte(source);
+        if source == 1 {
             self.writer.write_variable_text(&value.file_name);
-        } else if value.source == 2 {
+        } else if source == 2 {
             if let Some(texture) = &value.texture {
                 self.write_material_texture(texture, 0);
             } else {
@@ -1174,8 +1184,12 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_byte(value.modern_unknown_byte);
             self.writer.write_variable_text(&value.name);
             // The R2010+ flags field carries the table style flags.
+            // Bit 8 of the flags, which older files carry, is not a style flag; the R2010+ record of AutoCAD's own
+            // files states it (the first long is 8 in every sample of R2010 to R2018), so it is written as the
+            // model holds it in `modern_unknown_long1`.
+            let kept = (value.modern_unknown_long1 as i16) & STALE_TABLE_STYLE_FLAG;
             self.writer
-                .write_bit_long((value.effective_flags().bits() & !STALE_TABLE_STYLE_FLAG) as i32);
+                .write_bit_long(((value.effective_flags().bits() & !STALE_TABLE_STYLE_FLAG) | kept) as i32);
             self.writer.write_bit_long(value.modern_unknown_long2);
             self.writer.write_handle(
                 DwgReferenceType::HardOwnership,
@@ -1495,13 +1509,11 @@ impl<'a> DwgObjectWriter<'a> {
             Some(obj) if self.lacks_object_class(obj) => false,
             Some(obj) => match obj {
                 ObjectType::VisualStyle(_) => {
-                    (self.version.r2007_plus()
-                        || self.document.dwg_source_version == Some(self.dxf_version))
+                    (self.version.r2007_plus() || self.document.is_source_version(self.dxf_version))
                         && self.document.classes.get_by_name("VISUALSTYLE").is_some()
                 }
                 ObjectType::Material(_) => {
-                    (self.version.r2007_plus()
-                        || self.document.dwg_source_version == Some(self.dxf_version))
+                    (self.version.r2007_plus() || self.document.is_source_version(self.dxf_version))
                         && self.document.classes.get_by_name("MATERIAL").is_some()
                 }
                 ObjectType::TableStyle(_) => {
@@ -1534,8 +1546,8 @@ impl<'a> DwgObjectWriter<'a> {
         // A pre-R2000 source can legitimately carry newer class-based objects
         // and their NOD entries. Preserve them on a same-version round trip;
         // only strip the newer roots during an actual down-conversion.
-        let preserve_source_schema = self.version.r13_14_only()
-            && self.document.dwg_source_version == Some(self.dxf_version);
+        let preserve_source_schema =
+            self.version.r13_14_only() && self.document.is_source_version(self.dxf_version);
         let entries: Vec<&(String, Handle)> = if self.version.r2000_plus() || preserve_source_schema
         {
             dict.entries

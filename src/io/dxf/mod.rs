@@ -31,6 +31,7 @@ pub use group_code_value::GroupCodeValueType;
 pub use reader::{DxfReader, DxfReaderConfiguration};
 pub(crate) use reader::{DxfStreamReader, DxfTextReader};
 pub(crate) use writer::unused_default_app_ids;
+pub(crate) use writer::{attribute_own_value, source_tag};
 pub use writer::{value_type_for_code, write_binary_dxf, write_dxf};
 pub use writer::{
     DxfBinaryWriter, DxfStreamWriter, DxfStreamWriterExt, DxfTextWriter, DxfWriter, SectionWriter,

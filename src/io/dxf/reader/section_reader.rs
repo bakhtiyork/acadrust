@@ -1708,6 +1708,7 @@ impl<'a> SectionReader<'a> {
                 "$ACADVER" => {
                     if let Some(p) = self.reader.read_pair()? {
                         document.version = DxfVersion::from_version_string(&p.value_string);
+                        document.dxf_source_version = Some(document.version);
                         if document.version >= DxfVersion::AC1021 {
                             self.reader.set_encoding(encoding_rs::UTF_8.into());
                         } else if code_page_seen {

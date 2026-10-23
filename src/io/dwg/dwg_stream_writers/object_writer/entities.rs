@@ -164,6 +164,7 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ Helper: write entity preamble â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn entity_preamble(&mut self, type_code: i16, c: &EntityCommon) {
+        self.pending_layer_handle = c.layer_handle;
         self.write_common_entity_data(
             type_code,
             c.handle,
@@ -191,6 +192,7 @@ impl<'a> DwgObjectWriter<'a> {
             &c.face_visual_style_handle,
             &c.edge_visual_style_handle,
         );
+        self.pending_layer_handle = None;
     }
 
     fn write_extended_entity(&mut self, e: &ExtendedEntity) {
@@ -879,7 +881,9 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_double(e.extents_width);
 
         // Text TV 1
-        self.writer.write_variable_text(&e.value);
+        // The text as the source spelled it (`\U+00B0` escapes, which AutoCAD keeps in the MTEXT of its DWG of every
+        // version) while the value is still the decoded form of that spelling, as the DXF writer writes it.
+        self.writer.write_variable_text(e.unchanged_source_value().unwrap_or(&e.value));
 
         // H 7 STYLE (hard pointer) — written BEFORE R2000+ block
         let style_handle = self
@@ -1317,7 +1321,7 @@ impl<'a> DwgObjectWriter<'a> {
             att.rotation,
             att.height,
             att.width_factor,
-            &att.value,
+            self.attribute_text_value(&att.value, att.embedded_mtext.as_deref(), att.is_multiline, att.source.as_deref()),
             att.text_generation_flags,
             att.horizontal_alignment as i16,
             att.vertical_alignment as i16,
@@ -1361,7 +1365,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Tag, field length, flags
-        self.writer.write_variable_text(&att.tag);
+        self.writer.write_variable_text(att.source.as_deref().map_or(&att.tag, |source| crate::io::dxf::source_tag(source, &att.tag)));
         self.writer.write_bit_short(att.field_length);
         let flag_byte = att.flags.to_bits();
         self.writer.write_byte(flag_byte as u8);
@@ -1884,7 +1888,9 @@ impl<'a> DwgObjectWriter<'a> {
                 );
             }
 
-            self.writer.write_variable_text(&e.gradient_color.name);
+            // AutoCAD's DWG states the gradient name LINEAR even for a hatch that has no gradient, while a DXF omits it:
+            // a hatch read from a DXF is written as AutoCAD writes it (a constructed hatch keeps its empty name).
+            self.writer.write_variable_text(self.gradient_name(&e.gradient_color));
         }
 
         // Elevation (Z of insertion point)
@@ -1983,7 +1989,9 @@ impl<'a> DwgObjectWriter<'a> {
                     entry.book_name.as_deref(),
                 );
             }
-            self.writer.write_variable_text(&e.gradient_color.name);
+            // AutoCAD's DWG states the gradient name LINEAR even for a hatch that has no gradient, while a DXF omits it:
+            // a hatch read from a DXF is written as AutoCAD writes it (a constructed hatch keeps its empty name).
+            self.writer.write_variable_text(self.gradient_name(&e.gradient_color));
         }
 
         self.writer.write_bit_double(e.elevation);
@@ -2228,9 +2236,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_long(e.frozen_layers.len() as i32);
         // Status flags BL 90
         // The grid behaviour bits (18..21) belong to R2007+; a file of an older version that states them keeps them.
-        let grid_bits = if self.version.r2007_plus()
-            || self.document.dwg_source_version == Some(self.dxf_version)
-        {
+        let grid_bits = if self.version.r2007_plus() || self.document.is_source_version(self.dxf_version) {
             i32::from(e.grid_flags.to_bits()) << 18
         } else {
             0
@@ -3503,8 +3509,20 @@ impl<'a> DwgObjectWriter<'a> {
                 3
             };
             self.writer.write_bit_long(row.cells.len() as i32);
-            for cell in &row.cells {
-                self.write_table_cell_r2010(cell);
+            for (c, cell) in row.cells.iter().enumerate() {
+                // A TABLECONTENT object of a DXF states an (empty) item for every cell; AutoCAD's own DWG entity
+                // states none for the cells a merge of one row covers (the title row; the cells a merge of several
+                // rows covers keep theirs).
+                if !cell.contents.is_empty()
+                    && cell.contents.iter().all(CellContent::is_empty_item)
+                    && e.is_merged_away(r, c)
+                {
+                    let mut covered = cell.clone();
+                    covered.contents.clear();
+                    self.write_table_cell_r2010(&covered);
+                } else {
+                    self.write_table_cell_r2010(cell);
+                }
             }
             self.writer.write_bit_long(row.custom_data);
             self.writer
@@ -4750,7 +4768,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Tag, field length, flags
-        self.writer.write_variable_text(&e.tag);
+        self.writer.write_variable_text(e.source.as_deref().map_or(&e.tag, |source| crate::io::dxf::source_tag(source, &e.tag)));
         self.writer.write_bit_short(e.field_length);
         let flag_byte = e.flags.to_bits();
         self.writer.write_byte(flag_byte as u8);
@@ -4773,6 +4791,31 @@ impl<'a> DwgObjectWriter<'a> {
 
     // â”€â”€ Attribute Entity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+    fn gradient_name<'b>(&self, gradient: &'b crate::entities::hatch::HatchGradientPattern) -> &'b str {
+        if gradient.name.is_empty() && !gradient.enabled && self.document.dxf_source_version.is_some() {
+            "LINEAR"
+        } else {
+            &gradient.name
+        }
+    }
+
+    /// The text field of an attribute record. A multi-line attribute of R2018 and later keeps its text in the embedded
+    /// MTEXT and states the text field empty, as AutoCAD writes it (the DXF writer does the same); before R2018 the value is
+    /// the text field.
+    fn attribute_text_value<'b>(
+        &self,
+        value: &'b str,
+        embedded: Option<&'b MText>,
+        multiline: bool,
+        source: Option<&'b crate::entities::text::TextSource>,
+    ) -> &'b str {
+        if self.version.r2018_plus(self.dxf_version) && (embedded.is_some() || multiline) {
+            crate::io::dxf::attribute_own_value(value, embedded, source)
+        } else {
+            value
+        }
+    }
+
     fn write_attribute_entity(&mut self, e: &AttributeEntity) {
         self.entity_preamble(common::OBJ_ATTRIB, &e.common);
 
@@ -4786,7 +4829,7 @@ impl<'a> DwgObjectWriter<'a> {
             e.rotation,
             e.height,
             e.width_factor,
-            &e.value,
+            self.attribute_text_value(&e.value, e.embedded_mtext.as_deref(), e.is_multiline, e.source.as_deref()),
             e.text_generation_flags,
             e.horizontal_alignment as i16,
             e.vertical_alignment as i16,
@@ -4830,7 +4873,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Tag, field length, flags
-        self.writer.write_variable_text(&e.tag);
+        self.writer.write_variable_text(e.source.as_deref().map_or(&e.tag, |source| crate::io::dxf::source_tag(source, &e.tag)));
         self.writer.write_bit_short(e.field_length);
         let flag_byte = e.flags.to_bits();
         self.writer.write_byte(flag_byte as u8);
@@ -4991,7 +5034,7 @@ impl<'a> DwgObjectWriter<'a> {
         let tail_written = if acds {
             // AC1027+: ACIS data is stored in the AcDsPrototype_1b section.
             // Entity stream writes acis_empty=true with no inline data.
-            self.write_acis_empty(&e.acis_data);
+            self.write_acis_empty(e.point_of_reference, &e.acis_data);
             self.queue_sab_entry(&e.acis_data, e.common.handle);
             false
         } else {
@@ -5022,7 +5065,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         let acds = self.needs_acds_section();
         let tail_written = if acds {
-            self.write_acis_empty(&e.acis_data);
+            self.write_acis_empty(e.point_of_reference, &e.acis_data);
             self.queue_sab_entry(&e.acis_data, e.common.handle);
             false
         } else {
@@ -5052,7 +5095,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         let acds = self.needs_acds_section();
         let tail_written = if acds {
-            self.write_acis_empty(&e.acis_data);
+            self.write_acis_empty(e.point_of_reference, &e.acis_data);
             self.queue_sab_entry(&e.acis_data, e.common.handle);
             false
         } else {
@@ -5150,7 +5193,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         let acds = self.needs_acds_section();
         let tail_written = if acds {
-            self.write_acis_empty(&e.acis_data);
+            self.write_acis_empty(e.point_of_reference, &e.acis_data);
             self.queue_sab_entry(&e.acis_data, e.common.handle);
             false
         } else {
@@ -5313,20 +5356,26 @@ impl<'a> DwgObjectWriter<'a> {
     ///
     /// For R2013 and later, ACIS data lives in the AcDsPrototype_1b section.
     /// The entity stream indicates that modeler geometry is not inline, but its
-    fn write_acis_empty(&mut self, acis: &AcisData) {
+    fn write_acis_empty(&mut self, point: Vector3, acis: &AcisData) {
         // R2013+ AcDs-backed records no longer carry the legacy leading
         // `acis_empty` bit.  Their first modeler-geometry bit is the
         // wireframe-presence flag.
         //
-        // Only the cache header is kept: no reference point, wires or
-        // silhouettes. An application-built point or wire list here makes
-        // the reference application's console engine reject the whole
-        // drawing, and the display cache is rebuilt from the body anyway.
+        // Only the cache header is kept: no wires or silhouettes. An
+        // application-built point or wire list here makes the reference
+        // application's console engine reject the whole drawing, and the
+        // display cache is rebuilt from the body anyway. The reference point
+        // the source file itself stated (bounding-box centre, as AutoCAD
+        // writes it) is its own data and is written back.
         self.writer.write_bit(acis.wireframe_data_present);
         if !acis.wireframe_data_present {
             return;
         }
-        self.writer.write_bit(false); // point_present
+        let point_present = acis.wireframe_point_present && point != Vector3::ZERO;
+        self.writer.write_bit(point_present); // point_present
+        if point_present {
+            self.writer.write_3bit_double(point);
+        }
         self.writer.write_bit_long(acis.wireframe_isolines);
         self.writer.write_bit(acis.wireframe_isoline_present);
         if acis.wireframe_isoline_present {

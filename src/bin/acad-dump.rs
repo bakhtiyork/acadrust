@@ -178,8 +178,10 @@ fn native_dump(args: &[std::ffi::OsString]) -> i32 {
 /// (`Tools/g4-native-compare.py`) to verify that a SAB written as SAT lost nothing. Exit 0 same, 1 different (the
 /// reason on stdout), 2 usage or unreadable input.
 fn acis_same(args: &[std::ffi::OsString]) -> i32 {
-    if args.len() != 4 {
-        eprintln!("usage: acad-dump acis-same <sab.hex> <sat.txt>");
+    // `--ignore-header-date`: a SAB written from a SAT that states no date carries the drawing's update date.
+    let ignore_date = args.len() == 5 && args[4] == "--ignore-header-date";
+    if args.len() != 4 && !ignore_date {
+        eprintln!("usage: acad-dump acis-same <sab.hex> <sat.txt> [--ignore-header-date]");
         return 2;
     }
     let (Ok(hex), Ok(text)) = (std::fs::read_to_string(&args[2]), std::fs::read_to_string(&args[3])) else {
@@ -193,7 +195,7 @@ fn acis_same(args: &[std::ffi::OsString]) -> i32 {
     }
     let value = |digit: u8| (digit as char).to_digit(16).unwrap_or(0) as u8;
     let sab: Vec<u8> = digits.chunks(2).map(|pair| value(pair[0]) << 4 | value(pair[1])).collect();
-    match acadrust::entities::acis::sab_matches_sat(&sab, &text) {
+    match acadrust::entities::acis::sab_matches_sat_with(&sab, &text, ignore_date) {
         Ok(()) => {
             println!("same");
             0

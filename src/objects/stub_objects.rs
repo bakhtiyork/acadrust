@@ -339,7 +339,8 @@ impl VisualStyle {
         entries: &[crate::objects::XRecordEntry],
     ) -> bool {
         use crate::objects::XRecordValue;
-        if self.properties.len() != 24 {
+        // A legacy (24 properties) or R2010 (28) style; one that holds all 58 has nothing to restore.
+        if !matches!(self.properties.len(), 24 | 28) {
             return false;
         }
         let mut properties = self.core_properties();
@@ -439,7 +440,9 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
         .objects
         .iter()
         .filter_map(|(handle, object)| match object {
-            ObjectType::VisualStyle(style) if style.properties.len() >= 58 => {
+            // An R2010 style states 28 properties and keeps the later ones in its own round-trip record; a style
+            // of 58 properties holds them all.
+            ObjectType::VisualStyle(style) if style.properties.len() >= 28 => {
                 Some((*handle, style.properties.clone()))
             }
             _ => None,
@@ -452,8 +455,33 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
         value: XRecordValue::String(text),
     };
     for (handle, properties) in styles {
+        let full = properties.len() >= 58;
         let mut group = Vec::new();
-        for (index, property) in properties.iter().enumerate().take(58).skip(28) {
+        // The flags of the properties after the 28th, for the style that keeps them in its record.
+        let carried_flags: std::collections::HashMap<usize, i16> = document
+            .extension_dictionary_handle(handle)
+            .and_then(|dictionary| match document.objects.get(&dictionary) {
+                Some(ObjectType::Dictionary(entries)) => entries.get("ACAD_XREC_ROUNDTRIP"),
+                _ => None,
+            })
+            .and_then(|record| match document.objects.get(&record) {
+                Some(ObjectType::XRecord(record)) => Some(record.entries.clone()),
+                _ => None,
+            })
+            .map(|entries| {
+                entries
+                    .windows(2)
+                    .filter_map(|pair| {
+                        let index = pair[0].value.as_string()?.strip_prefix("RTVSPost2010PropOp")?.parse().ok()?;
+                        match pair[1].value {
+                            XRecordValue::Int16(flag) => Some((index, flag)),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (index, property) in properties.iter().enumerate().take(58).skip(28).filter(|_| full) {
             let name = format!("RTVSPost2010Prop{index}");
             match &property.value {
                 VisualStylePropertyValue::Color(color) => {
@@ -513,7 +541,13 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
             group.push(key(format!("RTVSPropertyOp{index}")));
             group.push(XRecordEntry {
                 code: 70,
-                value: XRecordValue::Int16(properties.get(index).map_or(1, |p| p.enabled)),
+                value: XRecordValue::Int16(
+                    properties
+                        .get(index)
+                        .map(|p| p.enabled)
+                        .or_else(|| carried_flags.get(&index).copied())
+                        .unwrap_or(1),
+                ),
             });
         }
         let record = document.ensure_xrecord(handle, "ACAD_XREC_ROUNDTRIP");
@@ -525,10 +559,9 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
         let mut entries = std::mem::take(&mut record.entries).into_iter();
         while let Some(entry) = entries.next() {
             if entry.code == 102
-                && entry
-                    .value
-                    .as_string()
-                    .is_some_and(|text| text.starts_with("RTVS"))
+                && entry.value.as_string().is_some_and(|text| {
+                    text.starts_with("RTVSPropertyOp") || (full && text.starts_with("RTVS"))
+                })
             {
                 entries.next();
                 continue;
@@ -541,6 +574,16 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
 }
 
 pub(crate) fn restore_visual_style_roundtrip(document: &mut crate::document::CadDocument) {
+    restore_visual_style_roundtrip_of(document, &[24]);
+}
+
+/// Give the R2010 styles (28 properties) the properties after the 28th that their round-trip record states, for a
+/// file of R2013 or later, whose record states all 58 itself.
+pub(crate) fn upgrade_r2010_visual_styles(document: &mut crate::document::CadDocument) {
+    restore_visual_style_roundtrip_of(document, &[28]);
+}
+
+fn restore_visual_style_roundtrip_of(document: &mut crate::document::CadDocument, lengths: &[usize]) {
     use crate::objects::ObjectType;
     let records: Vec<_> = document
         .objects
@@ -549,7 +592,7 @@ pub(crate) fn restore_visual_style_roundtrip(document: &mut crate::document::Cad
             let ObjectType::VisualStyle(style) = object else {
                 return None;
             };
-            if style.properties.len() != 24 {
+            if !lengths.contains(&style.properties.len()) {
                 return None;
             }
             let Some(ObjectType::Dictionary(dictionary)) =
