@@ -284,6 +284,16 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5b-3 EED block order | `write_extended_data_with` writes the blocks in the order of the modeled records and takes the verbatim block of an application where it has one; a verbatim block no record restates comes first. | The reader turns the ACAD `DesignCenter Data` block of a block record into `units` and drops its verbatim copy, so the block, written again from the field, went after the others (R14 `BlockRecord.ExtendedData` order differed from the source). |
 | R5b-3 R14 dictionary byte | The R14 DICTIONARY states `hard_owner` in the byte ACadSharp calls unknown and writes as 0 (`write_dictionary`). | AutoCAD's own R14 file states 1 in 179 dictionaries (the hard-owner flag of R2000+, which the reader reads from that byte); sample_AC1014.dwg now round-trips natively exact. |
 | R5b-3 block scalability of an unstated record | **Reverted in the review.** The agent's writer stated byte 1 (uniform scaling only) for a block record read from a DWG before R2007 or from a DXF without group 281. The writer again states `scale_uniformly` (0 for such a record); test `a_block_that_never_stated_its_scaling_keeps_any_scaling_in_a_later_version` (fails with the agent's version). | The claimed evidence was wrong: AutoCAD states 0 for 23 of the 27 block records of its own sample_AC1024.dwg and sample_AC1032.dwg (1 for 4; DXF group 281 likewise), so the change made the sample_V comparison worse (22 CanScale rows per AC1018 -> AC1024+ cell instead of 4), and the generated no-loss rule G5-RC-S085 (ACadSharp's default CanScale true for an R2004 source) accepted the new rows. |
+| R5b-4 down-saves keep the style, material and visual-style objects | `is_writable_object` writes `Material` and `VisualStyle` at every version (the class decides), `prepare_legacy_document` drops ACAD_TABLESTYLE / ACAD_MLEADERSTYLE only when their class is missing (it dropped them before R2004 / R2007 for a source of another version), and `write_dictionary` keeps ACAD_LAYOUT, ACAD_PLOTSETTINGS, ACAD_PLOTSTYLENAME, ACAD_MATERIAL, ACAD_COLOR and ACAD_VISUALSTYLE entries in an R13/R14 file whatever the source. | Owner decision of 2026-10-23: AutoCAD's own R14, R2000 and R2004 files hold them (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg: 11 materials, 24 visual styles, 4 layouts, the two style dictionaries). The "dropped" sample_V objects went from 1,905 to 0. |
+| R5b-4 class table of a DWG source | A DWG source written at another version below R2013 keeps its class table whole, in its order and numbering (`prepare_dwg_source_classes`; it was shrunk to the legacy list and renumbered); only the version profile changes it: LWPOLYLINE, HATCH, XRECORD (R14 only) and DATATABLE (up to R2004) are added when missing and dropped when the version does not declare them (a later target as well: `has_stale_profile_classes`). A class of such a source is no zombie unless its source said so. | AutoCAD's six files of one drawing hold the same 50 classes 500..549 in every version, plus 550..553 at R14 and 550 at R2000 / R2004 (the C# dumps). 33 class-number rows per sample_V cell are gone. |
+| R5b-4 viewport grid bits from R2000 | The status word of a VIEWPORT states the grid behaviour bits (18..21) from R2000 on (R2007+ only before). | AutoCAD's R2000 and R2004 files state them (sample_AC1015.dwg, sample_AC1018.dwg: 0xC8020 as sample_AC1032.dwg). Test `acadsharp_viewports::dwg_version_controls_lighting_grid_and_full_status_projection` follows (the lighting and the major grid frequency stay R2007+). |
+| R5b-4 VPORT grid flags of an older source | The writer states 3 (not the 2 the reader leaves) in the R2007+ VPORT grid flags of a record read from a DWG before R2007. | AutoCAD's R2010 file of a drawing converted from R2004 states 3 (sample_AC1018.dwg to sample_AC1024.dwg). |
+| R5b-4 material channel flags | The DWG writer derives the R2007+ channel flags of a material read from a DWG before R2007 whose flags are the unstated default (127) from its maps (one bit per diffuse / specular / reflection / opacity / bump map that is the image file, 63 when all five are). | AutoCAD's R2010 file states 63, 17, 1, 0 for its 11 materials (sample_AC1024.dwg); its R2004 file states none. |
+| R5b-4 visual style round-trip record | `store_visual_style_roundtrip` runs for every version before R2010 (R2004..R2009 before), and `prepare_roundtrip_records` keeps a style's record at R2010 (it dropped it at R2010 and later). | AutoCAD's R14 to R2010 files hold an ACAD_XREC_ROUNDTRIP record for each of the 24 styles (252 entries before R2010, 126 in R2010); R2013 has none. An R2010 record could also carry the properties after the 28th: not done (a re-read R2010 style stays at 28 properties). |
+| R5b-4 TABLE cells between the layouts | A cell of the R2010 layout written before R2010 (`TableCell::legacy_layout`) states its content format overrides (text height, content colour, text style, alignment), background colour and border colour / line weight overrides in the legacy override word and edge flags. A legacy cell written as R2010 (`binary_layout_with`) keeps the style's text height where the legacy text height equals a row height of the table (the legacy style's `row_heights`), states a text item's text as its formatted value, and drops the empty text of a cell a one-row merge covers (`CellContent::is_empty_text`). | AutoCAD's own sample_AC1018.dwg / sample_AC1024.dwg of the two tables of the drawing. TABLE rows in the sample_V cells: 2,316 to 975. |
+| R5b-4 SPLINE knot parameterization | The R2013+ spline record of a source read from a DWG before R2013 states 15 (custom) for a spline without fit points whose parameterization is the 0 the older reader leaves. | AutoCAD's R2013 file states 15 for the control-point spline of the drawing (#433 in sample_AC1027.dwg and sample_AC1032.dwg; corrected in the review: #434 is a fit-point spline there, 2, and 15 with control points in sample_AC1024.dwg), and ACadSharp reads every pre-R2013 control-point record as 15. |
+| R5b-4 R14 header, dimension style and viewport data of a newer drawing | The R14 header states OSMODE 4133 (AutoCAD's default) when the source is an R2000+ DWG (the reader leaves 0); the R14 DIMSTYLE states DIMFIT from DIMATFIT for such a source; the MVIEW xdata of an R14 viewport states fast zoom 1 and the UCS icon from the status word. | sample_AC1014.dwg from sample_AC1015.dwg / sample_AC1032.dwg: DimensionFit 3, fast zoom 1 and icon words 1 / 3. OSMODE (corrected in the review): AutoCAD's own R14 file states 39, its session value; no R2000+ file (DWG or DXF) states OSMODE, so 4133 is AutoCAD's initial value and ACadSharp's default (the 4133 it reads from the R2000+ files), not a value of the drawing. DIMFIT ignores DIMTMOVE (the samples state DIMTMOVE 0; R14 has no DIMTMOVE). UNVERIFIED in AutoCAD itself. |
+| R5b-4 review: deterministic class table | `prepare_legacy_classes`, `required_class_names` and `add_missing_object_classes` take the objects in handle order (`objects_in_handle_order`). | They took them in the object map's iteration order, which changes with every map and every process: the classes appended for a DXF source written at another version below R2013 came in a different order on each run (88 of the 288 G5 cells wrote different bytes on repeated runs, e.g. dynamic-blocks/BLOCKFLIPPARAMETER.dxf at AC1018: 32,844 or 32,876 bytes). Test `r5b4_write_determinism`. Upstream candidate (HashMap order in the writer). |
 
 ## ACadSharp differential dump
 
@@ -1200,3 +1210,103 @@ Clean build (`cargo clean -p acadrust`, feature build), full G5 (288 cells) and 
   for same-version sources only, R5b-2), kept 3,105 (objects of sample_W that AutoCAD's conversion dropped), added 41, common 5,109 (class rows included). Every one of
   the 30 cells has unreachable rows, so the conclusion "cannot pass as defined" stands; but a common-objects-only gate would hide the dropped objects and is not sound
   without the `dropped` column.
+
+## R5b-4: down-saves, the sample_V gate and conversion defects (2026-10-23)
+
+Fork tree: r5a at 947c8f5 + this job's working-tree changes; CadKit `Tools/g5-roundtrip.py` (sample_V gate, `--rc-only`), `Tools/g4-compare.py` (`from_versions`),
+`Tools/g4_relations.py` (four relations), `Tools/g5-rc-allowlist.json` (G5-RC-028..042). Definitions of R5b-2 / R5b-3 unchanged; the sample_V cell now follows the owner decision of
+2026-10-23 (the rows of the objects both AutoCAD files hold are exact after the RC rules, none of those objects is dropped, none that neither holds is added; objects only one file holds are reported).
+
+### Counts (clean build of the final tree, all 288 cells with the C# columns; before = R5b-3 review)
+
+| | before | after |
+|---|---|---|
+| G5-RR (288) | 41 (same-version 41 / 42, cross-version 0 / 246) | 41 (41 / 42, 0 / 246): no cross-version cell is close, see the families |
+| G5-RC same-version (42) | 42 | **42** |
+| G5-RC sample_V (36) | 6 (diagonal) | **15** (6 diagonal + 9 `reported`); per version AC1014 3, AC1015 2, AC1018 1, AC1024 3, AC1027 3, AC1032 3 of 6 (1 each before) |
+| sample_V rows of the 30 cross cells | unreachable 4,158, dropped 1,905, kept 3,105, added 41, common 5,109 | unreachable 4,165, **dropped 0**, kept 3,628, **added 0**, **common 1,365** (21 cells still have common rows) |
+| G5-idem (288) | 283 (5 AecObjects refusals) | 283 |
+| C# -> fork | 204 | 204 (reader unchanged) |
+| G4 | RR 94, RC 94, idem 96 / 96 | unchanged (only AecObjects fails) |
+| G1 | 45 / 49 | 45 / 49 |
+
+Rule subsets of the final run (rows files): RR no rules 20, hand rules (the whole RR list) 41; RC same-version no rules 0, pinned-field rules 21, all hand rules 21, all rules 42; RC sample_V no rules 0, pinned-field rules 6,
+all hand rules 6, all rules (hand + generated no-loss / twin rules) 15. The nine cross cells pass only with the generated `equals_source` rules next to the new hand rules.
+The kept / unreachable growth (3,105 to 3,628 kept) is the objects AutoCAD's own conversion dropped that the fork now keeps (the style dictionaries and their objects among them): reported, not gated.
+
+### The 21 sample_V cells that still fail (common rows; no cell has dropped or added objects)
+
+18 cells have TABLE rows (sample_AC1014 / 1015 / 1018 to AC1024+ and AC1024+ to AC1014 / 1015 / 1018): 975 rows left of 2,316. Legacy to modern: `#A35` date / block cell formats (ValueDataType 2, `%tc1`,
+BlockScale), border override flags (AutoCAD 63 / 37 for applied edges, the fork 26), row cell styles of an R14 source (margins, double line spacing). Modern to legacy: the text height AutoCAD states for a cell without
+override is the row height of its legacy style (0.1425 title, 0.1026 data = 0.57 x the style text height) which a modern table does not state, the right edge of a last-column cell comes from the inside-horizontal
+border (edge flags 11 against 9). Three non-table cells (sample_AC1014 to AC1015 / AC1018, sample_AC1015 to AC1018) fail on information the older file cannot hold: Hatch gradient (R2000 file: ACI approximation only), BookColor RGB,
+viewport status words of R14, BlockRecord preview / block description / CanScale (R2007+ fields), Solid3D ACIS revision, header MeasurementUnits. Other leftovers: class InstanceCount of CELLSTYLEMAP / DICTIONARYVAR / DATATABLE
+(AutoCAD counts what the dump does not enumerate; census counts written), MultiLeaderStyle TextTopAttachment (R2010 field AutoCAD states 9), Leader TextHeight.
+
+### Rules (CadKit g5-rc-allowlist.json; `from_versions` = version of sample_W, evidence the format or AutoCAD's own files, never the fork's reader)
+
+G5-RC-028..033 entity Transparency (Line, Point, MText, Solid, Insert, Arc) exp 100 act 0, source R14 / R2000, target R2004+: 820 rows in 8 cells (a `reported` cell needs no rescue); R2000 entity records hold no transparency, ACadSharp reads the fork's ByBlock colour word without transparency as opaque (DwgStreamReaderAC18.cs:111-115).
+G5-RC-034 TABLECONTENT / TABLEGEOMETRY InstanceCount (the two classes only; the id 035 is unused) equals the number of TableEntity objects the fork holds (AutoCAD counts 9, 7, 6, 5 in its four files of the two tables).
+G5-RC-036 / 037 added CadDictionary / XRecord of a visual or table style whose counterpart in the expected file has an extension dictionary (new handles), 038 VisualStyle.XDictionary both set, 042 entry handles of such a dictionary (relations `added_visual_style_record`, `both_set`, `entry_renumbered_in_style_dictionary`): 297 added rows, source R2010+, target R14 to R2004.
+G5-RC-039 / 040 Spline Flags1 0 to 1 and KnotParametrization 15 to 0: a fit-point spline of an R2013+ source is held as control points by AutoCAD's R14 to R2010 files (4 control points, 8 knots), the fork writes the fit points (DwgObjectReader.cs:5663-5670).
+G5-RC-041 HandleSeed exceeds every handle the file holds (relation `seed_exceeds_objects`; AutoCAD's seeds 4807, 4343, 4127, 3828, 3828, 3684 of one drawing).
+Rescued cells: the nine `reported` cross cells need these plus the generated rules. No rule accepts a missing object. `Tools/g4-compare.py` `reject_ctx` examples now inherit the rule's target version, cell kind and source version (a rejection test was vacuous for rules that name them).
+
+### Changed older test expectations (each as strict as before)
+
+* `acadsharp_viewports::dwg_version_controls_lighting_grid_and_full_status_projection`: the grid bits are stored at R2000 / R2004 too (13), as AutoCAD's sample_AC1015.dwg / sample_AC1018.dwg state them (viewport #240 status 0xC8020 in both, as in sample_AC1032.dwg).
+* `r5b_dwg_roundtrip::viewport_grid_bits_of_a_same_version_source_are_kept` (a document of no file states 0b0011 before R2007 as well), `r5b2_dwg_roundtrip::a_dxf_source_keeps_the_grid_bits_of_its_viewport_before_r2007` (a constructed document keeps its bits): same evidence.
+* `r5b_dwg_roundtrip::style_dictionaries_of_a_same_version_source_are_kept`: the down-save keeps the table style (sample_AC1015.dwg holds ACAD_TABLESTYLE).
+* `dwg_writer::tests::test_pre_r2013_write_uses_legacy_document_profile` and `roundtrip::dwg_roundtrip_deep_r2000`: 17 objects at R2000 instead of 13 (the table style and multileader style dictionaries and their two styles; same evidence).
+
+### Tests
+
+`tests/r5b4_downsaves.rs` (3) and `tests/r5b4_conversions.rs` (10), each checked to fail with its fix neutralised one by one (16 neutralisations: materials, spline, dimfit, osmode, viewport xdata, zombie, legacy layout, row height, merge covered, visual style at every version, at R2010, grid bits, VPORT grid, class table, material objects, table style dictionary).
+`cargo test --features acadsharp-compat --no-fail-fast`: 2,561 passed, 0 failed, 60 ignored; 0 warnings in `cargo build --lib` and the feature build.
+
+### Cross-version G5-RR families (210,893 unexplained rows in the final run, by record type VisualStyle 53,628, Table 48,318, XRecord 33,695, doc 21,804 (classes, header), Dictionary 6,452, Line 5,897; not closed)
+
+Largest, by rows (cells): VisualStyle `properties[]` 41,040 (26; the R2010 layout holds 28 of the 58 properties: AutoCAD's own R2010 record keeps none of the later ones either), XRecord `entries[]` 27,216 (3; the regenerated visual-style
+record has more entries than the R2010 source's), class `instance_count` 4,440 (105; counts of AutoCAD's own classes follow the objects it holds), XRecord `cloning_flags` 3,224 (21) and Dictionary `duplicate_cloning` 3,008 (22) (R14 records
+have neither: ODA specification), R12 sources (AC1009) linetype / style / block spelling 3,140 + 2,928 + 1,140, Line / Point / MText transparency 3,300 and Line line_weight 1,593 (R2000 and R14 entities hold none), Table cell fields (legacy to modern and back:
+geometry, custom data, formats, borders: 48,318 rows), Material `channel_flags` 99 per cell pair (new: the derived flags against the native default 127). The families whose cause is the target format (cloning flags, transparency, line weight, geometry, custom data of a legacy table) are
+candidates for hand rules citing the format; none was written (no cell would pass: every cross cell has thousands of rows from the table and visual style families).
+
+### Doubts and UNVERIFIED
+
+* UNVERIFIED (no AutoCAD here): AutoCAD opening the fork's R14 / R2000 / R2004 files with the kept dictionaries, the derived OSMODE / DIMFIT / MVIEW words, the legacy table cell words (0x40000 and the visibility bits 0x4000.. are not written), or the added round-trip records.
+* The legacy table conversion is derived from the two tables of one sample: the row-height rule and the border-edge mapping fit 21 + 12 cells; the edge flags of a last-column cell (11) do not follow it.
+* G5 `reported` is a gate decision of the owner: a cell passes while objects only one AutoCAD file holds remain; the 4,165 unreachable and 3,628 kept rows are listed per cell in the report.
+* G8 (speed / memory) was not re-run: reader hot paths are untouched; the writer additions run once per document or per cell of a down-saved table.
+
+### Review of R5b-4 (2026-10-24)
+
+* **Write determinism (found by the gate speed-up job).** The classes the writer appends for a DXF source written at another version below
+  R2013 followed the object map's iteration order, which changes with every map and process: 88 of the 288 G5 cells (the cross-version cells
+  of the DXF sources) wrote different bytes on repeated `write-dwg --pin` runs. Fixed (`objects_in_handle_order`, behaviour row above); all 288
+  cells now write identical bytes on 3 runs each; test `r5b4_write_determinism` (fails without the fix). No gate verdict was flaky: those 88
+  cells are G5-RR mismatches and G5-idem matches in every run (only their class rows varied), and no RC check covers them.
+* **The no-loss rules hid conversion losses.** `equals_source` accepted the ExtendedData rows where AutoCAD's own down-save keeps, per entity, what
+  the version's records cannot hold: RTTcAl (the R2004 true colour: 36 entities in sample_AC1014.dwg / sample_AC1015.dwg), RTLwPs (the line
+  weight at R14: 75 entities in sample_AC1014.dwg) and RTMaterial (the material before R2007). The fork writes the ACI colour and drops the rest,
+  so the true colours, R14 line weights and pre-R2007 material assignments are lost where AutoCAD keeps them. The relation no longer accepts an
+  ExtendedData row where AutoCAD's file holds such a record that the fork's file lacks (CadKit `Tools/g4_relations.py`, g5 self-test). Cells
+  lost: sample_AC1015 -> AC1014, sample_AC1018 -> AC1014, sample_AC1018 -> AC1015 (`reported` -> mismatch). Open: write the round-trip records.
+* **sample_V gate.** A fork object under a handle of sample_W was `kept` whatever its type; it is `kept` only under sample_W's type, otherwise
+  `added` (gated; g5 self-test case).
+* **Corrected evidence.** OSMODE: AutoCAD's own R14 file states 39 (its session value); 4133 is AutoCAD's initial value and ACadSharp's default.
+  SPLINE: sample_AC1027.dwg states 15 for the control-point spline #433 only (#434 is a fit spline there). The R2000 / R2004 grid bits test note
+  named R2015 / R2018.
+* **Kept as the agent wrote them (checked):** the down-saves (the fork's R14 / R2000 / R2004 files of sample_AC1032.dwg hold every object type
+  AutoCAD's files hold, the same class table in number and name, no unknown objects; only AutoCAD's own round-trip dictionaries and records
+  are missing); the class table of a DWG source and its profile classes (the six C# dumps); no zombie classes for a DWG source; viewport grid
+  bits from R2000 (status 0xC8020 / 0xC8260 in sample_AC1015.dwg and sample_AC1018.dwg); VPORT grid flags 3; material channel flags (a stated
+  R2007+ value is never replaced: the writer only replaces the 127 default of a record read from a pre-R2007 DWG, which states none; test added);
+  the visual-style round-trip records (252 entries per style in the R14 to R2004 files, 126 in R2010); the MVIEW words. A reader-side variant
+  (the reader stating the derived channel flags, 15 and 3 for pre-R2007 / pre-R2013 records) was tried and dropped: it changes the native round
+  trip of in-memory documents through the old versions (`roundtrip::dwg_roundtrip_deep_r2000`: a Chord control-point spline came back as 15).
+  The writer conversions leave cross-version G5-RR rows (Material channel_flags, Spline knot_parameterization, VPort grid_flags,
+  object_snap_mode, dimfit) where the source format holds no such field: candidates for hand RR rules citing the format, none written.
+* Counts (clean build, `--jobs 3`, 288 cells): G5-RR 41 (same-version 41 / 42, cross 0 / 246; no rules 20); RC same-version 42 / 42 (no rules 0,
+  pin 21, hand 21); RC sample_V 12 / 36 (6 diagonal + 6 `reported`; no rules 0, pin 6, hand 6, all 12); idem 283; C# -> fork 204. G4 RR 94,
+  RC 94, idem 96 / 96 (no per-cell change). G1 45 / 49. Tests 2,562 passed, 0 failed, 60 ignored.

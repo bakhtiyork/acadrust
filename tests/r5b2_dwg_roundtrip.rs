@@ -693,8 +693,9 @@ fn the_table_style_record_of_r2010_keeps_bit_8_of_its_first_long_outside_the_fla
     }
 }
 
-/// The grid behaviour bits of a viewport belong to R2007 and later, and a file of an older version that states them keeps
-/// them; a DXF of that version is such a file. (The DWG of a constructed document of that version has no room for them.)
+/// A DXF of R2000 or R2004 that states the grid behaviour bits of a viewport keeps them in its DWG, and so does a constructed
+/// document: the status word of every R2000+ viewport holds them (AutoCAD's own sample_AC1015.dwg and sample_AC1018.dwg state
+/// them as sample_AC1032.dwg does; R5b-4 replaced "R2007 and later only").
 #[test]
 fn a_dxf_source_keeps_the_grid_bits_of_its_viewport_before_r2007() {
     for version in [DxfVersion::AC1015, DxfVersion::AC1018] {
@@ -737,6 +738,6 @@ fn a_dxf_source_keeps_the_grid_bits_of_its_viewport_before_r2007() {
         let stated = bits(&source);
         assert_eq!(stated, acadrust::entities::viewport::GridFlags { beyond_limits: false, adaptive: true, subdivision: true, follow_dynamic: false }.to_bits(), "{version:?}: the DXF states them");
         assert_eq!(bits(&write_and_read(&source, version)), stated, "{version:?}: the DWG of a DXF source");
-        assert_eq!(bits(&write_and_read(&document, version)), 0, "{version:?}: a constructed document");
+        assert_eq!(bits(&write_and_read(&document, version)), bits(&document), "{version:?}: a constructed document");
     }
 }

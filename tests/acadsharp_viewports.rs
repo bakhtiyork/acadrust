@@ -290,8 +290,10 @@ fn dwg_version_controls_lighting_grid_and_full_status_projection() {
         let v = viewport(&restored);
         assert!(v.default_lighting);
         let modern = version >= DxfVersion::AC1021;
-        // The writer encodes grid behavior only in R2007+ status words.
-        let stored_grid = if modern { 13 } else { 0 };
+        // The grid behaviour bits are part of the status word of every R2000+ viewport: AutoCAD's own R2000 and R2004 files
+        // state them as its later ones do (sample_AC1015.dwg and sample_AC1018.dwg: viewport #240 has status 0xC8020 in both,
+        // as sample_AC1032.dwg has). The lighting and the major grid frequency are R2007+ fields.
+        let stored_grid = 13;
         assert_eq!(v.grid_flags.to_bits(), stored_grid);
         let p = properties(&restored, v.common.handle);
         assert_eq!(p["UseDefaultLighting"], modern);

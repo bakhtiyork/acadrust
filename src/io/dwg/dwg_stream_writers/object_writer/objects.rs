@@ -1056,7 +1056,11 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_double(value.self_illumination);
             self.writer.write_bit_double(value.reflectivity);
             self.writer.write_bit_long(value.illumination_model);
-            self.writer.write_bit_long(value.channel_flags);
+            // A record of a source before R2007 has no channel flags (the reader leaves the default 127): AutoCAD's own R2010
+            // file of such a drawing states the channels the maps use (sample_AC1018.dwg to sample_AC1024.dwg).
+            let unstated = value.channel_flags == 127
+                && self.document.dwg_source_version.is_some_and(|source| source < DxfVersion::AC1021);
+            self.writer.write_bit_long(if unstated { value.derived_channel_flags() } else { value.channel_flags });
             self.writer.write_bit_long(value.mode);
         }
         self.register_object(value.handle);
@@ -1498,14 +1502,10 @@ impl<'a> DwgObjectWriter<'a> {
             },
             Some(obj) if self.lacks_object_class(obj) => false,
             Some(obj) => match obj {
-                ObjectType::VisualStyle(_) => {
-                    (self.version.r2007_plus() || self.document.is_source_version(self.dxf_version))
-                        && self.document.classes.get_by_name("VISUALSTYLE").is_some()
-                }
-                ObjectType::Material(_) => {
-                    (self.version.r2007_plus() || self.document.is_source_version(self.dxf_version))
-                        && self.document.classes.get_by_name("MATERIAL").is_some()
-                }
+                // AutoCAD's own down-saves keep the materials and visual styles at every version (sample_AC1014.dwg,
+                // sample_AC1015.dwg, sample_AC1018.dwg): the class decides.
+                ObjectType::VisualStyle(_) => self.document.classes.get_by_name("VISUALSTYLE").is_some(),
+                ObjectType::Material(_) => self.document.classes.get_by_name("MATERIAL").is_some(),
                 ObjectType::TableStyle(_) => {
                     self.document.classes.get_by_name("TABLESTYLE").is_some()
                 }
@@ -1533,34 +1533,14 @@ impl<'a> DwgObjectWriter<'a> {
     // ── Dictionary ──────────────────────────────────────────────────
 
     fn write_dictionary(&mut self, dict: &Dictionary) {
-        // A pre-R2000 source can legitimately carry newer class-based objects
-        // and their NOD entries. Preserve them on a same-version round trip;
-        // only strip the newer roots during an actual down-conversion.
-        let preserve_source_schema =
-            self.version.r13_14_only() && self.document.is_source_version(self.dxf_version);
-        let entries: Vec<&(String, Handle)> = if self.version.r2000_plus() || preserve_source_schema
-        {
-            dict.entries
-                .iter()
-                .filter(|(_, h)| !h.is_null() && self.is_writable_object(h))
-                .collect()
-        } else {
-            dict.entries
-                .iter()
-                .filter(|(name, h)| {
-                    !matches!(
-                        name.as_str(),
-                        "ACAD_PLOTSTYLENAME"
-                            | "ACAD_LAYOUT"
-                            | "ACAD_PLOTSETTINGS"
-                            | "ACAD_MATERIAL"
-                            | "ACAD_COLOR"
-                            | "ACAD_VISUALSTYLE"
-                    ) && !h.is_null()
-                        && self.is_writable_object(h)
-                })
-                .collect()
-        };
+        // AutoCAD's own R14 and R2000 files hold the newer class-based roots (ACAD_LAYOUT, ACAD_PLOTSETTINGS, ACAD_MATERIAL,
+        // ACAD_VISUALSTYLE, ACAD_COLOR, ACAD_PLOTSTYLENAME with their objects: sample_AC1014.dwg) whatever version the
+        // drawing came from, so a down-save keeps every entry whose object is written.
+        let entries: Vec<&(String, Handle)> = dict
+            .entries
+            .iter()
+            .filter(|(_, h)| !h.is_null() && self.is_writable_object(h))
+            .collect();
 
         self.write_common_non_entity_data(
             common::OBJ_DICTIONARY,

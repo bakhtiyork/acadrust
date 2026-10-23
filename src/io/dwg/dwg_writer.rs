@@ -93,6 +93,7 @@ impl DwgWriter {
         let document: &CadDocument = if document.has_null_table_entries()
             || document.version < DxfVersion::AC1027
             || dxf_classes
+            || has_stale_profile_classes(document)
         {
             owned = document.clone();
             if owned.has_null_table_entries() {
@@ -105,11 +106,21 @@ impl DwgWriter {
                 // for it, and the verbatim records copied from that file
                 // carry its class numbers: leave it as it is.
                 if owned.dwg_source_version != Some(owned.version) {
-                    prepare_legacy_classes(&mut owned);
+                    if owned.dwg_source_version.is_some() && !owned.classes.is_empty() {
+                        prepare_dwg_source_classes(&mut owned);
+                    } else {
+                        prepare_legacy_classes(&mut owned);
+                    }
                 }
             }
             if owned.version < DxfVersion::AC1018 {
                 add_missing_object_classes(&mut owned);
+            }
+            if owned.version >= DxfVersion::AC1027
+                && !dxf_classes
+                && owned.dwg_source_version.is_some_and(|source| source != owned.version)
+            {
+                prepare_dwg_source_classes(&mut owned);
             }
             if owned.version < DxfVersion::AC1027 {
                 prepare_legacy_document(&mut owned);
@@ -702,7 +713,9 @@ fn prepare_roundtrip_records(document: &mut std::borrow::Cow<'_, CadDocument>) {
         // (a file of R2000 or older carries it for a style without any).
         let has_cell_styles = matches!(object, ObjectType::TableStyle(style) if !style.modern_overrides.is_empty());
         let roundtrip_owner = match object {
-            ObjectType::VisualStyle(style) => style.properties.len() >= 58,
+            // The R2010 layout (28 properties) keeps the record AutoCAD's own R2010 file holds for every style (126 entries:
+            // sample_AC1024.dwg); only the R2013 layout, which states all 58 properties, goes without it.
+            ObjectType::VisualStyle(style) => style.properties.len() >= 58 && document.version >= DxfVersion::AC1027,
             ObjectType::TableStyle(_) => true,
             _ => false,
         };
@@ -792,7 +805,7 @@ pub(crate) fn entity_class_name(entity: &crate::entities::EntityType) -> &str {
 /// record without a valid type code, so it is kept, after the profile.
 fn prepare_legacy_classes(document: &mut CadDocument) {
     let entity_classes = document.entities().map(entity_class_name);
-    let object_classes = document.objects.values().flat_map(
+    let object_classes = objects_in_handle_order(document).flat_map(
         crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names,
     );
     // FIELD / FIELDLIST records exist from R2004 on and are written from the
@@ -821,6 +834,14 @@ fn prepare_legacy_classes(document: &mut CadDocument) {
     }
 }
 
+/// The document's objects in handle order: the classes the writer appends follow the records that need them, and the
+/// object map's own iteration order changes from one process to the next (a pinned write must be byte-identical).
+fn objects_in_handle_order(document: &CadDocument) -> impl Iterator<Item = &crate::objects::ObjectType> {
+    let mut objects: Vec<_> = document.objects.iter().collect();
+    objects.sort_unstable_by_key(|(handle, _)| handle.value());
+    objects.into_iter().map(|(_, object)| object)
+}
+
 /// Whether the document states a class list of its own that the DWG class table follows: it was read from a DXF
 /// (the CLASSES section as written by the host application) and is written at that version or at one that has
 /// no older profile to shrink to (R2013 and later). A DXF written for an older profile than the target keeps the
@@ -834,7 +855,7 @@ fn states_dxf_classes(document: &CadDocument) -> bool {
 /// The classes a record of the document is written under (entities, objects, fields).
 fn required_class_names(document: &CadDocument) -> Vec<String> {
     let entity_classes = document.entities().map(entity_class_name);
-    let object_classes = document.objects.values().flat_map(
+    let object_classes = objects_in_handle_order(document).flat_map(
         crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names,
     );
     let field_classes: &[&str] = if document.version >= DxfVersion::AC1018 {
@@ -902,15 +923,61 @@ fn prepare_dxf_source_classes(document: &mut CadDocument) {
     document.classes.replace_entries(table);
 }
 
+/// Whether the class table of a DWG source holds a class of an older version's profile that a later target does not declare
+/// (LWPOLYLINE, HATCH and XRECORD from R2000 on, DATATABLE from R2007 on; see `prepare_dwg_source_classes`).
+fn has_stale_profile_classes(document: &CadDocument) -> bool {
+    document.version >= DxfVersion::AC1027
+        && document.dwg_source_version.is_some_and(|source| source != document.version)
+        && ["LWPOLYLINE", "HATCH", "XRECORD", "DATATABLE"].iter().any(|name| document.classes.contains(name))
+}
+
+/// The class table of a DWG source written at another version.
+///
+/// AutoCAD's own saves of one drawing at the six versions keep the source's class table whole, in its order and
+/// numbering (sample_AC1014.dwg to sample_AC1032.dwg: the 50 classes 500..549 are the same list at every version,
+/// including classes without a live record); only a version's own profile differs: R14 declares LWPOLYLINE, HATCH and
+/// XRECORD (class-based there, fixed type codes from R2000 on), R14 to R2004 declare DATATABLE, and later versions
+/// declare none of the four. A profile class goes when no record of the document is written under it and comes after
+/// the table, in AutoCAD's order, when it is missing and the version declares it.
+fn prepare_dwg_source_classes(document: &mut CadDocument) {
+    use crate::classes::DxfClass;
+    let version = document.version;
+    let used: std::collections::HashSet<String> = required_class_names(document)
+        .into_iter()
+        .map(|name| name.to_ascii_uppercase())
+        .collect();
+    let mut table: Vec<DxfClass> = document.classes.iter().cloned().collect();
+    const R14_CLASSES: [&str; 3] = ["LWPOLYLINE", "HATCH", "XRECORD"];
+    table.retain(|class| {
+        let name = class.dxf_name.to_ascii_uppercase();
+        // The R14 classes are never the class of a record from R2000 on (fixed type codes); DATATABLE objects keep theirs.
+        let profile_gone = (R14_CLASSES.contains(&name.as_str()) && version >= DxfVersion::AC1015)
+            || (name == "DATATABLE" && version >= DxfVersion::AC1021 && !used.contains(&name));
+        !profile_gone
+    });
+    let mut declare = |dxf_name: &str, cpp_name: &str, entity: bool| {
+        if !table.iter().any(|class| class.dxf_name.eq_ignore_ascii_case(dxf_name)) {
+            table.push(if entity { DxfClass::new_entity(dxf_name, cpp_name) } else { DxfClass::new(dxf_name, cpp_name) });
+        }
+    };
+    if version <= DxfVersion::AC1018 {
+        declare("DATATABLE", "AcDbDataTable", false);
+    }
+    if version <= DxfVersion::AC1014 {
+        declare("LWPOLYLINE", "AcDbPolyline", true);
+        declare("HATCH", "AcDbHatch", true);
+        declare("XRECORD", "AcDbXrecord", false);
+    }
+    document.classes.replace_entries(table);
+}
+
 /// Declare the class of every object added to a pre-R2004 drawing whose
 /// source file never used that class. Before R2004 such records take their
 /// type code only from the class table; without an entry they fall back to a
 /// later version's fixed code, which strict readers reject.
 fn add_missing_object_classes(document: &mut CadDocument) {
     let defaults = crate::classes::default_classes();
-    let missing: Vec<_> = document
-        .objects
-        .values()
+    let missing: Vec<_> = objects_in_handle_order(document)
         .map(crate::io::dwg::dwg_stream_writers::object_writer::objects::object_class_names)
         .filter(|names| !names.iter().any(|name| document.classes.contains(name)))
         .filter_map(|names| {
@@ -926,8 +993,12 @@ fn add_missing_object_classes(document: &mut CadDocument) {
     }
 }
 
-/// Remove style dictionaries only before the versions introducing their
-/// objects: TABLESTYLE in R2004 and MLEADERSTYLE in R2007.
+/// Legacy-version preparation of a document: the VX records of R14, and the style dictionaries that cannot be written.
+///
+/// AutoCAD's own down-saves keep ACAD_TABLESTYLE and ACAD_MLEADERSTYLE (and their objects) at every version
+/// (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg), so a dictionary goes only when its class is missing from
+/// the class table: a record of a class-based object takes its type code from the class and has no fixed code to fall
+/// back to in these versions.
 fn prepare_legacy_document(document: &mut CadDocument) {
     use crate::objects::ObjectType;
     // A document without VX records (a DXF, or a DWG of a later version) gets one per viewport. A drawing that has VX records
@@ -981,22 +1052,13 @@ fn prepare_legacy_document(document: &mut CadDocument) {
         }
     }
 
-    // R2004 saves keep ACAD_MLEADERSTYLE (with the MLEADERSTYLE class
-    // declared), written in the pre-R2010 record layout, as the reference
-    // application does; only older versions drop it.
-    let keep_mleader_style = document.version >= DxfVersion::AC1018
-        && document.classes.get_by_name("MLEADERSTYLE").is_some();
-    // A file of this very version that has the dictionaries is valid for it: they stay (as they do for the tables).
-    let source_has_them = document.is_source_version(document.version);
     let root_handle = document.header.named_objects_dict_handle;
     let mut obsolete = Vec::new();
+    let has_class = |name: &str| document.classes.get_by_name(name).is_some();
+    let (has_table_style, has_mleader_style) = (has_class("TABLESTYLE"), has_class("MLEADERSTYLE"));
     if let Some(ObjectType::Dictionary(root)) = document.objects.get_mut(&root_handle) {
         root.entries.retain(|(name, handle)| {
-            let remove = !source_has_them
-                && ((name == "ACAD_MLEADERSTYLE"
-                    && document.version < DxfVersion::AC1021
-                    && !keep_mleader_style)
-                    || (name == "ACAD_TABLESTYLE" && document.version < DxfVersion::AC1018));
+            let remove = (name == "ACAD_MLEADERSTYLE" && !has_mleader_style) || (name == "ACAD_TABLESTYLE" && !has_table_style);
             if remove {
                 obsolete.push(*handle);
             }
@@ -1085,8 +1147,11 @@ fn reconciled_classes(
             } else if counts_complete {
                 let declared_live_unused = source_is_valid && class.instance_count == 0 && !class.was_zombie;
                 class.instance_count = 0;
+                // The classes of a DWG source keep the flag their file stated: AutoCAD's own saves of one drawing state none of
+                // them as a zombie, including the classes without a record (sample_AC1014.dwg to sample_AC1032.dwg).
                 if class.dwg_version == 0
                     && class.maintenance_version == 0
+                    && document.dwg_source_version.is_none()
                     && !declared_live_unused
                     && !FIXED_CLASSES
                         .iter()
@@ -1153,6 +1218,15 @@ fn prepare_header(
     extents: &Option<crate::types::BoundingBox3D>,
 ) -> HeaderVariables {
     let mut h = document.header.clone();
+    // The R13 and R14 header states OSMODE; the header of an R2000 or later DWG does not, and the reader leaves 0 (no snap
+    // mode). The record of a drawing converted down to R14 states AutoCAD's default, 4133, which ACadSharp reads from the
+    // later versions' files for the same reason (sample_AC1015.dwg: 4133).
+    if document.version <= DxfVersion::AC1014
+        && h.object_snap_mode == 0
+        && document.dwg_source_version.is_some_and(|source| source >= DxfVersion::AC1015)
+    {
+        h.object_snap_mode = 4133;
+    }
     let emitted = |handle: Handle| {
         !handle.is_null() && handle_map.iter().any(|(value, _)| *value == handle.value())
     };
@@ -3350,7 +3424,9 @@ mod tests {
         let mut expected = doc.classes.clone();
         expected.retain_legacy_dwg_classes();
         assert_eq!(decoded.classes.len(), expected.len());
-        assert_eq!(decoded.objects.len(), 13);
+        // 13 objects and the table style and multileader style dictionaries with their two styles: AutoCAD's own R2000 file
+        // holds them (sample_AC1015.dwg: ACAD_TABLESTYLE and ACAD_MLEADERSTYLE in the root dictionary), R5b-4.
+        assert_eq!(decoded.objects.len(), 17);
     }
 
     #[test]
