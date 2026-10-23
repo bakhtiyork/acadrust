@@ -448,14 +448,15 @@ fn style_dictionaries_of_a_same_version_source_are_kept() {
     let same_version = write_and_read(&read, DxfVersion::AC1015);
     assert!(same_version.objects.contains_key(&style_handle), "a source of the same version keeps the style");
 
-    // Written to R2000 from another version, the profile drops it.
+    // Written to R2000 from another version, the style stays: AutoCAD's own R2000 file of a drawing holds the table style
+    // dictionary (sample_AC1015.dwg), whatever version the drawing came from (R5b-4; it was dropped before).
     read.dwg_source_version = Some(DxfVersion::AC1018);
     let down_saved = write_and_read(&read, DxfVersion::AC1015);
-    assert!(!down_saved.objects.contains_key(&style_handle), "a down-save drops the style");
+    assert!(down_saved.objects.contains_key(&style_handle), "a down-save keeps the style");
 }
 
-/// The VIEWPORT grid behaviour bits (status bits 18..21) belong to R2007+; a document read from a file of an older
-/// version that states them keeps them.
+/// The VIEWPORT grid behaviour bits (status bits 18..21) are part of the status word of every R2000+ viewport, as AutoCAD's
+/// own R2000 and R2004 files state them (sample_AC1015.dwg, sample_AC1018.dwg: status 0xC8020 as in sample_AC1032.dwg).
 #[test]
 fn viewport_grid_bits_of_a_same_version_source_are_kept() {
     use acadrust::entities::{GridFlags, Viewport};
@@ -483,7 +484,7 @@ fn viewport_grid_bits_of_a_same_version_source_are_kept() {
             .expect("viewport")
     };
     assert_eq!(grid_of(&write_and_read(&build(Some(version)), version)), 0b0011, "a same-version source keeps them");
-    assert_eq!(grid_of(&write_and_read(&build(None), version)), 0, "a document of no file does not state them before R2007");
+    assert_eq!(grid_of(&write_and_read(&build(None), version)), 0b0011, "a document of no file states them too");
 }
 
 /// A block whose BLOCK marker the document does not hold (a document read from DXF, or built in memory) gets a

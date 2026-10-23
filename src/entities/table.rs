@@ -668,6 +668,17 @@ impl CellContent {
             && self.value.numeric_value == 0.0
     }
 
+    /// Whether the item is a text without characters, field, block or attribute (what a legacy cell states for an empty cell).
+    pub fn is_empty_text(&self) -> bool {
+        self.block_handle.is_none()
+            && self.field_handle.is_none()
+            && self.attributes.is_empty()
+            && self.value.value_type == CellValueType::String
+            && self.value.text.is_empty()
+            && self.value.handle_value.is_none()
+            && self.value.binary_value.is_empty()
+    }
+
     pub fn sets(&self, property: CellStylePropertyFlags) -> bool {
         let bits = (self.format_property_flags | self.format_override_flags) as u32;
         bits & property.bits() == property.bits()
@@ -1070,6 +1081,14 @@ impl TableCell {
     }
 
     pub fn binary_layout(&self) -> std::borrow::Cow<'_, TableCell> {
+        self.binary_layout_with(&[])
+    }
+
+    /// [`binary_layout`](Self::binary_layout) of a cell of a table that states `row_heights` (the row heights of its
+    /// legacy table style override): a legacy cell states a text height equal to the height of its row where the user set
+    /// none, and AutoCAD's own R2010 file of such a table (sample_AC1018.dwg to sample_AC1024.dwg) keeps the style's text
+    /// height there and overrides it only for another value.
+    pub fn binary_layout_with(&self, row_heights: &[f64]) -> std::borrow::Cow<'_, TableCell> {
         use CellStylePropertyFlags as P;
         const CONTENT: P = P::TEXT_HEIGHT.union(P::TEXT_STYLE).union(P::CONTENT_COLOR);
         let legacy = self.style.as_ref().is_some_and(|s| s.legacy_override_bits);
@@ -1089,13 +1108,17 @@ impl TableCell {
                 } else {
                     content.format_value_data_type = 4;
                     content.format_override_flags |= 3;
+                    // AutoCAD's R2010 file states the text as the formatted value of a text item (sample_AC1024.dwg).
+                    if content.value.value_type == CellValueType::String && content.value.formatted_value.is_empty() {
+                        content.value.formatted_value = content.value.text.clone();
+                    }
                 }
             }
         }
         if let Some(own) = own {
             let p = own.overridden();
             for content in &mut cell.contents {
-                if p.contains(P::TEXT_HEIGHT) {
+                if p.contains(P::TEXT_HEIGHT) && !row_heights.contains(&own.text_height) {
                     content.format_override_flags |= P::TEXT_HEIGHT.bits() as i32;
                     content.text_height = own.text_height;
                 }
@@ -1134,6 +1157,92 @@ impl TableCell {
                 style.property_flags = P::NONE;
                 style.legacy_override_bits = false;
             }
+        }
+        std::borrow::Cow::Owned(cell)
+    }
+
+    /// The pre-R2010 flat layout of a cell that carries the R2010 layout (the inverse of [`binary_layout`](Self::binary_layout)):
+    /// the formats the content and the cell style state go into the one override word of a legacy cell, as AutoCAD's own R2004
+    /// file of a drawing states them (sample_AC1018.dwg from sample_AC1032.dwg): a text height, content colour, text style or
+    /// alignment the content format overrides (0x20, 0x08, 0x10, 0x01), the cell's background colour (0x04), and per border
+    /// edge the colour (0x40, 0x80, 0x100, 0x200) and line weight with visibility (0x400, 0x800, 0x1000, 0x2000) that the
+    /// edge's border overrides, which also set the edge in the cell's edge flags (top 1, right 2, bottom 4, left 8). A cell
+    /// of the legacy layout, or with nothing overridden, is returned as it is.
+    pub fn legacy_layout(&self) -> std::borrow::Cow<'_, TableCell> {
+        use CellStylePropertyFlags as P;
+        let modern_style = self.style.as_ref().is_some_and(|s| !s.legacy_override_bits);
+        let content_format = self.contents.first().map_or(0, |c| c.format_override_flags as u32);
+        let content_bits = (P::TEXT_HEIGHT | P::CONTENT_COLOR | P::TEXT_STYLE | P::ALIGNMENT).bits();
+        if !modern_style && !(self.style.is_none() && content_format & content_bits != 0) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut cell = self.clone();
+        let mut style = self.style.clone().unwrap_or_else(CellStyle::new);
+        let own = if modern_style { style.overridden() } else { P::NONE };
+        let set = P::from_bits_truncate(content_format) | own;
+        let content = self.contents.first();
+        let mut flags = 0;
+        if set.contains(P::ALIGNMENT) {
+            flags |= 0x01;
+            if !own.contains(P::ALIGNMENT) {
+                style.alignment = content.map_or(style.alignment, |c| c.alignment);
+            }
+        }
+        if own.contains(P::BACKGROUND_COLOR) {
+            flags |= 0x04;
+        }
+        if let Some(content) = content {
+            if set.contains(P::CONTENT_COLOR) {
+                flags |= 0x08;
+                style.content_color = content.color;
+            }
+            if set.contains(P::TEXT_STYLE) {
+                flags |= 0x10;
+                style.text_style_handle = content.text_style_handle;
+                style.text_style_name = content.text_style_name.clone();
+            }
+            if set.contains(P::TEXT_HEIGHT) {
+                flags |= 0x20;
+                style.text_height = content.text_height;
+            }
+        }
+        // A value type or format the content overrides sets the one bit above the borders' (AutoCAD's flag word 0x40000).
+        if content_format & (P::DATA_TYPE | P::DATA_FORMAT).bits() != 0 {
+            flags |= 0x40000;
+        }
+        let mut edges = 0u8;
+        for (color_bit, weight_bit, edge, edge_bit, border) in [
+            (0x40, 0x400, CellEdgeFlags::TOP, 1u8, &style.top_border),
+            (0x80, 0x800, CellEdgeFlags::RIGHT, 2, &style.right_border),
+            (0x100, 0x1000, CellEdgeFlags::BOTTOM, 4, &style.bottom_border),
+            (0x200, 0x2000, CellEdgeFlags::LEFT, 8, &style.left_border),
+        ] {
+            if !style.applied_border_edges.contains(edge) {
+                continue;
+            }
+            let mut explicit = false;
+            if border.override_flags.contains(BorderPropertyFlags::COLOR) {
+                flags |= color_bit;
+                explicit = true;
+            }
+            if border.override_flags.intersects(BorderPropertyFlags::LINE_WEIGHT | BorderPropertyFlags::INVISIBILITY) {
+                flags |= weight_bit;
+                explicit = true;
+            }
+            if explicit {
+                edges |= edge_bit;
+            }
+        }
+        if cell.edge_flags == 0 {
+            cell.edge_flags = edges;
+        }
+        if flags == 0 {
+            cell.style = None;
+        } else {
+            style.override_flags = flags;
+            style.property_flags = P::NONE;
+            style.legacy_override_bits = true;
+            cell.style = Some(style);
         }
         std::borrow::Cow::Owned(cell)
     }

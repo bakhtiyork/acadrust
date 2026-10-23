@@ -1572,7 +1572,16 @@ impl<'a> DwgObjectWriter<'a> {
             }
             self.writer.write_bit_long(scenario);
             self.writer.write_bit_long(flags1);
-            self.writer.write_bit_long(e.knot_parameterization); // knot parametrization
+            // A spline without fit points has no parameterization of its fit: AutoCAD's own R2013 file states "custom" (15)
+            // for the control-point splines of a drawing it converts from R2010 or earlier (sample_AC1024.dwg to
+            // sample_AC1027.dwg: both splines 15), and the pre-R2013 records the fork reads leave it 0.
+            let from_older_dwg = self.document.dwg_source_version.is_some_and(|source| source < crate::types::DxfVersion::AC1027);
+            let knot_parameterization = if from_older_dwg && scenario == 1 && e.knot_parameterization == 0 {
+                15
+            } else {
+                e.knot_parameterization
+            };
+            self.writer.write_bit_long(knot_parameterization); // knot parametrization
         } else {
             // Scenario BL
             self.writer.write_bit_long(scenario);
@@ -2235,8 +2244,10 @@ impl<'a> DwgObjectWriter<'a> {
         // Frozen layer count BL
         self.writer.write_bit_long(e.frozen_layers.len() as i32);
         // Status flags BL 90
-        // The grid behaviour bits (18..21) belong to R2007+; a file of an older version that states them keeps them.
-        let grid_bits = if self.version.r2007_plus() || self.document.is_source_version(self.dxf_version) {
+        // The grid behaviour bits (18..21) are part of the status word of every viewport from R2000 on: AutoCAD's own
+        // R2000 and R2004 files state them as its R2007 and later ones do (sample_AC1015.dwg, sample_AC1018.dwg: status
+        // 0xC8020 where sample_AC1032.dwg has 0xC8020). R14 has no such word; a file of R14 that states them keeps them.
+        let grid_bits = if self.version.r2000_plus() || self.document.is_source_version(self.dxf_version) {
             i32::from(e.grid_flags.to_bits()) << 18
         } else {
             0
@@ -3410,8 +3421,8 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     /// R2010+ inline cell.
-    fn write_table_cell_r2010(&mut self, cell: &TableCell) {
-        let cell = cell.binary_layout();
+    fn write_table_cell_r2010(&mut self, cell: &TableCell, row_heights: &[f64]) {
+        let cell = cell.binary_layout_with(row_heights);
         let cell: &TableCell = &cell;
         self.writer.write_bit_long(cell.state.bits() as i32);
         self.writer.write_variable_text(&cell.tooltip);
@@ -3496,6 +3507,7 @@ impl<'a> DwgObjectWriter<'a> {
         // title, header and data rows (1, 2, 3).
         let unnamed = e.rows.iter().all(|row| row.style_id == 0);
         let legacy = e.legacy_style_override.clone().unwrap_or_default();
+        let row_heights = legacy.row_heights.clone();
         let title = !legacy.title_suppressed.unwrap_or(false);
         let header = !legacy.header_suppressed.unwrap_or(false);
         for (r, row) in e.rows.iter().enumerate() {
@@ -3514,14 +3526,14 @@ impl<'a> DwgObjectWriter<'a> {
                 // states none for the cells a merge of one row covers (the title row; the cells a merge of several
                 // rows covers keep theirs).
                 if !cell.contents.is_empty()
-                    && cell.contents.iter().all(CellContent::is_empty_item)
+                    && cell.contents.iter().all(|content| content.is_empty_item() || content.is_empty_text())
                     && e.is_merged_away(r, c)
                 {
                     let mut covered = cell.clone();
                     covered.contents.clear();
-                    self.write_table_cell_r2010(&covered);
+                    self.write_table_cell_r2010(&covered, &row_heights);
                 } else {
-                    self.write_table_cell_r2010(cell);
+                    self.write_table_cell_r2010(cell, &row_heights);
                 }
             }
             self.writer.write_bit_long(row.custom_data);
@@ -3555,6 +3567,8 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// Pre-R2010 flat-format cell.
     fn write_table_cell_data(&mut self, cell: &TableCell) {
+        let cell = cell.legacy_layout();
+        let cell: &TableCell = &cell;
         let cell_type = match cell.cell_type {
             CellType::Block => 2,
             CellType::Text if cell.contents.is_empty() && cell.value_handle.is_none() => 0,

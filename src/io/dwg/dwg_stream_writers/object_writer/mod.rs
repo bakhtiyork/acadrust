@@ -1464,7 +1464,11 @@ impl<'a> DwgObjectWriter<'a> {
         // R2007+
         if self.version.r2007_plus() {
             // Grid flags BS 60 — adaptive grid enabled
-            self.writer.write_bit_short(vport.grid_flags.to_bits());
+            // A record read from an older DWG states none (the reader leaves 2); AutoCAD's own R2010 file of a drawing it
+            // converts from R2004 states 3 (adaptive grid and subdivision: sample_AC1018.dwg to sample_AC1024.dwg).
+            let unstated = self.document.dwg_source_version.is_some_and(|source| source < DxfVersion::AC1021)
+                && vport.grid_flags.to_bits() == 2;
+            self.writer.write_bit_short(if unstated { 3 } else { vport.grid_flags.to_bits() });
             // Grid major BS 61
             self.writer.write_bit_short(vport.grid_major);
         }
@@ -1635,8 +1639,15 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_byte(ds.dimtolj as u8);
             // DIMJUST RC 280
             self.writer.write_byte(ds.dimjust as u8);
-            // DIMFIT RC 287
-            self.writer.write_byte(ds.dimfit as u8);
+            // DIMFIT RC 287. A style read from an R2000 or later DWG has none (those records state DIMATFIT instead: ACadSharp's
+            // DimensionFit of such a file is the DIMATFIT); AutoCAD's own R14 file of such a drawing states the value of
+            // DIMATFIT (3 in sample_AC1014.dwg from sample_AC1032.dwg).
+            let dimfit = if self.document.dwg_source_version.is_some_and(|source| source >= DxfVersion::AC1015) {
+                ds.dimatfit
+            } else {
+                ds.dimfit
+            };
+            self.writer.write_byte(dimfit as u8);
             // DIMUPT B 288
             self.writer.write_bit(ds.dimupt);
             // DIMTZIN RC 284

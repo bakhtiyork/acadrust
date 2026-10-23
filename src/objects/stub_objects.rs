@@ -433,7 +433,10 @@ impl VisualStyle {
 pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDocument) {
     use crate::objects::{ObjectType, XRecordEntry, XRecordValue};
     use crate::types::DxfVersion;
-    if !(DxfVersion::AC1018..DxfVersion::AC1024).contains(&document.version) {
+    // Every layout before R2010 keeps the properties after the 24th in the record, as AutoCAD's own R14, R2000 and R2004
+    // files do (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg: 252 entries in each style's record). (An R2010
+    // record could carry the properties after the 28th too, but a re-read R2010 style then stays at 28 properties: open, R5b-4.)
+    if document.version >= DxfVersion::AC1024 {
         return;
     }
     let mut styles: Vec<_> = document
@@ -824,6 +827,20 @@ impl Material {
             color_bleed_scale: 1.0,
             advanced_data_present: false,
         }
+    }
+
+    /// The channel flags of the maps the material uses: one bit per channel whose map is the image file (diffuse 1,
+    /// specular 2, reflection 4, opacity 8, bump 16), and every channel (63) when all five are. These are the values of
+    /// the eleven materials of AutoCAD's own sample_AC1024.dwg and sample_AC1032.dwg (63 for the three built-in
+    /// materials, 17 for a diffuse and a bump map, 1 for a diffuse map, 0 for none), whose pre-R2007 versions state none.
+    pub(crate) fn derived_channel_flags(&self) -> i32 {
+        let used = [&self.diffuse_map, &self.specular_map, &self.reflection_map, &self.opacity_map, &self.bump_map];
+        let flags = used
+            .iter()
+            .enumerate()
+            .filter(|(_, map)| map.source == 1)
+            .fold(0, |bits, (index, _)| bits | 1 << index);
+        if flags == 31 { 63 } else { flags }
     }
 
     pub(crate) fn has_advanced_data(&self) -> bool {
