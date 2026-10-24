@@ -6,11 +6,12 @@ use crate::tables::BlockRecord;
 
 fn specific(doc: &CadDocument, b: &BlockRecord) -> Vec<(&'static str, Value)> {
     let dwg = doc.dwg_source_version.is_some();
-    // A DWG before R2000 keeps the description in the CONTENTBLOCKDESCRIPTION record (`autocad_conversions`), which ACadSharp
+    // A drawing before R2000 keeps the description in the CONTENTBLOCKDESCRIPTION record (`autocad_conversions`), which ACadSharp
     // reads as extended data.
-    let comments = if (b.description.is_empty() || (dwg && b.dxf_present.is_none() && doc.version < DxfVersion::AC1015))
-        && (b.dxf_present.is_some_and(|p| p & 8 == 0)
-            || (b.dxf_present.is_none() && (!dwg || doc.version < DxfVersion::AC1015)))
+    let comments = if super::super::tables::block_value_from_record(doc, b, "CONTENTBLOCKDESCRIPTION")
+        || (b.description.is_empty()
+            && (b.dxf_present.is_some_and(|p| p & 8 == 0)
+                || (b.dxf_present.is_none() && (!dwg || doc.version < DxfVersion::AC1015))))
     {
         Value::Null
     } else {

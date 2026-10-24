@@ -706,10 +706,17 @@ fn block_explodable(doc: &CadDocument, b: &crate::tables::BlockRecord) -> bool {
     }
 }
 
+/// Whether the reader took the value of a block record from the record `application` of its extended data (a DWG or DXF
+/// before R2000 keeps the description and the preview in `CONTENTBLOCKDESCRIPTION` / `CONTENTBLOCKICON`, `autocad_conversions`),
+/// which ACadSharp reads as extended data and not as the value.
+pub(crate) fn block_value_from_record(doc: &CadDocument, b: &crate::tables::BlockRecord, application: &str) -> bool {
+    doc.consumed_xdata
+        .get(&b.handle)
+        .is_some_and(|records| records.iter().any(|(_, record)| record.application_name.eq_ignore_ascii_case(application)))
+}
+
 fn block_preview(doc: &CadDocument, b: &crate::tables::BlockRecord) -> Value {
-    // A DWG before R2000 keeps the preview in the CONTENTBLOCKICON record, which ACadSharp reads as extended data
-    // (`autocad_conversions`: the model holds the image itself).
-    if b.dxf_present.is_none() && source_dwg(doc) && doc.version < crate::types::DxfVersion::AC1015 {
+    if block_value_from_record(doc, b, "CONTENTBLOCKICON") {
         return Value::Null;
     }
     if let Some(present) = b.dxf_present {

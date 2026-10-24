@@ -194,6 +194,22 @@ fn a_block_record_keeps_the_order_of_its_xdata_applications_in_r14() {
             for (name, read) in [("written once", &first), ("written again", &second)] {
                 assert_eq!(order(read), ["ACAD"], "{name}");
                 assert_eq!(preview(read), [1, 2, 3, 4], "{name}");
+                // the file holds the records in their order: the ACadSharp view shows the extended data of the file
+                #[cfg(feature = "acadsharp-compat")]
+                {
+                    let dump = acadrust::compat::acadsharp::dump_reader_document(read, "door.dwg", "dwg");
+                    let objects = dump["objects"].as_array().unwrap();
+                    let handle = acadrust::compat::acadsharp::handle(read.block_records.get("door").unwrap().handle);
+                    let record = objects.iter().find(|object| object["handle"] == handle).expect("block record");
+                    let names: Vec<&str> = record["props"]["ExtendedData"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|entry| objects.iter().find(|object| object["handle"] == entry[0]))
+                        .map(|app| app["props"]["Name"].as_str().unwrap())
+                        .collect();
+                    assert_eq!(names, ["ACAD", "CONTENTBLOCKICON"], "{name}");
+                }
             }
         } else {
             assert_eq!(order(&first), ["ACAD", "CONTENTBLOCKICON"], "written once");

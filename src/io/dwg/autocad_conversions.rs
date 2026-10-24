@@ -222,10 +222,11 @@ fn ensure_application(document: &mut CadDocument, application: &str) {
 
 // ── block description and preview ───────────────────────────────────────────────────────────────────────────────
 
-/// The description of a block: `CONTENTBLOCKDESCRIPTION 1071 0 1000 <text>` (sample_AC1014.dwg, the block #A7E).
+/// The description of a block: `CONTENTBLOCKDESCRIPTION 1071 0 1000 <text>` (sample_AC1014.dwg, the block #A7E). An empty text
+/// is no description (the writer states no record for it), so such a record stays data of the file.
 fn block_description(data: &ExtendedData) -> Option<String> {
     match values(data, BLOCK_DESCRIPTION)? {
-        [X::Integer32(0), X::String(text)] => Some(text.clone()),
+        [X::Integer32(0), X::String(text)] if !text.is_empty() => Some(text.clone()),
         _ => None,
     }
 }
@@ -235,11 +236,13 @@ fn description_record(text: &str) -> Vec<X> {
 }
 
 /// The preview image of a block: `CONTENTBLOCKICON 1071 0` and its bytes in chunks of 127 as `1004` (sample_AC1014.dwg: the
-/// 4,136 bytes of the preview of sample_AC1015.dwg in 32 chunks of 127 and one of 72).
+/// 4,136 bytes of the preview of sample_AC1015.dwg in 32 chunks of 127 and one of 72). Only a record in exactly that form (the one
+/// `icon_record` states again) is taken: bytes in chunks of another size stay data of the file, byte for byte.
 fn block_icon(data: &ExtendedData) -> Option<Vec<u8>> {
     match values(data, BLOCK_ICON)? {
-        [X::Integer32(0), chunks @ ..] if !chunks.is_empty() && chunks.iter().all(|chunk| matches!(chunk, X::BinaryData(bytes) if !bytes.is_empty())) => {
-            Some(chunks.iter().flat_map(|chunk| if let X::BinaryData(bytes) = chunk { bytes.as_slice() } else { &[] }).copied().collect())
+        record @ [X::Integer32(0), chunks @ ..] if !chunks.is_empty() && chunks.iter().all(|chunk| matches!(chunk, X::BinaryData(bytes) if !bytes.is_empty())) => {
+            let bytes: Vec<u8> = chunks.iter().flat_map(|chunk| if let X::BinaryData(bytes) = chunk { bytes.as_slice() } else { &[] }).copied().collect();
+            (icon_record(&bytes) == record).then_some(bytes)
         }
         _ => None,
     }
@@ -600,7 +603,8 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
             }
         }
     }
-    // The description and the preview image of a block record (before R2000: records of its extended data).
+    // The description and the preview image of a block record (before R2000: records of its extended data). A value the file
+    // also states in the group of R2000 (a DXF of another producer) stays that value, and the record stays data of the file.
     if !holds_block_content(version) && (app_handle(document, BLOCK_DESCRIPTION).is_some() || app_handle(document, BLOCK_ICON).is_some()) {
         let apps = [app_handle(document, BLOCK_DESCRIPTION), app_handle(document, BLOCK_ICON)];
         let restored: Vec<(Handle, Option<String>, Option<Vec<u8>>)> = document
@@ -608,7 +612,8 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
             .iter()
             .filter_map(|record| {
                 let data = document.object_xdata.get(&record.handle)?;
-                let (text, icon) = (block_description(data), block_icon(data));
+                let text = block_description(data).filter(|_| record.description.is_empty());
+                let icon = block_icon(data).filter(|_| record.preview_data.is_empty());
                 (text.is_some() || icon.is_some()).then_some((record.handle, text, icon))
             })
             .collect();
@@ -1591,6 +1596,38 @@ mod tests {
         restore_document(&mut foreign);
         assert_eq!(foreign.object_xdata.get(&foreign_handle), Some(&data));
         assert!(foreign.block_records.iter().find(|record| record.handle == foreign_handle).unwrap().preview_data.is_empty());
+
+        // nor are an empty description (no value the writer would state again), image bytes in chunks of another size than
+        // AutoCAD's 127 (the record would not be written back byte for byte), or a record of a block that already has the value
+        // (a DXF of another producer that also states group 4 or 310): each stays data of the file
+        let mut app = AppId::new(BLOCK_DESCRIPTION);
+        app.handle = foreign.allocate_handle();
+        foreign.app_ids.add(app).ok();
+        let cases: [(Vec<(&str, Vec<X>)>, &str, &[u8]); 4] = [
+            (vec![(BLOCK_DESCRIPTION, description_record(""))], "", &[]),
+            (vec![(BLOCK_ICON, std::iter::once(X::Integer32(0)).chain(image[..300].chunks(100).map(|chunk| X::BinaryData(chunk.to_vec()))).collect())], "", &[]),
+            (vec![(BLOCK_DESCRIPTION, description_record("from the record"))], "from group 4", &[]),
+            (vec![(BLOCK_ICON, icon_record(&image[..300]))], "", &[7, 7, 7]),
+        ];
+        for (index, (records, description, preview)) in cases.into_iter().enumerate() {
+            let mut block = BlockRecord::new(&format!("kept{index}"));
+            block.handle = foreign.allocate_handle();
+            block.description = description.into();
+            block.preview_data = preview.to_vec();
+            let kept_handle = block.handle;
+            foreign.block_records.add(block).ok();
+            let mut data = ExtendedData::new();
+            for (name, values) in records {
+                data.add_record(record(name, values));
+            }
+            foreign.object_xdata.insert(kept_handle, data.clone());
+            restore_document(&mut foreign);
+            assert_eq!(foreign.object_xdata.get(&kept_handle), Some(&data), "case {index}");
+            assert!(foreign.consumed_xdata.get(&kept_handle).is_none(), "case {index}");
+            let block = foreign.block_records.iter().find(|record| record.handle == kept_handle).unwrap();
+            assert_eq!((block.description.as_str(), block.preview_data.as_slice()), (description, preview), "case {index}");
+            assert_eq!(written(&foreign, DxfVersion::AC1014).object_xdata.get(&kept_handle), Some(&data), "case {index}");
+        }
     }
 
     /// A version that holds a value natively has no record for it, so a record the model holds there was not taken in by the

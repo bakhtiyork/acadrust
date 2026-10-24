@@ -411,10 +411,12 @@ pub(crate) fn states_mtext_columns(version: DxfVersion) -> bool {
 /// auto height, `76` the number of columns, `78` flow reversed, `48` column width, `49` gutter, `50` the number of heights and
 /// the heights. A height AutoCAD's R2018 record states as a negative number (-2.94, -23.73, -3, -204.35 for the four MTEXT: the
 /// height of the text it laid out) is 0 in all of the older files; the corpus files that state a height of their own state it
-/// positive (ezdxf columns_R2007.dxf: 23.85, and 11.07 with 0 for two columns). Static columns and automatic heights are not
-/// stated: no AutoCAD file shows their record.
+/// positive (ezdxf columns_R2007.dxf: 23.85, 52.56). One column only: in that file every record of two or more columns, of
+/// static columns or of automatic heights (11 of 24) is followed by `ACAD_MTEXT_COLUMNS_BEGIN 47 <n> <handles>
+/// ACAD_MTEXT_COLUMNS_END`, the MTEXT entities that hold the text of the other columns, which a drawing of R2018 does not have
+/// and the writer does not make: such columns are not stated.
 fn column_block(columns: &crate::entities::MTextColumnData) -> Vec<X> {
-    if columns.column_type != 2 || columns.auto_height || columns.heights.is_empty() {
+    if columns.column_type != 2 || columns.auto_height || columns.heights.len() != 1 {
         return Vec::new();
     }
     let mut values = vec![
@@ -835,14 +837,19 @@ mod tests {
         assert_eq!(r2000[..expected.len()], expected[..]);
         assert_eq!(r2000[expected.len()], X::String("MTEXTBEGIN".into()));
         assert!(mtext_blocks(&text, DxfVersion::AC1032).is_empty());
-        // a height of its own is kept; two columns state two heights; the flow direction is the record's 78
-        text.column_data.heights = vec![11.069645635849, 0.0];
+        // a height of its own is kept; the flow direction is the record's 78
+        text.column_data.heights = vec![52.563114843856];
         text.column_data.flow_reversed = true;
-        let two = mtext_blocks(&text, DxfVersion::AC1027);
-        assert_eq!(&two[5..7], &[X::Integer16(76), X::Integer16(2)]);
-        assert_eq!(&two[7..9], &[X::Integer16(78), X::Integer16(1)]);
-        assert_eq!(&two[13..17], &[X::Integer16(50), X::Integer16(2), X::Real(11.069645635849), X::Real(0.0)]);
-        // static columns, automatic heights and an MTEXT without columns state no record: no AutoCAD file shows one
+        let own = mtext_blocks(&text, DxfVersion::AC1027);
+        assert_eq!(&own[5..9], &[X::Integer16(76), X::Integer16(1), X::Integer16(78), X::Integer16(1)]);
+        assert_eq!(&own[13..16], &[X::Integer16(50), X::Integer16(1), X::Real(52.563114843856)]);
+        // two columns need the MTEXT of the second column (`ACAD_MTEXT_COLUMNS`, columns_R2007.dxf), which the drawing does not
+        // have: no record
+        text.column_data.heights = vec![11.069645635849, 0.0];
+        assert!(mtext_blocks(&text, DxfVersion::AC1027).is_empty());
+        assert_eq!(mtext_blocks(&text, DxfVersion::AC1015)[0], X::String("MTEXTBEGIN".into()));
+        text.column_data.heights = vec![0.0];
+        // static columns, automatic heights and an MTEXT without columns state no record either
         text.column_data.column_type = 1;
         assert!(mtext_blocks(&text, DxfVersion::AC1027).is_empty());
         text.column_data.column_type = 2;

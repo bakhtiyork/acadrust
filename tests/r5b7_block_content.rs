@@ -94,3 +94,31 @@ fn the_records_of_r14_are_in_the_dxf_of_r14_and_not_in_the_dxf_of_r2000() {
         assert_eq!(values_of(&again).1, image(), "{version:?}");
     }
 }
+
+/// ACadSharp reads the records of a drawing of R14 as extended data, not as the description and the preview: the ACadSharp view
+/// shows them so whether the drawing is a DWG or a DXF of R14 (whose BLOCK and BLOCK_RECORD then have no group 4 or 310).
+#[test]
+fn the_acadsharp_view_of_a_drawing_of_r14_shows_the_records_and_not_the_values() {
+    use acadrust::compat::acadsharp::{dump_reader_document, handle};
+    let dwg = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&drawing_of_r14()).unwrap())).read().unwrap();
+    let dxf = DxfReader::from_reader(Cursor::new(DxfWriter::new(&dwg).write_to_vec().unwrap())).unwrap().read().unwrap();
+    for (doc, file, reader) in [(&dwg, "r14.dwg", "dwg"), (&dxf, "r14.dxf", "dxf")] {
+        assert_eq!(values_of(doc), ("My dynamic block description.".to_string(), image()), "{reader}");
+        let dump = dump_reader_document(doc, file, reader);
+        let objects = dump["objects"].as_array().unwrap();
+        let props = |h| objects.iter().find(|object| object["handle"] == handle(h)).map(|object| object["props"].clone());
+        let record = doc.block_records.get(NAME).unwrap();
+        let view = props(record.handle).expect("block record");
+        assert!(view["Preview"].is_null(), "{reader}: {}", view["Preview"]);
+        let names: Vec<String> = view["ExtendedData"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| objects.iter().find(|object| object["handle"] == entry[0]))
+            .map(|app| app["props"]["Name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["CONTENTBLOCKDESCRIPTION", "CONTENTBLOCKICON"], "{reader}");
+        let block = props(record.block_entity_handle).expect("block");
+        assert!(block["Comments"].is_null(), "{reader}: {}", block["Comments"]);
+    }
+}
