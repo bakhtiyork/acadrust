@@ -674,6 +674,7 @@ impl DxfReader {
             // rather than the native codes; rebuild it (dimension text fills).
             crate::io::dwg::dwg_reader::recover_mtext_bg_roundtrip(&mut document, true);
         }
+        crate::io::dwg::dwg_reader::recover_mtext_columns(&mut document);
         // The values AutoCAD's own down-save keeps in round-trip extended data (true colour, line weight, material).
         crate::io::dwg::autocad_roundtrip::restore_document(&mut document);
         // The native values of the version-gated records of AutoCAD's other conversions (attribute lock, dimension text fill,
@@ -704,6 +705,7 @@ impl DxfReader {
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
         crate::entities::table::restore_table_roundtrip(&mut document);
+        crate::entities::table::restore_dwg_table_roundtrip(&mut document);
         Ok(crate::io::read::ReadOutcome::new(document, stats))
     }
 

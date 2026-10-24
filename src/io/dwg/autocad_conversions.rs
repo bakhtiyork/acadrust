@@ -839,17 +839,18 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     }
     // The description and the preview image of a block are native from R2000; R13 and R14 state them in records of the block
     // record's extended data (sample_AC1014.dwg), after the records it had. They go back where the reader of such a file took them
-    // from; a block of a newer drawing gets none (AutoCAD's R14 file states them after `DesignCenter Data`, which the writer adds
-    // last, and under application handles of its own numbering: the conversion is open). A record the model still holds stays.
+    // from; a block of a newer drawing gets them after its other records (AutoCAD's R14 file states them after `DesignCenter Data`,
+    // which the writer adds last, under application handles of its own numbering: UNVERIFIED in AutoCAD, the records are the
+    // same). A record the model still holds stays.
     let mut block_contents: Vec<(Handle, [Option<Vec<X>>; 2], [Option<usize>; 2])> = Vec::new();
     if !holds_block_content(version) && version >= DxfVersion::AC1012 {
         for record in document.block_records.iter() {
             let data = document.object_xdata.get(&record.handle);
             let at = [BLOCK_DESCRIPTION, BLOCK_ICON].map(|name| taken_position(document, record.handle, name));
             let wanted = [
-                (at[0].is_some() && !record.description.is_empty() && data.and_then(|data| values(data, BLOCK_DESCRIPTION)).is_none())
+                (!record.description.is_empty() && data.and_then(|data| values(data, BLOCK_DESCRIPTION)).is_none())
                     .then(|| description_record(&record.description)),
-                (at[1].is_some() && !record.preview_data.is_empty() && data.and_then(|data| values(data, BLOCK_ICON)).is_none())
+                (!record.preview_data.is_empty() && data.and_then(|data| values(data, BLOCK_ICON)).is_none())
                     .then(|| icon_record(&record.preview_data)),
             ];
             if wanted.iter().any(Option::is_some) {
@@ -1564,8 +1565,9 @@ mod tests {
         edited.block_records.iter_mut().for_each(|record| record.description = "edited".into());
         let again = written(&edited, DxfVersion::AC1014);
         assert_eq!(block_description(again.object_xdata.get(&handle).unwrap()).as_deref(), Some("edited"));
-        // a block of a newer drawing gets no record at R14 (open: AutoCAD states them after DesignCenter Data, under application
-        // handles of its own numbering), and R2000 states the values in the record
+        // a block of a newer drawing gets the records at R14 (R5b-8: they were left out, and an R14 file read back lost the description and
+        // the preview; AutoCAD states them after DesignCenter Data under application handles of its own numbering: UNVERIFIED), and R2000
+        // states the values in the block record itself
         let mut modern = document(DxfVersion::AC1015);
         let mut block = BlockRecord::new("b");
         block.handle = modern.allocate_handle();
@@ -1576,11 +1578,15 @@ mod tests {
         let mut other = ExtendedData::new();
         other.add_record(record("OTHER", vec![X::Integer16(1)]));
         modern.object_xdata.insert(handle, other);
-        for version in [DxfVersion::AC1014, DxfVersion::AC1015] {
-            let down = written(&modern, version);
-            assert_eq!(down.object_xdata.get(&handle).unwrap().records().len(), 1, "{version:?}");
-            assert!(down.app_ids.get(BLOCK_ICON).is_none(), "{version:?}");
-        }
+        let down = written(&modern, DxfVersion::AC1014);
+        let data = down.object_xdata.get(&handle).unwrap();
+        assert_eq!(block_description(data).as_deref(), Some("d"));
+        assert_eq!(block_icon(data).as_deref(), Some(&image[..300]));
+        assert!(down.app_ids.get(BLOCK_DESCRIPTION).is_some() && down.app_ids.get(BLOCK_ICON).is_some());
+        assert_eq!(data.records().len(), 3, "the record it had and the two new ones");
+        let same = written(&modern, DxfVersion::AC1015);
+        assert_eq!(same.object_xdata.get(&handle).unwrap().records().len(), 1);
+        assert!(same.app_ids.get(BLOCK_ICON).is_none());
         // records of another shape are another producer's data: not taken in
         let mut foreign = document(DxfVersion::AC1014);
         let mut app = AppId::new(BLOCK_ICON);

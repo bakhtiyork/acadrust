@@ -1652,6 +1652,7 @@ impl<R: Read + Seek> DwgReader<R> {
         crate::io::dwg::autocad_conversions::restore_document(&mut document);
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
+        crate::entities::table::restore_dwg_table_roundtrip(&mut document);
         resolve_header_names(&mut document);
         resolve_table_block_names(&mut document);
 
@@ -1694,6 +1695,7 @@ impl<R: Read + Seek> DwgReader<R> {
             // instead of the native codes (dimension text fills, etc.).
             recover_mtext_bg_roundtrip(&mut document, true);
         }
+        recover_mtext_columns(&mut document);
 
         // 7. Preview / thumbnail image. Stored uncompressed at the raw file
         //    offset in the header's preview seeker (all versions), wrapped in a
@@ -1729,6 +1731,7 @@ impl<R: Read + Seek> DwgReader<R> {
         crate::io::dwg::autocad_conversions::restore_document(&mut document);
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
+        crate::entities::table::restore_dwg_table_roundtrip(&mut document);
         resolve_header_names(&mut document);
         resolve_table_block_names(&mut document);
 
@@ -3794,6 +3797,48 @@ pub(crate) fn recover_mtext_bg_roundtrip(document: &mut crate::document::CadDocu
                     m.line_spacing_style = style.into();
                     m.line_spacing_factor = factor;
                 }
+
+            }
+        }
+    }
+}
+
+/// The columns of an MTEXT of a drawing before R2018 are a block (`ACAD_MTEXT_COLUMN_INFO`) of the `ACAD` data of the entity;
+/// the native model holds the columns themselves (R2018 states them in the MTEXT record), and the writers and the ACadSharp view
+/// state the block again for the versions before R2018 (`autocad_roundtrip::mtext_blocks`). Only the form the writers make is
+/// taken in; the entity must hold no columns yet.
+pub(crate) fn recover_mtext_columns(document: &mut crate::document::CadDocument) {
+    use crate::entities::{EntityType, MTextColumnData};
+    if !crate::io::dwg::autocad_roundtrip::states_mtext_columns(document.version) {
+        return;
+    }
+    // Look first and touch only the MTEXT that has the block (an entity that is not changed keeps its verbatim record). An entity
+    // that holds columns already (a DXF the fork wrote states them in its own group codes and in the block) keeps them and loses
+    // the block that restates them.
+    let blocked: Vec<_> = document
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::MText(m)
+                if crate::io::dwg::autocad_roundtrip::has_column_block(&m.common)
+                    && (m.column_data == MTextColumnData::new() || crate::io::dwg::autocad_roundtrip::column_block_states_columns(m)) =>
+            {
+                Some(m.common.handle)
+            }
+            _ => None,
+        })
+        .collect();
+    if blocked.is_empty() {
+        return;
+    }
+    let application = document.app_ids.get("ACAD").map(|app| app.handle.value());
+    for handle in blocked {
+        if let Some(EntityType::MText(m)) = document.get_entity_mut(handle) {
+            if m.column_data == MTextColumnData::new() {
+                if let Some(columns) = crate::io::dwg::autocad_roundtrip::take_column_block(&mut m.common, application) {
+                    m.column_data = columns;
+                }
+            } else {
+                crate::io::dwg::autocad_roundtrip::drop_stated_column_block(m, application);
             }
         }
     }

@@ -151,8 +151,20 @@ fn spline_knot_tolerance(value: &Spline) -> f64 {
 /// The common data of an MTEXT as ACadSharp reads it from a DWG of a version before R2004: the line spacing and the background
 /// fill are blocks of the `ACAD` extended data (the native model holds the values).
 fn mtext_common<'a>(doc: &CadDocument, text: &'a crate::entities::MText) -> std::borrow::Cow<'a, EntityCommon> {
-    let Some(version) = legacy_round_trip_version(doc) else {
-        return std::borrow::Cow::Borrowed(&text.common);
+    let Some(version) = legacy_round_trip_version(doc).filter(|version| crate::io::dwg::autocad_roundtrip::states_mtext_spacing(*version)) else {
+        // R2004 to R2013: the columns are the only block the entity's native fields stand for.
+        if column_block_version(doc).is_none() {
+            return std::borrow::Cow::Borrowed(&text.common);
+        }
+        let application = doc.app_ids.get("ACAD").map(|app| app.handle.value());
+        return match crate::io::dwg::autocad_roundtrip::with_column_block(&text.common.extended_data, text, application) {
+            Some(xdata) => {
+                let mut common = text.common.clone();
+                common.extended_data = xdata;
+                std::borrow::Cow::Owned(common)
+            }
+            None => std::borrow::Cow::Borrowed(&text.common),
+        };
     };
     let blocks = crate::io::dwg::autocad_roundtrip::mtext_blocks(text, version);
     if blocks.is_empty() {
@@ -167,6 +179,14 @@ fn mtext_common<'a>(doc: &CadDocument, text: &'a crate::entities::MText) -> std:
         }
         None => std::borrow::Cow::Borrowed(&text.common),
     }
+}
+
+/// The version of a source document before R2018 whose MTEXT columns the readers took out of the `ACAD_MTEXT_COLUMN_INFO` block
+/// of the entity's extended data (ACadSharp reads the block as extended data and no columns).
+fn column_block_version(doc: &CadDocument) -> Option<crate::types::DxfVersion> {
+    let version = doc.dwg_source_version.or(doc.dxf_source_version)?;
+    (super::registration::source_document(doc) && doc.version == version && crate::io::dwg::autocad_roundtrip::states_mtext_columns(version))
+        .then_some(version)
 }
 
 /// Whether the document is a source before R2007: ACadSharp does not read the lock of an attribute from the `AcDbAttr`
