@@ -14,6 +14,10 @@
 //! | `ACAD 1000 AcDbSavedByObjectVersion 1070 0` | VISUALSTYLE | before R2018 | none |
 //! | `ACAD 1000 DBColXD 1070 <index> 1071 <colour> 1000 <book>$<name>` | DBCOLOR | before R2018 | the colour of the object |
 //! | `ACAD 1000 DesignCenter Data { 1070 1 1070 <units> }` | BLOCK_RECORD | before R2007 | the insertion units (`autocad_roundtrip` of the reader) |
+//! | `CONTENTBLOCKDESCRIPTION 1071 0 1000 <text>`, `CONTENTBLOCKICON 1071 0 1004 <127 bytes> ..` | BLOCK_RECORD | before R2000 | `description`, `preview_data` |
+//!
+//! A DXF holds them where AutoCAD's own DXF does (R5b-7: the table above for R2000 and R2004; the stamp from R2000 to R2013,
+//! `DBColXD` from R2004 to R2013, the dimension style records not in R12, whose DXF has extended data on entities only).
 //!
 //! The native model holds the values themselves: the readers restore them from the records (the records stay in the
 //! extended data as the file had them, so the ACadSharp view of the file is unchanged); the writers state the record
@@ -38,6 +42,8 @@ const CHANGE_GUID: &str = "ACAD_OBJECT_CHANGE_GUID";
 const ACAD: &str = "ACAD";
 const SAVED_BY_VERSION: &str = "AcDbSavedByObjectVersion";
 const BOOK_COLOR: &str = "DBColXD";
+const BLOCK_DESCRIPTION: &str = "CONTENTBLOCKDESCRIPTION";
+const BLOCK_ICON: &str = "CONTENTBLOCKICON";
 
 /// The first version that holds each value natively.
 fn holds_mleader_version(version: DxfVersion) -> bool {
@@ -54,6 +60,9 @@ fn holds_modeler_revision(version: DxfVersion) -> bool {
 }
 fn states_saved_by_version(version: DxfVersion) -> bool {
     version < DxfVersion::AC1032
+}
+fn holds_block_content(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1015
 }
 
 /// The `DBColXD` block is in AutoCAD's DWG files from R14 to R2013 and in its DXF files from R2004 to R2013 (sample_AC1015_ascii.dxf
@@ -209,6 +218,35 @@ fn ensure_application(document: &mut CadDocument, application: &str) {
     let mut app = crate::tables::AppId::new(application);
     app.handle = document.allocate_handle();
     document.app_ids.add(app).ok();
+}
+
+// ── block description and preview ───────────────────────────────────────────────────────────────────────────────
+
+/// The description of a block: `CONTENTBLOCKDESCRIPTION 1071 0 1000 <text>` (sample_AC1014.dwg, the block #A7E).
+fn block_description(data: &ExtendedData) -> Option<String> {
+    match values(data, BLOCK_DESCRIPTION)? {
+        [X::Integer32(0), X::String(text)] => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn description_record(text: &str) -> Vec<X> {
+    vec![X::Integer32(0), X::String(text.to_string())]
+}
+
+/// The preview image of a block: `CONTENTBLOCKICON 1071 0` and its bytes in chunks of 127 as `1004` (sample_AC1014.dwg: the
+/// 4,136 bytes of the preview of sample_AC1015.dwg in 32 chunks of 127 and one of 72).
+fn block_icon(data: &ExtendedData) -> Option<Vec<u8>> {
+    match values(data, BLOCK_ICON)? {
+        [X::Integer32(0), chunks @ ..] if !chunks.is_empty() && chunks.iter().all(|chunk| matches!(chunk, X::BinaryData(bytes) if !bytes.is_empty())) => {
+            Some(chunks.iter().flat_map(|chunk| if let X::BinaryData(bytes) = chunk { bytes.as_slice() } else { &[] }).copied().collect())
+        }
+        _ => None,
+    }
+}
+
+fn icon_record(bytes: &[u8]) -> Vec<X> {
+    std::iter::once(X::Integer32(0)).chain(bytes.chunks(127).map(|chunk| X::BinaryData(chunk.to_vec()))).collect()
 }
 
 // ── colour ───────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -562,6 +600,43 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
             }
         }
     }
+    // The description and the preview image of a block record (before R2000: records of its extended data).
+    if !holds_block_content(version) && (app_handle(document, BLOCK_DESCRIPTION).is_some() || app_handle(document, BLOCK_ICON).is_some()) {
+        let apps = [app_handle(document, BLOCK_DESCRIPTION), app_handle(document, BLOCK_ICON)];
+        let restored: Vec<(Handle, Option<String>, Option<Vec<u8>>)> = document
+            .block_records
+            .iter()
+            .filter_map(|record| {
+                let data = document.object_xdata.get(&record.handle)?;
+                let (text, icon) = (block_description(data), block_icon(data));
+                (text.is_some() || icon.is_some()).then_some((record.handle, text, icon))
+            })
+            .collect();
+        for (handle, text, icon) in restored {
+            let parsed = [text.is_some(), icon.is_some()];
+            if let Some(record) = document.block_records.iter_mut().find(|record| record.handle == handle) {
+                if let Some(text) = text {
+                    record.description = text;
+                }
+                if let Some(icon) = icon {
+                    record.preview_data = icon;
+                }
+            }
+            let mut list = document.consumed_xdata.remove(&handle).unwrap_or_default();
+            with_object(document, handle, |data| {
+                for ((name, app), parsed) in [BLOCK_DESCRIPTION, BLOCK_ICON].into_iter().zip(apps).zip(parsed) {
+                    if parsed {
+                        if let Some(entry) = take_record(data, name, app, &list) {
+                            keep_taken_in(&mut list, entry);
+                        }
+                    }
+                }
+            });
+            if !list.is_empty() {
+                document.consumed_xdata.insert(handle, list);
+            }
+        }
+    }
 }
 
 /// A colour-book object read from a drawing before R2004 holds the nearest index only (its DBCOLOR record has neither the colour
@@ -698,13 +773,14 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
                     styles.push((*handle, wanted, stashed.map(|(index, _)| index)));
                 }
             }
-            // AutoCAD's DXF files hold no stamp at all: a DXF gets none for a conversion, and keeps the one its DWG source had.
+            // AutoCAD's DXF files of R2000 to R2013 hold the stamp in each of their 24 visual styles (sample_AC1015_ascii.dxf to
+            // sample_AC1027_ascii.dxf), none at R2018: a DXF gets it for a conversion as a DWG does.
             ObjectType::VisualStyle(_) => {
                 let data = document.object_xdata.get(handle);
                 let label = data.is_some_and(|d| has_label(d, SAVED_BY_VERSION));
                 let exact = data.is_some_and(|d| has_block(d, SAVED_BY_VERSION, &saved_by_version_block()));
                 let stashed = taken_values(document, *handle, ACAD).is_some();
-                let adds = states_saved_by_version(version) && !label && (stashed || (converting && !dxf));
+                let adds = states_saved_by_version(version) && !label && (stashed || converting);
                 // R2018 has no stamp: AutoCAD drops it from a drawing of an older version (an R2018 file that states one keeps
                 // it). A block of another value is another producer's data: left alone.
                 if adds || (!states_saved_by_version(version) && exact && from_older(DxfVersion::AC1032)) {
@@ -744,13 +820,35 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         }
     }
     let mut dimension_styles: Vec<(Handle, DimensionRecords)> = Vec::new();
-    if !holds_dimension_fill(version) {
+    // AutoCAD's R12 DXF holds extended data on entities only (sample_AC1009_ascii.dxf: 87 records, none on a table record), so
+    // a DXF of R12 states neither the fill nor the line types of a dimension style in a record.
+    if !holds_dimension_fill(version) && !(dxf && version < DxfVersion::AC1012) {
         for style in document.dim_styles.iter() {
             let positions = DIM_APPLICATIONS.map(|name| taken_position(document, style.handle, name));
             let data = document.object_xdata.get(&style.handle);
             let wanted = DimensionRecords::of(style, data, positions);
             if wanted.differs_from(data) {
                 dimension_styles.push((style.handle, wanted));
+            }
+        }
+    }
+    // The description and the preview image of a block are native from R2000; R13 and R14 state them in records of the block
+    // record's extended data (sample_AC1014.dwg), after the records it had. They go back where the reader of such a file took them
+    // from; a block of a newer drawing gets none (AutoCAD's R14 file states them after `DesignCenter Data`, which the writer adds
+    // last, and under application handles of its own numbering: the conversion is open). A record the model still holds stays.
+    let mut block_contents: Vec<(Handle, [Option<Vec<X>>; 2], [Option<usize>; 2])> = Vec::new();
+    if !holds_block_content(version) && version >= DxfVersion::AC1012 {
+        for record in document.block_records.iter() {
+            let data = document.object_xdata.get(&record.handle);
+            let at = [BLOCK_DESCRIPTION, BLOCK_ICON].map(|name| taken_position(document, record.handle, name));
+            let wanted = [
+                (at[0].is_some() && !record.description.is_empty() && data.and_then(|data| values(data, BLOCK_DESCRIPTION)).is_none())
+                    .then(|| description_record(&record.description)),
+                (at[1].is_some() && !record.preview_data.is_empty() && data.and_then(|data| values(data, BLOCK_ICON)).is_none())
+                    .then(|| icon_record(&record.preview_data)),
+            ];
+            if wanted.iter().any(Option::is_some) {
+                block_contents.push((record.handle, wanted, at));
             }
         }
     }
@@ -776,6 +874,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         && visual.is_empty()
         && books.is_empty()
         && dimension_styles.is_empty()
+        && block_contents.is_empty()
         && design_center.is_empty()
     {
         return;
@@ -842,6 +941,21 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             for (index, wanted) in records.wanted.into_iter().enumerate() {
                 if !records.foreign[index] {
                     set_record(data, DIM_APPLICATIONS[index], apps[index], wanted, records.at[index]);
+                }
+            }
+        });
+    }
+    for (name, index) in [(BLOCK_DESCRIPTION, 0), (BLOCK_ICON, 1)] {
+        if block_contents.iter().any(|(_, wanted, _)| wanted[index].is_some()) {
+            ensure_application(document, name);
+        }
+    }
+    for (handle, wanted, at) in block_contents {
+        let apps = [BLOCK_DESCRIPTION, BLOCK_ICON].map(|name| application(document, name));
+        with_object(document, handle, |data| {
+            for (index, name) in [BLOCK_DESCRIPTION, BLOCK_ICON].into_iter().enumerate() {
+                if let Some(record) = wanted[index].clone() {
+                    set_record(data, name, apps[index], Some(record), at[index]);
                 }
             }
         });
@@ -1190,6 +1304,11 @@ mod tests {
             values(again.object_xdata.get(&typed_handle).unwrap(), DIM_LINETYPES[1].0),
             Some(&[X::Integer16(381), X::Handle(Handle::new(0x6D9 + 381))][..])
         );
+        // AutoCAD's R12 DXF has no extended data on table records (sample_AC1009_ascii.dxf); R2000 to R2004 DXF files state them
+        let r12 = written_as_dxf(&up, DxfVersion::AC1009);
+        assert!(r12.object_xdata.get(&filled_handle).is_none() && r12.object_xdata.get(&typed_handle).is_none());
+        let r2000 = written_as_dxf(&up, DxfVersion::AC1015);
+        assert_eq!(values(r2000.object_xdata.get(&filled_handle).unwrap(), DIM_FILL), Some(fill.as_slice()));
         // A style without a text fill or line types states nothing; an unlocked fill mode (0) states no record.
         let mut plain = DimStyle::new("Plain");
         plain.handle = up.dim_styles.get("Filled").unwrap().handle;
@@ -1301,9 +1420,12 @@ mod tests {
                 ][..]
             )
         );
-        // AutoCAD's DXF files hold neither the stamp (none of R2000 to R2018) nor, at R2000, the colour block
+        // AutoCAD's DXF files hold the stamp from R2000 to R2013 (sample_AC1015_ascii.dxf to sample_AC1027_ascii.dxf: 24 of 24
+        // visual styles) and none at R2018; they hold the colour block from R2004 (not at R2000: sample_AC1015_ascii.dxf)
         let dxf = written_as_dxf(&modern, DxfVersion::AC1018);
-        assert!(dxf.object_xdata.get(&style_handle).is_none());
+        assert_eq!(dxf.object_xdata.get(&style_handle), down.object_xdata.get(&style_handle));
+        assert!(written_as_dxf(&modern, DxfVersion::AC1015).object_xdata.get(&style_handle).is_some());
+        assert!(written_as_dxf(&modern, DxfVersion::AC1032).object_xdata.get(&style_handle).is_none());
         assert!(written_as_dxf(&down, DxfVersion::AC1027).object_xdata.get(&style_handle).is_some(), "a DXF keeps the stamp its DWG source had");
         // A drawing read from an R2004 file holds neither (they are what the format needs) and states them again where they were.
         let mut read = down.clone();
@@ -1389,6 +1511,86 @@ mod tests {
             values(written(&document, DxfVersion::AC1024).object_xdata.get(&handle).unwrap(), ACAD),
             Some(&[X::String("Other".into())][..])
         );
+    }
+
+    /// sample_AC1014.dwg: the blocks #A7E and #77F state the preview image of sample_AC1015.dwg (4,136 bytes: 32 `1004` chunks of
+    /// 127 and one of 72) in `CONTENTBLOCKICON 1071 0 ...` and #A7E its description in `CONTENTBLOCKDESCRIPTION 1071 0 1000
+    /// <text>`, after the records it had; R2000 states them in the block record (`description`, `preview_data`).
+    #[test]
+    fn the_description_and_preview_of_a_block_are_records_before_r2000() {
+        use crate::tables::BlockRecord;
+        let image: Vec<u8> = (0..4136u32).map(|i| (i % 251) as u8).collect();
+        let mut old = document(DxfVersion::AC1014);
+        old.dwg_source_version = Some(DxfVersion::AC1014);
+        for name in [BLOCK_DESCRIPTION, BLOCK_ICON, "OTHER"] {
+            let mut app = AppId::new(name);
+            app.handle = old.allocate_handle();
+            old.app_ids.add(app).ok();
+        }
+        let mut block = BlockRecord::new("my-dynamic-block");
+        block.handle = old.allocate_handle();
+        let handle = block.handle;
+        old.block_records.add(block).ok();
+        let mut data = ExtendedData::new();
+        data.add_record(record("OTHER", vec![X::Integer16(1)]));
+        data.add_record(record(BLOCK_DESCRIPTION, description_record("My dynamic block description.")));
+        data.add_record(record(BLOCK_ICON, icon_record(&image)));
+        old.object_xdata.insert(handle, data.clone());
+        // the record holds the image in chunks of 127
+        let X::BinaryData(last) = data.get_record(BLOCK_ICON).unwrap().values.last().unwrap().clone() else { panic!("chunk") };
+        assert_eq!((data.get_record(BLOCK_ICON).unwrap().values.len(), last.len()), (1 + 33, 72));
+
+        restore_document(&mut old);
+        let block = old.block_records.iter().find(|record| record.handle == handle).unwrap();
+        assert_eq!((block.description.as_str(), block.preview_data.as_slice()), ("My dynamic block description.", image.as_slice()));
+        let left = old.object_xdata.get(&handle).unwrap();
+        assert!(left.get_record(BLOCK_DESCRIPTION).is_none() && left.get_record(BLOCK_ICON).is_none() && left.get_record("OTHER").is_some());
+        assert_eq!(old.consumed_xdata.get(&handle).unwrap().iter().map(|(at, _)| *at).collect::<Vec<_>>(), [1, 2]);
+
+        // written again at R14, the records are where the file had them; R2000 and later state the values in the record
+        let again = written(&old, DxfVersion::AC1014);
+        assert_eq!(again.object_xdata.get(&handle), Some(&data));
+        let names = |version: DxfVersion| written(&old, version).object_xdata.get(&handle).unwrap().records().iter().map(|r| r.application_name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(DxfVersion::AC1015), ["OTHER"]);
+        assert_eq!(names(DxfVersion::AC1032), ["OTHER"]);
+
+        // an edit of the values is stated in the records the block had
+        let mut edited = old.clone();
+        edited.block_records.iter_mut().for_each(|record| record.description = "edited".into());
+        let again = written(&edited, DxfVersion::AC1014);
+        assert_eq!(block_description(again.object_xdata.get(&handle).unwrap()).as_deref(), Some("edited"));
+        // a block of a newer drawing gets no record at R14 (open: AutoCAD states them after DesignCenter Data, under application
+        // handles of its own numbering), and R2000 states the values in the record
+        let mut modern = document(DxfVersion::AC1015);
+        let mut block = BlockRecord::new("b");
+        block.handle = modern.allocate_handle();
+        block.description = "d".into();
+        block.preview_data = image[..300].to_vec();
+        let handle = block.handle;
+        modern.block_records.add(block).ok();
+        let mut other = ExtendedData::new();
+        other.add_record(record("OTHER", vec![X::Integer16(1)]));
+        modern.object_xdata.insert(handle, other);
+        for version in [DxfVersion::AC1014, DxfVersion::AC1015] {
+            let down = written(&modern, version);
+            assert_eq!(down.object_xdata.get(&handle).unwrap().records().len(), 1, "{version:?}");
+            assert!(down.app_ids.get(BLOCK_ICON).is_none(), "{version:?}");
+        }
+        // records of another shape are another producer's data: not taken in
+        let mut foreign = document(DxfVersion::AC1014);
+        let mut app = AppId::new(BLOCK_ICON);
+        app.handle = foreign.allocate_handle();
+        foreign.app_ids.add(app).ok();
+        let mut block = BlockRecord::new("f");
+        block.handle = foreign.allocate_handle();
+        let foreign_handle = block.handle;
+        foreign.block_records.add(block).ok();
+        let mut data = ExtendedData::new();
+        data.add_record(record(BLOCK_ICON, vec![X::Integer32(0), X::String("not an image".into())]));
+        foreign.object_xdata.insert(foreign_handle, data.clone());
+        restore_document(&mut foreign);
+        assert_eq!(foreign.object_xdata.get(&foreign_handle), Some(&data));
+        assert!(foreign.block_records.iter().find(|record| record.handle == foreign_handle).unwrap().preview_data.is_empty());
     }
 
     /// A version that holds a value natively has no record for it, so a record the model holds there was not taken in by the

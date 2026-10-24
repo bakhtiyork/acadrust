@@ -147,46 +147,60 @@ fn the_vx_records_a_dxf_source_gets_in_r14_hang_below_their_control() {
 
 /// The extended data of a block record of an R14 file keeps the order of its applications through a second write: the
 /// DesignCenter units block (application ACAD, which the writer states again from the record) stays where the file had it.
+/// The record AutoCAD's R14 file states for the preview image (`CONTENTBLOCKICON 1071 0 1004 ..`, R5b-7) is the preview of the block
+/// record once read; a record of another shape is data of the file and stays in the model in its place.
 #[test]
 fn a_block_record_keeps_the_order_of_its_xdata_applications_in_r14() {
     use acadrust::tables::{AppId, BlockRecord};
     use acadrust::xdata::{ExtendedDataRecord, XDataValue};
-    let mut document = CadDocument::with_version(DxfVersion::AC1014);
-    if document.app_ids.get("CONTENTBLOCKICON").is_none() {
-        let mut app = AppId::new("CONTENTBLOCKICON");
-        app.handle = document.allocate_handle();
-        document.app_ids.add(app).unwrap();
+    for (restored, first_value) in [(true, 0), (false, 1)] {
+        let mut document = CadDocument::with_version(DxfVersion::AC1014);
+        if document.app_ids.get("CONTENTBLOCKICON").is_none() {
+            let mut app = AppId::new("CONTENTBLOCKICON");
+            app.handle = document.allocate_handle();
+            document.app_ids.add(app).unwrap();
+        }
+        let mut record = BlockRecord::new("door");
+        record.handle = document.allocate_handle();
+        record.units = 6;
+        let handle = record.handle;
+        document.block_records.add(record).unwrap();
+        let mut units = ExtendedDataRecord::new("ACAD");
+        units.add_value(XDataValue::String("DesignCenter Data".into()));
+        units.add_value(XDataValue::ControlString("{".into()));
+        units.add_value(XDataValue::Integer16(1));
+        units.add_value(XDataValue::Integer16(6));
+        units.add_value(XDataValue::ControlString("}".into()));
+        document.set_object_xdata_record(handle, units);
+        let mut icon = ExtendedDataRecord::new("CONTENTBLOCKICON");
+        icon.add_value(XDataValue::Integer32(first_value));
+        icon.add_value(XDataValue::BinaryData(vec![1, 2, 3, 4]));
+        document.set_object_xdata_record(handle, icon);
+        let order = |document: &CadDocument| -> Vec<String> {
+            let handle = document.block_records.get("door").expect("block record").handle;
+            document
+                .object_xdata(handle)
+                .expect("xdata")
+                .records()
+                .iter()
+                .map(|record| record.application_name.clone())
+                .collect()
+        };
+        let preview = |document: &CadDocument| document.block_records.get("door").expect("block record").preview_data.clone();
+        let first = write_and_read(&document, DxfVersion::AC1014);
+        let second = write_and_read(&first, DxfVersion::AC1014);
+        if restored {
+            // the record is the preview once read, stated again in its place
+            for (name, read) in [("written once", &first), ("written again", &second)] {
+                assert_eq!(order(read), ["ACAD"], "{name}");
+                assert_eq!(preview(read), [1, 2, 3, 4], "{name}");
+            }
+        } else {
+            assert_eq!(order(&first), ["ACAD", "CONTENTBLOCKICON"], "written once");
+            assert_eq!(order(&second), ["ACAD", "CONTENTBLOCKICON"], "written again");
+            assert!(preview(&second).is_empty());
+        }
     }
-    let mut record = BlockRecord::new("door");
-    record.handle = document.allocate_handle();
-    record.units = 6;
-    let handle = record.handle;
-    document.block_records.add(record).unwrap();
-    let mut units = ExtendedDataRecord::new("ACAD");
-    units.add_value(XDataValue::String("DesignCenter Data".into()));
-    units.add_value(XDataValue::ControlString("{".into()));
-    units.add_value(XDataValue::Integer16(1));
-    units.add_value(XDataValue::Integer16(6));
-    units.add_value(XDataValue::ControlString("}".into()));
-    document.set_object_xdata_record(handle, units);
-    let mut icon = ExtendedDataRecord::new("CONTENTBLOCKICON");
-    icon.add_value(XDataValue::Integer32(0));
-    icon.add_value(XDataValue::BinaryData(vec![1, 2, 3, 4]));
-    document.set_object_xdata_record(handle, icon);
-    let order = |document: &CadDocument| -> Vec<String> {
-        let handle = document.block_records.get("door").expect("block record").handle;
-        document
-            .object_xdata(handle)
-            .expect("xdata")
-            .records()
-            .iter()
-            .map(|record| record.application_name.clone())
-            .collect()
-    };
-    let first = write_and_read(&document, DxfVersion::AC1014);
-    assert_eq!(order(&first), ["ACAD", "CONTENTBLOCKICON"], "written once");
-    let second = write_and_read(&first, DxfVersion::AC1014);
-    assert_eq!(order(&second), ["ACAD", "CONTENTBLOCKICON"], "written again");
 }
 
 fn hard_owner_flags(document: &CadDocument) -> Vec<(String, bool)> {

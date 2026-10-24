@@ -187,10 +187,11 @@ fn a_leader_of_an_old_version_states_the_extents_of_its_mtext_annotation() {
     }
 }
 
-/// A DXF of R2000 states the values its entities cannot hold in the round-trip records, and a DXF read restores them: the
-/// native model of a drawing is the same from the DWG and from its DXF.
+/// A DXF of R2000 states the nearest index for a true colour and no round-trip record (R5b-7, owner decision: AutoCAD's own
+/// R2000 and R2004 DXF files hold none; sample_AC1015_ascii.dxf states colour 230 for the point #29A and nothing else); a DXF
+/// that has the record (an older output of this library, another producer's) is still restored on read.
 #[test]
-fn a_dxf_of_r2000_keeps_true_colour_in_the_round_trip_record() {
+fn a_dxf_of_r2000_states_the_nearest_index_and_no_round_trip_record() {
     let mut document = CadDocument::with_version(DxfVersion::AC1032);
     let mut line = acadrust::entities::Line::from_points(Vector3::ZERO, Vector3::UNIT_X);
     line.common.color = Color::from_rgb(245, 10, 147);
@@ -199,10 +200,21 @@ fn a_dxf_of_r2000_keeps_true_colour_in_the_round_trip_record() {
     let source = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&document).unwrap())).read().unwrap();
     assert_eq!(source.get_entity(handle).unwrap().common().color, Color::from_rgb(245, 10, 147));
     let text = String::from_utf8(DxfWriter::new(&source).write_to_vec().unwrap()).unwrap();
-    assert!(text.contains("RTTcAl"), "the record is stated: {}", &text[text.find("  0\r\nLINE").or(text.find("  0\nLINE")).unwrap_or(0)..][..700]);
-    assert!(!text.contains("\n420\n"), "R2000 has no true colour group");
-    let back = DxfReader::from_reader(Cursor::new(text.into_bytes())).unwrap().read().unwrap();
-    let common = back.get_entity(handle).unwrap().common();
+    assert!(!text.contains("RTTcAl"), "AutoCAD's DXF holds no record");
+    assert!(!text.contains("\n420\n") && !text.contains("\r\n420\r\n"), "R2000 has no true colour group");
+    let back = DxfReader::from_reader(Cursor::new(text.clone().into_bytes())).unwrap().read().unwrap();
+    assert_eq!(back.get_entity(handle).unwrap().common().color, Color::Index(230));
+
+    // A file that states the record (word 0x80E6: not an index, nearest index 230; value 0xC2F50A93) gets its value back.
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let entities = text.find(&format!("2{eol}ENTITIES")).expect("entities section");
+    let end = entities + text[entities..].find("ENDSEC").expect("end of the entities");
+    let code_line = text[..end].rfind('\n').expect("the line of group 0");
+    let at = text[..code_line].rfind('\n').expect("the line before it") + 1;
+    let record = ["1001", "ACAD", "1000", "RTTcAl", "1070", "-32538", "1071", "-1024128365", "1000", "$$NoName$$"].join(eol);
+    let stated = format!("{}{record}{eol}{}", &text[..at], &text[at..]);
+    let restored = DxfReader::from_reader(Cursor::new(stated.into_bytes())).unwrap().read().unwrap();
+    let common = restored.get_entity(handle).unwrap().common();
     assert_eq!(common.color, Color::from_rgb(245, 10, 147));
     assert!(common.extended_data.get_record("ACAD").is_none());
 }

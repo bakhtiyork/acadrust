@@ -707,6 +707,11 @@ fn block_explodable(doc: &CadDocument, b: &crate::tables::BlockRecord) -> bool {
 }
 
 fn block_preview(doc: &CadDocument, b: &crate::tables::BlockRecord) -> Value {
+    // A DWG before R2000 keeps the preview in the CONTENTBLOCKICON record, which ACadSharp reads as extended data
+    // (`autocad_conversions`: the model holds the image itself).
+    if b.dxf_present.is_none() && source_dwg(doc) && doc.version < crate::types::DxfVersion::AC1015 {
+        return Value::Null;
+    }
     if let Some(present) = b.dxf_present {
         if present & 4 == 0 && b.preview_data.is_empty() {
             return Value::Null;
