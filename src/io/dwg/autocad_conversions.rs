@@ -135,7 +135,11 @@ fn keep_taken(
     handle: Handle,
     entry: (usize, ExtendedDataRecord),
 ) {
-    let list = stash.entry(handle).or_default();
+    keep_taken_in(stash.entry(handle).or_default(), entry);
+}
+
+/// Put a taken record into the list of its owner (ascending positions).
+fn keep_taken_in(list: &mut Vec<(usize, ExtendedDataRecord)>, entry: (usize, ExtendedDataRecord)) {
     let at = list.partition_point(|(index, _)| *index < entry.0);
     list.insert(at, entry);
 }
@@ -321,6 +325,11 @@ fn saved_by_version_block() -> Vec<X> {
     vec![X::String(SAVED_BY_VERSION.into()), X::Integer16(0)]
 }
 
+/// Whether `record` is the visual style stamp alone (compared without building the block).
+fn is_saved_by_version_stamp(record: &[X]) -> bool {
+    matches!(record, [X::String(label), X::Integer16(0)] if label == SAVED_BY_VERSION)
+}
+
 /// The `DBColXD` block of a colour-book object: the nearest index, the packed colour and `<book>$<name>`.
 fn book_color_block(book: &crate::objects::BookColor) -> Option<Vec<X>> {
     let (r, g, b) = match book.color {
@@ -336,16 +345,20 @@ fn book_color_block(book: &crate::objects::BookColor) -> Option<Vec<X>> {
     ])
 }
 
-fn book_color_of(data: &ExtendedData) -> Option<(Color, String)> {
-    book_color_in(values(data, ACAD)?)
-}
-
 fn book_color_in(record: &[X]) -> Option<(Color, String)> {
     let at = record.iter().position(|value| matches!(value, X::String(text) if text == BOOK_COLOR))?;
     match record.get(at + 1..at + 4)? {
         [X::Integer16(_), X::Integer32(packed), X::String(identity)] => Some((unpacked_color(*packed as u32)?, identity.clone())),
         _ => None,
     }
+}
+
+/// Whether the `DBColXD` block of `record` still describes `book`, a colour-book object read from a drawing before R2004 (its
+/// DBCOLOR record holds the nearest index only, the block that index, the colour and the names): an object whose index was changed
+/// after the read no longer is the colour the block names.
+fn block_describes(record: &[X], book: &crate::objects::BookColor) -> bool {
+    let Some(at) = record.iter().position(|value| matches!(value, X::String(text) if text == BOOK_COLOR)) else { return false };
+    matches!((record.get(at + 1), book.color), (Some(X::Integer16(index)), Color::Index(own)) if *index == own as i16)
 }
 
 /// The values of a record the model took out of the object `handle`.
@@ -380,9 +393,11 @@ fn entity_needs_restore(entity: &EntityType, version: DxfVersion) -> bool {
 /// a writer of the same version).
 pub(crate) fn restore_document(document: &mut CadDocument) {
     let version = document.version;
-    if !(holds_mleader_version(version) && holds_attribute_lock(version) && holds_modeler_revision(version)) {
-        let handle_of = |name: &str| app_handle(document, name);
-        let (mleader_app, attribute_app, guid_app) = (handle_of(MLEADER_VERSION), handle_of(ATTRIBUTE_LOCK), handle_of(CHANGE_GUID));
+    let handle_of = |name: &str| app_handle(document, name);
+    let (mleader_app, attribute_app, guid_app) = (handle_of(MLEADER_VERSION), handle_of(ATTRIBUTE_LOCK), handle_of(CHANGE_GUID));
+    // A drawing that registers none of the applications holds none of their records: no entity is looked at.
+    let registered = mleader_app.is_some() || attribute_app.is_some() || guid_app.is_some();
+    if registered && !(holds_mleader_version(version) && holds_attribute_lock(version) && holds_modeler_revision(version)) {
         // Look first and copy only the entities that change (the records are shared until then).
         let changing: Vec<usize> = document
             .entities
@@ -420,9 +435,13 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
                         }
                     }
                 }
+                // The identifier of the entity is the GUID of its revision, as the reader of a DWG that holds the revision states it.
                 EntityType::Solid3D(solid) => {
                     if let Some(revision) = revision_of(&solid.common.extended_data) {
                         solid.acis_data.revision = revision;
+                        if solid.uid.is_empty() {
+                            solid.uid = solid.acis_data.revision.guid_string().unwrap_or_default();
+                        }
                     }
                     let handle = solid.common.handle;
                     if let Some(entry) = take_record(&mut solid.common.extended_data, CHANGE_GUID, guid_app, stash.get(&handle).map_or(&[], Vec::as_slice)) {
@@ -432,6 +451,9 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
                 EntityType::Region(region) => {
                     if let Some(revision) = revision_of(&region.common.extended_data) {
                         region.acis_data.revision = revision;
+                        if region.uid.is_empty() {
+                            region.uid = region.acis_data.revision.guid_string().unwrap_or_default();
+                        }
                     }
                     let handle = region.common.handle;
                     if let Some(entry) = take_record(&mut region.common.extended_data, CHANGE_GUID, guid_app, stash.get(&handle).map_or(&[], Vec::as_slice)) {
@@ -441,6 +463,9 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
                 EntityType::Body(body) => {
                     if let Some(revision) = revision_of(&body.common.extended_data) {
                         body.acis_data.revision = revision;
+                        if body.uid.is_empty() {
+                            body.uid = body.acis_data.revision.guid_string().unwrap_or_default();
+                        }
                     }
                     let handle = body.common.handle;
                     if let Some(entry) = take_record(&mut body.common.extended_data, CHANGE_GUID, guid_app, stash.get(&handle).map_or(&[], Vec::as_slice)) {
@@ -451,48 +476,34 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
             }
         }
     }
-    if !holds_mleader_version(version) {
-        let styles: Vec<Handle> = document
-            .objects
+    // The multileader styles (before R2010) and, before R2018, a visual style whose record is the stamp alone and a colour-book
+    // object whose record is the colour block alone: the format needs these records, the drawing does not (a record with other
+    // values is another producer's data and stays). Only objects with extended data can hold one: one pass over those, not over
+    // the object map.
+    let (styles, stamps) = (!holds_mleader_version(version), states_saved_by_version(version));
+    let (mleader_app, acad) = (app_handle(document, MLEADER_VERSION), app_handle(document, ACAD));
+    if (styles && mleader_app.is_some()) || (stamps && acad.is_some()) {
+        let taken: Vec<(Handle, &'static str, Option<u64>)> = document
+            .object_xdata
             .iter()
-            .filter(|(handle, object)| {
-                matches!(object, ObjectType::MultiLeaderStyle(_)) && document.object_xdata.get(handle).is_some_and(|data| mleader_version(data).is_some())
+            .filter_map(|(handle, data)| match document.objects.get(handle)? {
+                ObjectType::MultiLeaderStyle(_) if styles && mleader_version(data).is_some() => Some((*handle, MLEADER_VERSION, mleader_app)),
+                ObjectType::VisualStyle(_) if stamps && values(data, ACAD).is_some_and(is_saved_by_version_stamp) => Some((*handle, ACAD, acad)),
+                ObjectType::BookColor(_)
+                    if stamps && values(data, ACAD).is_some_and(|record| record.len() == 4 && book_color_in(record).is_some()) =>
+                {
+                    Some((*handle, ACAD, acad))
+                }
+                _ => None,
             })
-            .map(|(handle, _)| *handle)
             .collect();
-        let app = app_handle(document, MLEADER_VERSION);
-        for handle in styles {
-            let before = document.consumed_xdata.get(&handle).cloned().unwrap_or_default();
-            if let Some(entry) = with_object(document, handle, |data| take_record(data, MLEADER_VERSION, app, &before)) {
-                keep_taken(&mut document.consumed_xdata, handle, entry);
+        for (handle, application, app) in taken {
+            let mut list = document.consumed_xdata.remove(&handle).unwrap_or_default();
+            if let Some(entry) = with_object(document, handle, |data| take_record(data, application, app, &list)) {
+                keep_taken_in(&mut list, entry);
             }
-        }
-    }
-    if states_saved_by_version(version) {
-        // A visual style whose record is the stamp alone, and a colour-book object whose record is the colour block alone: the
-        // format needs them, the drawing does not (a record with other values is another producer's data and stays).
-        let acad = app_handle(document, ACAD);
-        let stamps: Vec<Handle> = document
-            .objects
-            .iter()
-            .filter(|(handle, object)| match object {
-                ObjectType::VisualStyle(_) => document
-                    .object_xdata
-                    .get(handle)
-                    .is_some_and(|data| values(data, ACAD) == Some(saved_by_version_block().as_slice())),
-                ObjectType::BookColor(_) => document
-                    .object_xdata
-                    .get(handle)
-                    .and_then(|data| values(data, ACAD))
-                    .is_some_and(|record| record.len() == 4 && book_color_in(record).is_some()),
-                _ => false,
-            })
-            .map(|(handle, _)| *handle)
-            .collect();
-        for handle in stamps {
-            let before = document.consumed_xdata.get(&handle).cloned().unwrap_or_default();
-            if let Some(entry) = with_object(document, handle, |data| take_record(data, ACAD, acad, &before)) {
-                keep_taken(&mut document.consumed_xdata, handle, entry);
+            if !list.is_empty() {
+                document.consumed_xdata.insert(handle, list);
             }
         }
     }
@@ -566,11 +577,17 @@ pub(crate) fn restore_book_colors(document: &mut std::borrow::Cow<'_, CadDocumen
         .iter()
         .filter_map(|(handle, object)| match object {
             ObjectType::BookColor(book) if !book.color.is_true_color() => {
-                let (color, identity) = document
+                let record = document
                     .object_xdata
                     .get(handle)
-                    .and_then(book_color_of)
-                    .or_else(|| book_color_in(taken_values(document, *handle, ACAD)?))?;
+                    .and_then(|data| values(data, ACAD))
+                    .filter(|record| book_color_in(record).is_some())
+                    .or_else(|| taken_values(document, *handle, ACAD))?;
+                // A block that names another index than the object's is stale (the colour was changed after the read).
+                if !block_describes(record, book) {
+                    return None;
+                }
+                let (color, identity) = book_color_in(record)?;
                 color.is_true_color().then_some((*handle, color, identity))
             }
             _ => None,
@@ -606,6 +623,14 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         .or(document.dxf_source_version)
         .is_some_and(|source| source != version);
 
+    // A version that holds a value natively has no record for it: a record the model still holds there was not taken in by the
+    // reader (a file of that version, or a document made in memory, states it) and stays as it is. A record of another shape
+    // than AutoCAD's is another producer's data and is never touched.
+    // The source was older than the version the drawing is written as (AutoCAD drops the stamps of such a drawing).
+    let from_older = |holding: DxfVersion| {
+        document.dwg_source_version.or(document.dxf_source_version).is_some_and(|source| source < holding)
+    };
+
     // Entities: collect the changes first (the entity records are shared and copied on write).
     // (owner, the record to state or none, the position the file had the record at)
     let mut leaders: Vec<(Handle, Option<Vec<X>>, Option<usize>)> = Vec::new();
@@ -613,27 +638,25 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     let mut solids: Vec<(Handle, Option<Vec<X>>, Option<usize>)> = Vec::new();
     for entity in document.entities() {
         match entity {
-            EntityType::MultiLeader(leader) => {
+            EntityType::MultiLeader(leader) if !holds_mleader_version(version) => {
                 let data = &leader.common.extended_data;
-                let at = taken_position(document, leader.common.handle, MLEADER_VERSION);
-                let wanted = (!holds_mleader_version(version) && (converting || at.is_some() || mleader_version(data).is_some()))
-                    .then(|| vec![X::Integer16(leader.dwg_version)]);
-                if (wanted.is_some() || mleader_version(data).is_some()) && values(data, MLEADER_VERSION) != wanted.as_deref() {
-                    leaders.push((leader.common.handle, wanted, at));
+                let ours = mleader_version(data).is_some();
+                if ours || values(data, MLEADER_VERSION).is_none() {
+                    let at = taken_position(document, leader.common.handle, MLEADER_VERSION);
+                    let wanted = (converting || at.is_some() || ours).then(|| vec![X::Integer16(leader.dwg_version)]);
+                    if wanted.is_some() && values(data, MLEADER_VERSION) != wanted.as_deref() {
+                        leaders.push((leader.common.handle, wanted, at));
+                    }
                 }
             }
-            EntityType::AttributeDefinition(attribute) => {
-                let wanted = attribute_record(version, attribute.lock_position);
-                let data = &attribute.common.extended_data;
-                if (wanted.is_some() || attribute_locked(data)) && values(data, ATTRIBUTE_LOCK) != wanted.as_deref() {
+            EntityType::AttributeDefinition(attribute) if !holds_attribute_lock(version) => {
+                if let Some(wanted) = attribute_change(&attribute.common.extended_data, version, attribute.lock_position) {
                     attributes.push((attribute.common.handle, None, wanted, taken_position(document, attribute.common.handle, ATTRIBUTE_LOCK)));
                 }
             }
-            EntityType::Insert(insert) => {
+            EntityType::Insert(insert) if !holds_attribute_lock(version) => {
                 for (index, attribute) in insert.attributes.iter().enumerate() {
-                    let wanted = attribute_record(version, attribute.lock_position);
-                    let data = &attribute.common.extended_data;
-                    if (wanted.is_some() || attribute_locked(data)) && values(data, ATTRIBUTE_LOCK) != wanted.as_deref() {
+                    if let Some(wanted) = attribute_change(&attribute.common.extended_data, version, attribute.lock_position) {
                         attributes.push((insert.common.handle, Some(index), wanted, taken_position(document, attribute.common.handle, ATTRIBUTE_LOCK)));
                     }
                 }
@@ -656,72 +679,85 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     let mut visual: Vec<(Handle, bool, Option<usize>)> = Vec::new();
     let mut books: Vec<(Handle, Option<Vec<X>>, Option<usize>)> = Vec::new();
     for (handle, object) in &document.objects {
-        let data = document.object_xdata.get(handle);
         match object {
-            ObjectType::MultiLeaderStyle(_) => {
+            ObjectType::MultiLeaderStyle(_) if !holds_mleader_version(version) => {
+                let data = document.object_xdata.get(handle);
+                let existing = data.and_then(mleader_version);
+                if existing.is_none() && data.and_then(|d| values(d, MLEADER_VERSION)).is_some() {
+                    continue;
+                }
                 let stashed = document.consumed_xdata.get(handle).and_then(|list| {
                     list.iter().find_map(|(index, record)| match record.values.as_slice() {
                         [X::Integer16(found)] if record.application_name.eq_ignore_ascii_case(MLEADER_VERSION) => Some((*index, *found)),
                         _ => None,
                     })
                 });
-                let current = data.and_then(mleader_version).or(stashed.map(|(_, found)| found));
-                let wanted = (!holds_mleader_version(version) && (converting || current.is_some()))
-                    .then(|| vec![X::Integer16(current.unwrap_or(2))]);
-                let existing = data.and_then(mleader_version);
-                if wanted.is_some() != existing.is_some() || (wanted.is_some() && data.and_then(|d| values(d, MLEADER_VERSION)) != wanted.as_deref()) {
+                let current = existing.or(stashed.map(|(_, found)| found));
+                let wanted = (converting || current.is_some()).then(|| vec![X::Integer16(current.unwrap_or(2))]);
+                if wanted.is_some() && data.and_then(|d| values(d, MLEADER_VERSION)) != wanted.as_deref() {
                     styles.push((*handle, wanted, stashed.map(|(index, _)| index)));
                 }
             }
             // AutoCAD's DXF files hold no stamp at all: a DXF gets none for a conversion, and keeps the one its DWG source had.
             ObjectType::VisualStyle(_) => {
+                let data = document.object_xdata.get(handle);
                 let label = data.is_some_and(|d| has_label(d, SAVED_BY_VERSION));
                 let exact = data.is_some_and(|d| has_block(d, SAVED_BY_VERSION, &saved_by_version_block()));
                 let stashed = taken_values(document, *handle, ACAD).is_some();
                 let adds = states_saved_by_version(version) && !label && (stashed || (converting && !dxf));
-                // A block of another value is another producer's data: left alone.
-                if adds || (!states_saved_by_version(version) && exact) {
+                // R2018 has no stamp: AutoCAD drops it from a drawing of an older version (an R2018 file that states one keeps
+                // it). A block of another value is another producer's data: left alone.
+                if adds || (!states_saved_by_version(version) && exact && from_older(DxfVersion::AC1032)) {
                     visual.push((*handle, adds, taken_position(document, *handle, ACAD)));
                 }
             }
-            // AutoCAD's R2000 DXF has no colour block: a DXF of that version gets none for a conversion and keeps the one its DWG source had.
-            ObjectType::BookColor(book) => {
-                let stated = data.is_some_and(|d| book_color_of(d).is_some());
-                let stashed = taken_values(document, *handle, ACAD).is_some();
-                if states_book_color_block(version, dxf) || (dxf && stashed && version < DxfVersion::AC1032) {
-                    let known = stated || stashed || (converting && states_book_color_block(version, dxf));
-                    // The block of an object that holds the nearest index only (a DBCOLOR record before R2004) is not made from the
-                    // object: the block the file had goes back as it was.
-                    let wanted = match taken_values(document, *handle, ACAD) {
-                        Some(taken) if !book.color.is_true_color() => Some(taken.to_vec()),
-                        _ => book_color_block(book),
-                    };
-                    if let Some(wanted) = wanted.filter(|_| known) {
-                        if !data.is_some_and(|d| has_block(d, BOOK_COLOR, &wanted)) {
-                            books.push((*handle, Some(wanted), taken_position(document, *handle, ACAD)));
-                        }
+            // AutoCAD's R2000 DXF has no colour block: a DXF of that version gets none for a conversion and keeps the one its DWG
+            // source had. R2018 states none for a conversion; an R2018 file that has one keeps it (cadviewer SE-Barcelona.dwg).
+            ObjectType::BookColor(book) if states_book_color_block(version, dxf) || (dxf && version < DxfVersion::AC1032) => {
+                let data = document.object_xdata.get(handle);
+                let taken = taken_values(document, *handle, ACAD);
+                if !states_book_color_block(version, dxf) && taken.is_none() {
+                    continue;
+                }
+                let stated = data.and_then(|d| values(d, ACAD)).and_then(book_color_in);
+                // The block the model holds stays while it names the object's colour (AutoCAD's nearest index is not recomputed).
+                if stated.as_ref().is_some_and(|(color, identity)| {
+                    *color == book.color
+                        && crate::io::dxf::join_color_book_name(Some(&book.book_name), Some(&book.color_name)).as_deref() == Some(identity.as_str())
+                }) {
+                    continue;
+                }
+                let known = stated.is_some() || taken.is_some() || (converting && states_book_color_block(version, dxf));
+                // The block of an object that holds the nearest index only (a DBCOLOR record before R2004) is not made from the
+                // object: the block the file had goes back as it was, while it still names the object's index.
+                let wanted = match taken {
+                    Some(taken) if !book.color.is_true_color() => block_describes(taken, book).then(|| taken.to_vec()),
+                    _ => book_color_block(book),
+                };
+                if let Some(wanted) = wanted.filter(|_| known) {
+                    if !data.is_some_and(|d| has_block(d, BOOK_COLOR, &wanted)) {
+                        books.push((*handle, Some(wanted), taken_position(document, *handle, ACAD)));
                     }
-                } else if stated && version >= DxfVersion::AC1032 {
-                    books.push((*handle, None, None));
                 }
             }
             _ => {}
         }
     }
     let mut dimension_styles: Vec<(Handle, DimensionRecords)> = Vec::new();
-    for style in document.dim_styles.iter() {
-        let mut wanted = DimensionRecords::of(style, version);
-        wanted.fill_at = taken_position(document, style.handle, DIM_FILL);
-        for (index, (name, _)) in DIM_LINETYPES.iter().enumerate() {
-            wanted.linetype_at[index] = taken_position(document, style.handle, name);
-        }
-        let data = document.object_xdata.get(&style.handle);
-        if wanted.differs_from(data) {
-            dimension_styles.push((style.handle, wanted));
+    if !holds_dimension_fill(version) {
+        for style in document.dim_styles.iter() {
+            let positions = DIM_APPLICATIONS.map(|name| taken_position(document, style.handle, name));
+            let data = document.object_xdata.get(&style.handle);
+            let wanted = DimensionRecords::of(style, data, positions);
+            if wanted.differs_from(data) {
+                dimension_styles.push((style.handle, wanted));
+            }
         }
     }
+    // The units a reader took from `DesignCenter Data` of a drawing before R2007 are native from R2007 on, where AutoCAD states no
+    // such record; the record of a file of R2007 or later was not taken in (city_base_map.dwg, R2013, has two) and stays.
     let mut design_center: Vec<Handle> = Vec::new();
-    if version >= DxfVersion::AC1021 {
+    if version >= DxfVersion::AC1021 && from_older(DxfVersion::AC1021) {
         for record in document.block_records.iter() {
             if document
                 .object_xdata
@@ -754,10 +790,9 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             MLEADER_VERSION => leaders.iter().any(|(_, wanted, _)| wanted.is_some()) || styles.iter().any(|(_, wanted, _)| wanted.is_some()),
             ATTRIBUTE_LOCK => attributes.iter().any(|(_, _, wanted, _)| wanted.is_some()),
             CHANGE_GUID => solids.iter().any(|(_, wanted, _)| wanted.is_some()),
-            DIM_FILL => dimension_styles.iter().any(|(_, records)| records.fill.is_some()),
-            other => dimension_styles
-                .iter()
-                .any(|(_, records)| DIM_LINETYPES.iter().zip(&records.linetypes).any(|((name, _), wanted)| *name == other && wanted.is_some())),
+            other => dimension_styles.iter().any(|(_, records)| {
+                DIM_APPLICATIONS.iter().zip(&records.wanted).any(|(name, wanted)| *name == other && wanted.is_some())
+            }),
         };
         if needed {
             ensure_application(document, name);
@@ -802,15 +837,12 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         with_object(document, handle, |data| set_block(data, acad, BOOK_COLOR, 4, wanted, at));
     }
     for (handle, records) in dimension_styles {
-        let apps: Vec<Option<u64>> = [DIM_FILL]
-            .into_iter()
-            .chain(DIM_LINETYPES.map(|(name, _)| name))
-            .map(|name| application(document, name))
-            .collect();
+        let apps = DIM_APPLICATIONS.map(|name| application(document, name));
         with_object(document, handle, |data| {
-            set_record(data, DIM_FILL, apps[0], records.fill, records.fill_at);
-            for (index, (name, _)) in DIM_LINETYPES.iter().enumerate() {
-                set_record(data, name, apps[index + 1], records.linetypes[index].clone(), records.linetype_at[index]);
+            for (index, wanted) in records.wanted.into_iter().enumerate() {
+                if !records.foreign[index] {
+                    set_record(data, DIM_APPLICATIONS[index], apps[index], wanted, records.at[index]);
+                }
             }
         });
     }
@@ -827,7 +859,20 @@ fn attribute_record(version: DxfVersion, locked: bool) -> Option<Vec<X>> {
     (!holds_attribute_lock(version) && locked).then(|| vec![X::Integer16(0), X::Integer16(1)])
 }
 
-/// The record a modeler entity of `version` states for its revision GUID, when it changes the extended data.
+/// The `AcDbAttr` record an attribute written as `version` (before R2007) states, when that changes its extended data (`Some(None)`:
+/// the record goes). A record of another shape than AutoCAD's is another producer's data: `None`, left as it is.
+fn attribute_change(data: &ExtendedData, version: DxfVersion, locked: bool) -> Option<Option<Vec<X>>> {
+    let ours = attribute_locked(data);
+    if !ours && values(data, ATTRIBUTE_LOCK).is_some() {
+        return None;
+    }
+    let wanted = attribute_record(version, locked);
+    ((wanted.is_some() || ours) && values(data, ATTRIBUTE_LOCK) != wanted.as_deref()).then_some(wanted)
+}
+
+/// The record a modeler entity of `version` states for its revision GUID, when it changes the extended data. R2013 and later
+/// hold the revision natively: a record the model still holds there was not taken in by the reader and stays, as does a record
+/// of another shape than AutoCAD's.
 fn solid_change(
     changes: &mut Vec<(Handle, Option<Vec<X>>, Option<usize>)>,
     version: DxfVersion,
@@ -836,59 +881,62 @@ fn solid_change(
     data: &ExtendedData,
     acis: &crate::entities::AcisData,
 ) {
-    let current = revision_of(data);
-    let wanted = if holds_modeler_revision(version) { None } else { revision_record(&acis.revision) };
     if holds_modeler_revision(version) {
-        if current.is_some() {
-            changes.push((handle, None, None));
-        }
-    } else if values(data, CHANGE_GUID) != wanted.as_deref() && (wanted.is_some() || current.is_some()) {
+        return;
+    }
+    let current = revision_of(data);
+    if current.is_none() && values(data, CHANGE_GUID).is_some() {
+        return;
+    }
+    let wanted = revision_record(&acis.revision);
+    if values(data, CHANGE_GUID) != wanted.as_deref() && (wanted.is_some() || current.is_some()) {
         changes.push((handle, wanted, taken_position(document, handle, CHANGE_GUID)));
     }
 }
 
-/// The records of a dimension style for the version.
+/// The applications of the records of a dimension style before R2007: the text fill, then the three line types.
+const DIM_APPLICATIONS: [&str; 4] = [DIM_FILL, DIM_LINETYPES[0].0, DIM_LINETYPES[1].0, DIM_LINETYPES[2].0];
+
+/// The records of a dimension style written before R2007.
 #[derive(Clone, Debug)]
 struct DimensionRecords {
-    fill: Option<Vec<X>>,
-    linetypes: [Option<Vec<X>>; 3],
+    /// Per application of `DIM_APPLICATIONS`: the record to state, `None` for none.
+    wanted: [Option<Vec<X>>; 4],
+    /// The records of another shape than AutoCAD's: another producer's data, left as they are.
+    foreign: [bool; 4],
     /// The positions the file had the records at (when they were taken out of the style).
-    fill_at: Option<usize>,
-    linetype_at: [Option<usize>; 3],
+    at: [Option<usize>; 4],
 }
 
 impl DimensionRecords {
-    fn of(style: &crate::tables::DimStyle, version: DxfVersion) -> Self {
-        if holds_dimension_fill(version) {
-            return Self { fill: None, linetypes: [None, None, None], fill_at: None, linetype_at: [None; 3] };
-        }
+    fn of(style: &crate::tables::DimStyle, data: Option<&ExtendedData>, at: [Option<usize>; 4]) -> Self {
         let color = style.dimtfillclr_true_color.unwrap_or_else(|| Color::from_index(style.dimtfillclr));
+        // AutoCAD also states the record of a fill that is off when its colour is not the default (autodesk
+        // architectural_-_annotation_scaling_and_multileaders.dwg: fill 0, ByLayer), and a drawing written again states the
+        // record its file had.
+        let fill = (style.dimtfill != 0 || color != Color::ByBlock || at[0].is_some()).then(|| dimension_fill_record(style.dimtfill, color));
+        let mut wanted = [fill, None, None, None];
         let handles = [style.dimltex_handle, style.dimltex1_handle, style.dimltex2_handle];
-        let mut linetypes = [None, None, None];
         for (index, (_, code)) in DIM_LINETYPES.iter().enumerate() {
             if !handles[index].is_null() {
-                linetypes[index] = Some(vec![X::Integer16(*code), X::Handle(handles[index])]);
+                wanted[index + 1] = Some(vec![X::Integer16(*code), X::Handle(handles[index])]);
             }
         }
-        Self { fill: (style.dimtfill != 0).then(|| dimension_fill_record(style.dimtfill, color)), linetypes, fill_at: None, linetype_at: [None; 3] }
+        let foreign = std::array::from_fn(|index| {
+            data.is_some_and(|data| {
+                let ours = match index {
+                    0 => dimension_fill(data).is_some(),
+                    _ => dimension_linetype(data, DIM_LINETYPES[index - 1].0, DIM_LINETYPES[index - 1].1).is_some(),
+                };
+                !ours && values(data, DIM_APPLICATIONS[index]).is_some()
+            })
+        });
+        Self { wanted, foreign, at }
     }
 
-    /// Whether stating these records changes `data`. A record of another shape than AutoCAD's is left as it is.
+    /// Whether stating these records changes `data`.
     fn differs_from(&self, data: Option<&ExtendedData>) -> bool {
-        let current = |application: &str| data.and_then(|data| values(data, application));
-        let fill_ours = data.is_some_and(|data| dimension_fill(data).is_some());
-        let fill_differs = match &self.fill {
-            Some(wanted) => current(DIM_FILL) != Some(wanted.as_slice()),
-            None => fill_ours,
-        };
-        fill_differs
-            || DIM_LINETYPES.iter().enumerate().any(|(index, (application, code))| {
-                let ours = data.is_some_and(|data| dimension_linetype(data, application, *code).is_some());
-                match &self.linetypes[index] {
-                    Some(wanted) => current(application) != Some(wanted.as_slice()),
-                    None => ours,
-                }
-            })
+        (0..4).any(|index| !self.foreign[index] && data.and_then(|data| values(data, DIM_APPLICATIONS[index])) != self.wanted[index].as_deref())
     }
 }
 
@@ -1190,6 +1238,11 @@ mod tests {
         };
         assert!(revision.has_guid);
         assert_eq!(revision.guid_string().unwrap(), "{1a113328-eb6d-d44d-824d-78b33668f9e7}");
+        // the identifier of the entity is that GUID, as a reader of a file that holds the revision states it
+        match old.get_entity(solid_handle) {
+            Some(EntityType::Solid3D(s)) => assert_eq!(s.uid, "{1a113328-eb6d-d44d-824d-78b33668f9e7}"),
+            _ => panic!("solid"),
+        }
         match old.get_entity(region_handle) {
             Some(EntityType::Region(r)) => assert!(!r.acis_data.revision.has_guid, "a record of another shape is not a GUID"),
             _ => panic!("region"),
@@ -1267,11 +1320,15 @@ mod tests {
         assert!(dxf.object_xdata.get(&book_handle).is_some());
         assert!(written_as_dxf(&modern, DxfVersion::AC1015).object_xdata.get(&book_handle).is_none());
         assert!(written_as_dxf(&down, DxfVersion::AC1015).object_xdata.get(&book_handle).is_some(), "a DXF keeps the block its DWG source had");
-        // R2018 states neither, and the block goes from a drawing that has it
+        // R2018 states neither for a drawing of an older version (above: the records were taken in by the reader); a model that
+        // holds them although they were not taken in (an R2018 file that states them, cadviewer SE-Barcelona.dwg's colour block, or a
+        // document made in memory) keeps them
         let up = written(&down, DxfVersion::AC1032);
-        assert!(up.object_xdata.get(&style_handle).is_none() && up.object_xdata.get(&book_handle).is_none());
-        // another application's data in the same ACAD record stays
+        assert_eq!(up.object_xdata.get(&style_handle), down.object_xdata.get(&style_handle));
+        assert_eq!(up.object_xdata.get(&book_handle), down.object_xdata.get(&book_handle));
+        // the stamp of a drawing read from an older version goes; another application's data in the same ACAD record stays
         let mut kept = down.clone();
+        kept.dwg_source_version = Some(DxfVersion::AC1027);
         kept.object_xdata.get_mut(&style_handle).unwrap().records_mut()[0].values.extend([X::String("Other".into()), X::Integer16(5)]);
         let up = written(&kept, DxfVersion::AC1032);
         assert_eq!(values(up.object_xdata.get(&style_handle).unwrap(), ACAD), Some(&[X::String("Other".into()), X::Integer16(5)][..]));
@@ -1312,12 +1369,19 @@ mod tests {
     #[test]
     fn the_design_center_units_of_a_block_record_do_not_survive_into_r2007() {
         let mut document = document(DxfVersion::AC1018);
+        document.dwg_source_version = Some(DxfVersion::AC1018);
         let handle = document.block_records.iter().next().map(|record| record.handle).unwrap();
         let mut data = ExtendedData::new();
         data.add_record(record(ACAD, crate::tables::block_record::design_center_units_values(4)));
         document.object_xdata.insert(handle, data.clone());
         assert_eq!(written(&document, DxfVersion::AC1018).object_xdata.get(&handle), Some(&data));
         assert!(written(&document, DxfVersion::AC1021).object_xdata.get(&handle).is_none());
+        // the record of a file of R2007 or later was not taken in by the reader (cadviewer City_base_map.dwg, R2013): it stays
+        let mut r2013 = document.clone();
+        r2013.version = DxfVersion::AC1027;
+        r2013.dwg_source_version = Some(DxfVersion::AC1027);
+        assert_eq!(written(&r2013, DxfVersion::AC1027).object_xdata.get(&handle), Some(&data));
+        assert_eq!(written(&r2013, DxfVersion::AC1032).object_xdata.get(&handle), Some(&data));
         let mut shared = data;
         shared.records_mut()[0].values.extend([X::String("Other".into())]);
         document.object_xdata.insert(handle, shared);
@@ -1325,5 +1389,167 @@ mod tests {
             values(written(&document, DxfVersion::AC1024).object_xdata.get(&handle).unwrap(), ACAD),
             Some(&[X::String("Other".into())][..])
         );
+    }
+
+    /// A version that holds a value natively has no record for it, so a record the model holds there was not taken in by the
+    /// reader (a file of that version states it: the corpus has `ACAD_DSTYLE_DIMTEXT_FILL` in an R2007 file, `DBColXD` in an R2018
+    /// one, `DesignCenter Data` in an R2013 one): a drawing written again at that version keeps it.
+    #[test]
+    fn a_record_the_reader_did_not_take_in_is_kept_by_a_version_that_holds_the_value() {
+        let fill = vec![
+            X::Integer16(376),
+            X::Integer16(0),
+            X::Integer16(377),
+            X::BinaryData(vec![0x18, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ];
+        let guid = vec![X::Integer16(1), X::Integer32(7), X::Integer16(1), X::Integer16(2)]
+            .into_iter()
+            .chain((0..8).map(X::Integer16))
+            .collect::<Vec<_>>();
+        let mut read = document(DxfVersion::AC1032);
+        read.dwg_source_version = Some(DxfVersion::AC1032);
+        let mut definition = AttributeDefinition::new("T".into(), "P".into(), "".into());
+        definition.common.extended_data.add_record(record(ATTRIBUTE_LOCK, vec![X::Integer16(0), X::Integer16(1)]));
+        let attribute = read.add_entity(EntityType::AttributeDefinition(definition)).unwrap();
+        let mut leader = MultiLeader::new();
+        leader.common.extended_data.add_record(record(MLEADER_VERSION, vec![X::Integer16(2)]));
+        let leader = read.add_entity(EntityType::MultiLeader(Box::new(leader))).unwrap();
+        let mut solid = Solid3D::new();
+        solid.common.extended_data.add_record(record(CHANGE_GUID, guid));
+        let solid = read.add_entity(EntityType::Solid3D(solid)).unwrap();
+        let mut style = DimStyle::new("Filled");
+        style.handle = read.allocate_handle();
+        let style_handle = style.handle;
+        read.dim_styles.add(style).ok();
+        let mut data = ExtendedData::new();
+        data.add_record(record(DIM_FILL, fill));
+        read.object_xdata.insert(style_handle, data.clone());
+        let mut mleader_style = MultiLeaderStyle::new("Standard");
+        mleader_style.handle = read.allocate_handle();
+        let mleader_style_handle = mleader_style.handle;
+        read.objects.insert(mleader_style_handle, ObjectType::MultiLeaderStyle(mleader_style));
+        let mut stamp = ExtendedData::new();
+        stamp.add_record(record(MLEADER_VERSION, vec![X::Integer16(2)]));
+        read.object_xdata.insert(mleader_style_handle, stamp.clone());
+        let again = written(&read, DxfVersion::AC1032);
+        for handle in [attribute, leader, solid] {
+            assert_eq!(again.get_entity(handle).map(|e| e.common().extended_data.clone()), read.get_entity(handle).map(|e| e.common().extended_data.clone()));
+        }
+        assert_eq!(again.object_xdata.get(&style_handle), Some(&data));
+        assert_eq!(again.object_xdata.get(&mleader_style_handle), Some(&stamp));
+        // R2007 (the fill and the lock) and R2013 (the revision) likewise
+        let mut r2007 = read.clone();
+        r2007.version = DxfVersion::AC1021;
+        r2007.dwg_source_version = Some(DxfVersion::AC1021);
+        assert_eq!(written(&r2007, DxfVersion::AC1021).object_xdata.get(&style_handle), Some(&data));
+        assert!(model_record(&written(&r2007, DxfVersion::AC1021), attribute, ATTRIBUTE_LOCK));
+        assert!(model_record(&written(&read, DxfVersion::AC1027), solid, CHANGE_GUID));
+    }
+
+    fn model_record(document: &CadDocument, handle: Handle, application: &str) -> bool {
+        document.get_entity(handle).is_some_and(|entity| entity.common().extended_data.get_record(application).is_some())
+    }
+
+    /// A record of another shape than AutoCAD's is another producer's data: a writer of a version below the one that holds the
+    /// value neither replaces it by the record of the native value nor drops it.
+    #[test]
+    fn a_record_of_another_shape_is_never_rewritten() {
+        let mut modern = document(DxfVersion::AC1032);
+        let mut definition = AttributeDefinition::new("T".into(), "P".into(), "".into());
+        definition.lock_position = true;
+        let other_lock = record(ATTRIBUTE_LOCK, vec![X::Integer16(0), X::Integer16(0), X::Integer16(9)]);
+        definition.common.extended_data.add_record(other_lock.clone());
+        let attribute = modern.add_entity(EntityType::AttributeDefinition(definition)).unwrap();
+        let mut leader = MultiLeader::new();
+        let other_version = record(MLEADER_VERSION, vec![X::Integer16(2), X::Integer16(5)]);
+        leader.common.extended_data.add_record(other_version.clone());
+        let leader = modern.add_entity(EntityType::MultiLeader(Box::new(leader))).unwrap();
+        let mut solid = Solid3D::new();
+        solid.acis_data.revision.has_guid = true;
+        let other_guid = record(CHANGE_GUID, vec![X::Integer16(2), X::Integer32(1)]);
+        solid.common.extended_data.add_record(other_guid.clone());
+        let solid = modern.add_entity(EntityType::Solid3D(solid)).unwrap();
+        let mut style = DimStyle::new("Typed");
+        style.handle = modern.allocate_handle();
+        style.dimltex_handle = Handle::new(0x6D9);
+        let style_handle = style.handle;
+        modern.dim_styles.add(style).ok();
+        let mut data = ExtendedData::new();
+        data.add_record(record(DIM_LINETYPES[0].0, vec![X::Integer16(380), X::String("DASHED".into())]));
+        modern.object_xdata.insert(style_handle, data.clone());
+        let down = written(&modern, DxfVersion::AC1018);
+        let records = |handle: Handle| down.get_entity(handle).unwrap().common().extended_data.records().to_vec();
+        assert_eq!(records(attribute), vec![other_lock]);
+        assert_eq!(records(leader), vec![other_version]);
+        assert_eq!(records(solid), vec![other_guid]);
+        assert_eq!(down.object_xdata.get(&style_handle), Some(&data));
+    }
+
+    /// A text fill that is off with a colour that is not the default is stated as AutoCAD states it (fill 0, the colour), and a
+    /// drawing read with such a record writes it again where the file had it: the colour is not lost.
+    #[test]
+    fn a_text_fill_that_is_off_keeps_its_colour() {
+        let mut modern = document(DxfVersion::AC1032);
+        let mut style = DimStyle::new("Off");
+        style.handle = modern.allocate_handle();
+        style.dimtfillclr = 256;
+        let handle = style.handle;
+        modern.dim_styles.add(style).ok();
+        let off = vec![
+            X::Integer16(376),
+            X::Integer16(0),
+            X::Integer16(377),
+            X::BinaryData(vec![0x18, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0xC0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        ];
+        let down = written(&modern, DxfVersion::AC1018);
+        assert_eq!(down.object_xdata.get(&handle).and_then(|data| values(data, DIM_FILL)), Some(off.as_slice()));
+        let mut read = down.clone();
+        read.version = DxfVersion::AC1018;
+        read.dwg_source_version = Some(DxfVersion::AC1018);
+        restore_document(&mut read);
+        assert_eq!(read.dim_styles.get("Off").map(|style| (style.dimtfill, style.dimtfillclr)), Some((0, 256)));
+        assert_eq!(written(&read, DxfVersion::AC1018).object_xdata.get(&handle).and_then(|data| values(data, DIM_FILL)), Some(off.as_slice()));
+        // the default (off, ByBlock) states nothing
+        let mut plain = document(DxfVersion::AC1032);
+        let mut style = DimStyle::new("Plain");
+        style.handle = plain.allocate_handle();
+        let plain_handle = style.handle;
+        plain.dim_styles.add(style).ok();
+        assert!(written(&plain, DxfVersion::AC1018).object_xdata.get(&plain_handle).is_none());
+    }
+
+    /// The `DBColXD` block of a colour-book object read before R2004 names the object's index: once the index is changed, the
+    /// block is stale and neither restores the old colour nor is written again.
+    #[test]
+    fn an_edited_colour_book_object_does_not_take_its_old_block_back() {
+        let mut old = document(DxfVersion::AC1015);
+        old.dwg_source_version = Some(DxfVersion::AC1015);
+        let mut book = BookColor::new();
+        book.handle = old.allocate_handle();
+        book.color = Color::from_index(42);
+        let handle = book.handle;
+        old.objects.insert(handle, ObjectType::BookColor(book));
+        let mut data = ExtendedData::new();
+        data.add_record(record(
+            ACAD,
+            vec![X::String(BOOK_COLOR.into()), X::Integer16(42), X::Integer32(0xC2E2_9000u32 as i32), X::String("RAL CLASSIC$RAL 1006".into())],
+        ));
+        old.object_xdata.insert(handle, data.clone());
+        restore_document(&mut old);
+        assert!(old.consumed_xdata.contains_key(&handle));
+        // unedited: the same version states the block again, R2004 the colour of the block
+        assert_eq!(written(&old, DxfVersion::AC1015).object_xdata.get(&handle), Some(&data));
+        let mut up = Cow::Borrowed(&old);
+        restore_book_colors(&mut up, DxfVersion::AC1018);
+        assert!(matches!(up.objects.get(&handle), Some(ObjectType::BookColor(book)) if book.color == Color::from_rgb(226, 144, 0)));
+        // edited: neither
+        let mut edited = old.clone();
+        if let Some(ObjectType::BookColor(book)) = edited.objects.get_mut(&handle) {
+            book.color = Color::from_index(5);
+        }
+        assert!(written(&edited, DxfVersion::AC1015).object_xdata.get(&handle).is_none());
+        let mut up = Cow::Borrowed(&edited);
+        restore_book_colors(&mut up, DxfVersion::AC1018);
+        assert!(matches!(up, Cow::Borrowed(_)));
     }
 }

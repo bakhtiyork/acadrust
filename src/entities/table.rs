@@ -2584,8 +2584,12 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
     }
 }
 
+/// The custom data item of a table cell that holds the checksum of `cell_text_checksum`.
+const CELL_CHECKSUM: &str = "ACAD_ROUNDTRIP_2008_CELL_CHECKSUM";
+
 /// The checksum AutoCAD keeps with a table cell: the sum of every UTF-16 unit of the displayed text times its 1-based position
-/// (sample_AC1018.dwg: "Table sample" 7783, "Text" 1110, the number cell shown "0.500000" 1739, an empty cell 0).
+/// (sample_AC1018.dwg: "Table sample" 7783, "Text" 1110, the number cell shown "0.500000" 1739, an empty cell 0; 19 of 19 cells
+/// of its two tables). Non-ASCII text: UTF-16 units assumed (no sample).
 pub(crate) fn cell_text_checksum(text: &str) -> f64 {
     text.encode_utf16().enumerate().map(|(index, unit)| (index as f64 + 1.0) * f64::from(unit)).sum()
 }
@@ -2639,7 +2643,17 @@ impl Table {
         let unchanged = self.rows.iter().zip(&content.rows).all(|(row, from)| {
             row.cells.iter().zip(&from.cells).all(|(cell, from)| {
                 let legacy = cell.text_value();
+                // AutoCAD stores the checksum of the displayed text with every cell of the content object and trusts the value of
+                // the cell only while the legacy cell's display still sums to it (19 of 19 cells of sample_AC1018.dwg's two tables:
+                // text, numbers, a point, a date, a percentage, a currency). It tells an edit of any cell, also one that no longer
+                // parses as the value's type.
+                let checksum = from.custom_data_items.iter().find(|data| {
+                    data.name == CELL_CHECKSUM && data.value.value_type == CellValueType::Double
+                });
                 match from.contents.as_slice() {
+                    [item] if item.content_type == TableCellContentType::Value && checksum.is_some() => {
+                        checksum.is_some_and(|data| (cell_text_checksum(legacy) - data.value.numeric_value).abs() < 0.5)
+                    }
                     // A text the objects state must be the text of the legacy cell; a typed value (number, date, point) has
                     // only its display in the legacy cell, which AutoCAD checks by a checksum of its own.
                     [item] if item.content_type == TableCellContentType::Value && item.value.value_type == CellValueType::String => {
@@ -2655,15 +2669,6 @@ impl Table {
                             && !legacy.is_empty() =>
                     {
                         legacy.trim().parse::<f64>().map_or(true, |shown| (shown - item.value.numeric_value).abs() < 1e-5)
-                    }
-                    // A typed value (date, angle, currency, point, a number with a format) has only its display in the legacy
-                    // cell. AutoCAD stores the checksum of that display with the cell (the first custom data item of the cell
-                    // in the content object, a double) and trusts the typed value only while the display still sums to it.
-                    [item] if item.content_type == TableCellContentType::Value => {
-                        from.custom_data_items
-                            .iter()
-                            .find(|data| data.value.value_type == CellValueType::Double)
-                            .map_or(true, |data| (cell_text_checksum(legacy) - data.value.numeric_value).abs() < 0.5)
                     }
                     _ => true,
                 }

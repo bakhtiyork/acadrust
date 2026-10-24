@@ -203,7 +203,7 @@ fn typed_table_drawing() -> (CadDocument, Handle) {
         checksum.value_type = CellValueType::Double;
         checksum.numeric_value =
             texts[column].encode_utf16().enumerate().map(|(index, unit)| (index as f64 + 1.0) * f64::from(unit)).sum();
-        cell.custom_data_items.push(TableCustomData { name: String::new(), value: checksum });
+        cell.custom_data_items.push(TableCustomData { name: "ACAD_ROUNDTRIP_2008_CELL_CHECKSUM".into(), value: checksum });
     }
     content.common.handle = document.allocate_handle();
     let content_handle = content.common.handle;
@@ -243,17 +243,19 @@ fn an_edited_typed_table_cell_keeps_its_edit_when_the_table_is_written_as_r2010(
     let kept = cells(&up, handle);
     assert_eq!(kept[2].contents[0].value.value_type, CellValueType::Date, "unedited: the typed date");
     assert_eq!(kept[1].contents[0].value_format, "%au0", "unedited: the typed angle");
-    for column in [1, 2] {
+    assert_eq!(kept[0].contents[0].value.numeric_value, 0.5, "unedited: the typed number");
+    // a plain number edited into a text that no longer parses as a number is an edit too (the checksum tells it)
+    for (column, shown) in [(0, "n/a"), (1, "90"), (2, "11/16/2024")] {
         let mut edited = source.clone();
         if let Some(EntityType::Table(table)) = edited.get_entity_mut(handle) {
-            table.set_cell_text(0, column, if column == 1 { "90" } else { "11/16/2024" });
+            table.set_cell_text(0, column, shown);
         }
         let up = through_dwg(&edited, DxfVersion::AC1024);
         let cells = cells(&up, handle);
-        let shown = if column == 1 { "90" } else { "11/16/2024" };
         assert_eq!(cells[column].contents[0].value.text, shown, "the edit of column {column} survives");
         assert_ne!(cells[column].contents[0].value.value_type, CellValueType::Date, "no stale date in column {column}");
         assert_ne!(cells[column].contents[0].value.numeric_value, 1.0471975511965976, "no stale angle in column {column}");
+        assert_ne!(cells[column].contents[0].value.numeric_value, 0.5, "no stale number in column {column}");
     }
 }
 

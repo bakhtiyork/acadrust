@@ -11,12 +11,14 @@
 //! | R2013 | `ACIS BinaryFile` | 21800 | 12 | every `coedge` record has one more integer, before its last pointer; the end record says `ASM` |
 //! | R2018 | `ASM BinaryFile4` | 22300 | 4 | none |
 //!
-//! Every other token of the three bodies (hundreds of `face`, `loop`, `edge`, `point`, `surface`, `curve` and attribute
-//! records) is the same in all five files, except the date string of the `asmheader` record. A drawing saved to an older
-//! release therefore takes the data of a newer one by the header and by dropping those integers, which is what this module
-//! does for the record shapes the samples show. It does not invent anything else: other record shapes, other save versions,
-//! text SAT data (R2000, R14: different record layouts) and any conversion to a newer release (the added integers depend on the
-//! geometry: the vertex integer is 0 or 1) stay as they are.
+//! Every other token of the three bodies (hundreds of `face`, `loop`, `edge`, `point`, `plane-surface`, `straight-curve`,
+//! `transform` and `persubent-acadSolidHistory-attrib` records) is the same in all five files, except the date string of the
+//! `asmheader` record. A drawing saved to an older release therefore takes the data of a newer one by the header and by dropping
+//! those integers, which is what this module does for the record kinds and shapes the samples show ([`KNOWN`]). It does not
+//! invent anything else: a body with any other record kind or shape (a cone, sphere, torus or spline surface, an elliptic or
+//! interpolated curve, a tolerant edge or vertex, other attributes: whether their layout differs between the releases is not
+//! known), other save versions, text SAT data (R2000, R14: different record layouts) and any conversion to a newer release (the
+//! added integers depend on the geometry: the vertex integer is 0 or 1) stay as they are.
 
 use crate::types::DxfVersion;
 
@@ -30,6 +32,34 @@ const SAVES: [(DxfVersion, i32, i32); 5] = [
     (DxfVersion::AC1024, 21500, 24),
     (DxfVersion::AC1027, 21800, 12),
     (DxfVersion::AC1032, 22300, 4),
+];
+
+/// The record kinds of the three bodies of the samples: the type name (sub-identifiers and identifier joined by `-`), the shape
+/// (one letter per token: `I` identifier, `u` sub-identifier, `p` pointer, `i` integer, `e` enumeration, `d` double, `l`
+/// logical, `s` string, `P` position, `V` vector, `#` end of record) and the save versions that state that shape (from, to).
+const KNOWN: &[(&str, &str, i32, i32)] = &[
+    ("asmheader", "sssdddIpis#", 0, i32::MAX),
+    ("body", "Ipipppp#", 0, i32::MAX),
+    ("lump", "Ipipppp#", 0, i32::MAX),
+    ("shell", "Ipipppppp#", 0, i32::MAX),
+    ("face", "Ipippppppll#", 0, i32::MAX),
+    ("face", "Ipipppppplll#", 0, i32::MAX),
+    ("loop", "Ipipppp#", 0, i32::MAX),
+    ("edge", "Ipippdpdppls#", 0, i32::MAX),
+    ("point", "IpipP#", 0, i32::MAX),
+    ("transform", "IpiVVVVdlll#", 0, i32::MAX),
+    ("plane-surface", "uIpipPVVlllll#", 0, i32::MAX),
+    ("straight-curve", "uIpipPVll#", 0, i32::MAX),
+    ("straight-curve", "uIpipPVldld#", 0, i32::MAX),
+    ("persubent-acadSolidHistory-attrib", "uuIpipppiiii#", 0, i32::MAX),
+    // vertex $edge, int, $attribute, $edge, [int from 21200], $point
+    ("vertex", "Ipippp#", 0, 21200),
+    ("vertex", "Ipippip#", 21200, i32::MAX),
+    // coedge $coedge, int, $partner, $next, $previous, $edge, $owner, sense, $loop, [int from 21800], $curve
+    ("coedge", "Ipippppplpp#", 0, 21800),
+    ("coedge", "Ipippppplpip#", 21800, i32::MAX),
+    ("End-of-ACIS-data", "uuuI", 0, 21800),
+    ("End-of-ASM-data", "uuuI", 21800, i32::MAX),
 ];
 
 const INTEGER: u8 = 0x04;
@@ -46,6 +76,24 @@ const END: u8 = 0x11;
 const POSITION: u8 = 0x13;
 const VECTOR: u8 = 0x14;
 const ENUM: u8 = 0x15;
+
+/// The letter of a token's kind in the shapes of [`KNOWN`].
+fn token_class(tag: u8) -> u8 {
+    match tag {
+        INTEGER => b'i',
+        POINTER => b'p',
+        ENUM => b'e',
+        DOUBLE => b'd',
+        TRUE | FALSE => b'l',
+        END => b'#',
+        POSITION => b'P',
+        VECTOR => b'V',
+        STRING_1 | STRING_2 | STRING_4 => b's',
+        IDENT => b'I',
+        SUB_IDENT => b'u',
+        _ => b'?',
+    }
+}
 
 /// The end of the token at `at`, when it is one of the kinds the samples show.
 fn token_end(data: &[u8], at: usize) -> Option<usize> {
@@ -100,36 +148,34 @@ pub(crate) fn for_older_drawing(data: &[u8], target: DxfVersion) -> Option<Vec<u
         if !closes {
             continue;
         }
-        let kinds: Vec<u8> = record.iter().map(|(tag, ..)| *tag).collect();
-        let name = record.iter().find(|(tag, ..)| *tag == IDENT).map(|&(_, from, to)| &data[from + 2..to]);
+        // The type name and the shape of the record; a kind or shape the samples do not show refuses the whole body.
+        let mut name = Vec::new();
+        for &(tag, from, to) in &record {
+            if tag == SUB_IDENT || tag == IDENT {
+                if !name.is_empty() {
+                    name.push(b'-');
+                }
+                name.extend_from_slice(&data[from + 2..to]);
+                if tag == IDENT {
+                    break;
+                }
+            }
+        }
+        let shape: Vec<u8> = record.iter().map(|&(tag, ..)| token_class(tag)).collect();
+        if !KNOWN
+            .iter()
+            .any(|(known, known_shape, since, until)| known.as_bytes() == name && known_shape.as_bytes() == shape && (*since..*until).contains(&version))
+        {
+            return None;
+        }
         // The tokens of the record that go (by index) and the sub-identifier the end record renames.
         let mut dropped: Option<usize> = None;
         let mut renamed: Option<(usize, &[u8])> = None;
-        match name {
-            Some(b"vertex") if version >= 21200 && goal < 21200 => {
-                // vertex $edge, int, $attribute, $edge, [int], $point
-                if kinds != [IDENT, POINTER, INTEGER, POINTER, POINTER, INTEGER, POINTER, END] {
-                    return None;
-                }
-                dropped = Some(5);
-            }
-            Some(b"coedge") if version >= 21800 && goal < 21800 => {
-                // coedge $coedge, int, $partner, $next, $previous, $edge, $owner, sense (logical), $loop, [int], $curve
-                let sense_is_logical = matches!(kinds.get(8), Some(&TRUE | &FALSE));
-                let mut shape = kinds.clone();
-                if sense_is_logical {
-                    shape[8] = FALSE;
-                }
-                if shape != [IDENT, POINTER, INTEGER, POINTER, POINTER, POINTER, POINTER, POINTER, FALSE, POINTER, INTEGER, POINTER, END] {
-                    return None;
-                }
-                dropped = Some(10);
-            }
-            Some(b"data") if version >= 21800 && goal < 21800 => {
-                // End of ASM data
-                let at = record.iter().position(|&(tag, from, to)| tag == SUB_IDENT && &data[from + 2..to] == b"ASM")?;
-                renamed = Some((at, b"ACIS"));
-            }
+        match name.as_slice() {
+            b"vertex" if version >= 21200 && goal < 21200 => dropped = Some(5),
+            b"coedge" if version >= 21800 && goal < 21800 => dropped = Some(10),
+            // End of ASM data
+            b"End-of-ASM-data" if goal < 21800 => renamed = Some((2, b"ACIS")),
             _ => {}
         }
         for (index, &(_, from, to)) in record.iter().enumerate() {
@@ -259,6 +305,17 @@ mod tests {
         let vertex = odd.windows(8).position(|window| window == b"\x0d\x06vertex").unwrap();
         odd[vertex + 8 + 5] = FALSE; // the first pointer of the vertex becomes a logical: the record is not a vertex of the samples
         assert_eq!(for_older_drawing(&odd, DxfVersion::AC1024), None);
+        // a record kind the samples do not show (a cone surface): whether its layout differs between the releases is not known, so
+        // the body is not converted; likewise a known kind in another shape (a face with another field)
+        for extra in [
+            record(&[text(SUB_IDENT, "cone"), text(IDENT, "surface"), ptr(-1), int(-1), ptr(-1), vec![POSITION; 25], vec![FALSE]]),
+            record(&[text(IDENT, "face"), ptr(-1), int(-1), ptr(-1), ptr(1), ptr(2), ptr(3), ptr(4), ptr(5), ptr(6), vec![FALSE], vec![FALSE], int(3)]),
+        ] {
+            let mut unknown = current.clone();
+            let end = unknown.windows(5).position(|window| window == b"\x0e\x03End").unwrap();
+            unknown.splice(end..end, extra);
+            assert_eq!(for_older_drawing(&unknown, DxfVersion::AC1024), None);
+        }
         // the magic and the save version say the same release
         let mut mixed = body(21800, date);
         mixed[..15].copy_from_slice(ASM_MAGIC);
