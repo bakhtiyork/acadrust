@@ -2601,9 +2601,11 @@ fn legacy_source(document: &crate::document::CadDocument) -> bool {
 /// cell grid, a cell edited since) is left as read.
 pub(crate) fn restore_dwg_table_roundtrip(document: &mut crate::document::CadDocument) {
     use crate::entities::EntityType;
-    if !legacy_source(document) || !document.entities().any(|entity| matches!(entity, EntityType::Table(_))) {
+    if !legacy_source(document) {
         return;
     }
+    // One look at the entities; only the restored tables are touched (by handle), and they keep their verbatim record: the
+    // legacy record they were read from is what `unrestored_legacy` writes again while nothing changes.
     let restored: Vec<(Handle, Table)> = document
         .entities()
         .filter_map(|entity| match entity {
@@ -2614,15 +2616,9 @@ pub(crate) fn restore_dwg_table_roundtrip(document: &mut crate::document::CadDoc
             _ => None,
         })
         .collect();
-    if restored.is_empty() {
-        return;
-    }
-    let mut restored: std::collections::HashMap<Handle, Table> = restored.into_iter().collect();
-    for entity in document.entities_mut_keep_raw() {
-        if let EntityType::Table(table) = entity {
-            if let Some(from) = restored.remove(&table.common.handle) {
-                **table = from;
-            }
+    for (handle, restored) in restored {
+        if let Some(EntityType::Table(table)) = document.get_entity_mut_keep_raw(handle) {
+            **table = restored;
         }
     }
 }

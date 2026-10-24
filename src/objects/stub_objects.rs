@@ -344,10 +344,11 @@ impl VisualStyle {
         if !matches!(self.properties.len(), 24 | 28) {
             return false;
         }
-        // The round-trip record of an R2010 file as AutoCAD writes it holds the property flags only (sample_AC1024.dwg: 126
-        // entries); a style stays at its 28 properties unless the record also states values of the later ones (this writer's
-        // R2010 files do). `require_values` is the reader's call; the R2013 up-conversion (`upgrade_r2010_visual_styles`)
-        // takes the flags too.
+        // AutoCAD's round-trip record of an R2010 file states the value and the flag of each property from the 28th on
+        // (sample_AC1024.dwg: 126 entries, `RTVSPost2010Prop28`, `RTVSPost2010PropOp28`, ...), as this writer's R2010 files do; a
+        // record that states no value (flags only, such as the R2004 form `RTVSPropertyOp0` ..) leaves a style of 28 properties
+        // as it is. `require_values` is the reader's call; the R2013 up-conversion (`upgrade_r2010_visual_styles`) takes the
+        // flags too.
         if require_values
             && self.properties.len() == 28
             && !entries.iter().any(|entry| entry.value.as_string().is_some_and(|key| key.starts_with("RTVSPost2010Prop") && !key.starts_with("RTVSPost2010PropOp")))

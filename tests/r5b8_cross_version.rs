@@ -336,10 +336,27 @@ mod view {
         assert_eq!(table_of(&source, handle).value_flags, 0, "native");
         assert_eq!(props(&source, "TableEntity")["ValueFlag"], 22);
     }
+
+    /// A table completed from its round-trip objects, written as a DXF, states the words of the legacy entity it was read with: the
+    /// value flags of AutoCAD's DXF of the table are 22 at every version (sample_AC1018_ascii.dxf to sample_AC1032_ascii.dxf: ValueFlag
+    /// 22, where the R2010 and later DWGs read 0), not the 0 of the R2010 record the reader completed (review of R5b-8: the DXF writer's
+    /// part of the fix had no test).
+    #[test]
+    fn a_table_of_a_dwg_before_r2010_states_its_legacy_words_in_a_dxf() {
+        let (document, handle) = legacy_table_drawing();
+        let source = write_and_read(&document, DxfVersion::AC1018);
+        assert_eq!(table_of(&source, handle).value_flags, 0, "native");
+        for version in [DxfVersion::AC1018, DxfVersion::AC1024] {
+            let mut out = source.clone();
+            out.version = version;
+            assert_eq!(props(&dxf_source(&out), "TableEntity")["ValueFlag"], 22, "{version:?}");
+        }
+    }
 }
 
-/// An R2010 round-trip record that states the flags only (what AutoCAD's own R2010 files hold for a style of 28 properties) leaves
-/// the style at its 28 properties when the file is read: only a record that also states values extends the style.
+/// A round-trip record that states flags only (here the R2004 form `RTVSPropertyOp0` ..; AutoCAD's R2010 record states the values
+/// of the properties from the 28th on too: sample_AC1024.dwg) leaves a style of 28 properties at its 28 when an R2010 file is
+/// read: only a record that also states values extends the style.
 #[test]
 fn a_record_of_flags_alone_leaves_a_visual_style_of_28_properties() {
     let (mut source, handle) = document_with_visual_style();

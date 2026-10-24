@@ -3831,6 +3831,14 @@ impl CadDocument {
         Some(entity)
     }
 
+    /// [`get_entity_mut`](Self::get_entity_mut) that keeps `raw_record`: for a read-time pass that completes the in-memory form
+    /// of one entity and does not change what its record encodes (see [`entities_mut_keep_raw`](Self::entities_mut_keep_raw)).
+    pub(crate) fn get_entity_mut_keep_raw(&mut self, handle: Handle) -> Option<&mut EntityType> {
+        let idx = *self.entity_index.get(&handle)?;
+        self.record_entity_before(handle, Some(Arc::clone(&self.entities[idx])));
+        Some(Arc::make_mut(&mut self.entities[idx]))
+    }
+
     /// Replace an existing entity with a shared image, preserving its storage
     /// slot and block-record membership.
     pub fn replace_entity_arc(
