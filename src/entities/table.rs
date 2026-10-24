@@ -2584,6 +2584,12 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
     }
 }
 
+/// The checksum AutoCAD keeps with a table cell: the sum of every UTF-16 unit of the displayed text times its 1-based position
+/// (sample_AC1018.dwg: "Table sample" 7783, "Text" 1110, the number cell shown "0.500000" 1739, an empty cell 0).
+pub(crate) fn cell_text_checksum(text: &str) -> f64 {
+    text.encode_utf16().enumerate().map(|(index, unit)| (index as f64 + 1.0) * f64::from(unit)).sum()
+}
+
 /// The SYSTEMTIME (year, month, day of week, day, hour, minute, second, millisecond; 16 bits each) of the day nearest to
 /// `seconds` since 1970-01-01 UTC, with the time of day zero. A date cell holds the local midnight of its day, whose UTC
 /// second count is up to twelve hours before or after the midnight of UTC (the sample's cell, 2024-11-15, is
@@ -2649,6 +2655,15 @@ impl Table {
                             && !legacy.is_empty() =>
                     {
                         legacy.trim().parse::<f64>().map_or(true, |shown| (shown - item.value.numeric_value).abs() < 1e-5)
+                    }
+                    // A typed value (date, angle, currency, point, a number with a format) has only its display in the legacy
+                    // cell. AutoCAD stores the checksum of that display with the cell (the first custom data item of the cell
+                    // in the content object, a double) and trusts the typed value only while the display still sums to it.
+                    [item] if item.content_type == TableCellContentType::Value => {
+                        from.custom_data_items
+                            .iter()
+                            .find(|data| data.value.value_type == CellValueType::Double)
+                            .map_or(true, |data| (cell_text_checksum(legacy) - data.value.numeric_value).abs() < 0.5)
                     }
                     _ => true,
                 }
@@ -2840,6 +2855,16 @@ mod tests {
         // 2000-02-29 (a Tuesday) and the epoch (a Thursday).
         assert_eq!(&system_time_of_day(951_782_400)[..8], &[0xD0, 7, 2, 0, 2, 0, 29, 0]);
         assert_eq!(&system_time_of_day(0)[..8], &[0xB2, 7, 1, 0, 4, 0, 1, 0]);
+    }
+
+    /// The checksums of sample_AC1018.dwg's table cells (the content object states them as the first custom data item).
+    #[test]
+    fn the_cell_checksum_sums_the_position_weighted_units_of_the_displayed_text() {
+        assert_eq!(cell_text_checksum("Table sample"), 7783.0);
+        assert_eq!(cell_text_checksum("Text"), 1110.0);
+        assert_eq!(cell_text_checksum("0.500000"), 1739.0);
+        assert_eq!(cell_text_checksum(""), 0.0);
+        assert_eq!(cell_text_checksum("Hello this is a title"), 21385.0);
     }
 
     #[test]

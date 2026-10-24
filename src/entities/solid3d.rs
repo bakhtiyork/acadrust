@@ -520,6 +520,16 @@ impl AcisData {
         }
     }
 
+    /// The binary data of a drawing written as `version`: AutoCAD's data of a newer release in the save version of that drawing
+    /// (see `acis::reversion`), else [`sab_for_save`](Self::sab_for_save).
+    pub(crate) fn sab_for_version(&self, version: crate::types::DxfVersion) -> std::borrow::Cow<'_, [u8]> {
+        let data = self.sab_for_save();
+        match crate::entities::acis::reversion::for_older_drawing(&data, version) {
+            Some(older) => std::borrow::Cow::Owned(older),
+            None => data,
+        }
+    }
+
     /// Parse the ACIS payload into a [`SatDocument`], decoding binary SAB via
     /// the SAB reader. `None` when the data is empty or cannot be parsed.
     /// Unlike [`parse_sat`](Self::parse_sat), this also handles binary data.

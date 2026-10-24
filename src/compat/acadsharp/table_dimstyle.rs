@@ -38,6 +38,9 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
     };
     let source_dxf = value.dxf_present_codes.is_some();
     let source_dwg = dwg_version.is_some();
+    // A drawing before R2007 keeps the text fill and the line types of a style in extended data (`autocad_conversions`); the
+    // native model restores them, ACadSharp does not read them.
+    let legacy_conversions = super::registration::source_document(doc) && doc.version < DxfVersion::AC1021;
     let mut defaults = DimStyle::new(value.name.clone());
     // These two native constructor values are writer-oriented conveniences;
     // ACadSharp's DimensionStyle constructor starts with an empty postfix
@@ -230,9 +233,13 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
     let text_color = value
         .dimclrt_true_color
         .unwrap_or_else(|| Color::from_index(field!(dimclrt, 178)));
-    let text_background_color = value
-        .dimtfillclr_true_color
-        .unwrap_or_else(|| Color::from_index(text_background_index));
+    let text_background_color = if legacy_conversions {
+        Color::from_index(defaults.dimtfillclr)
+    } else {
+        value
+            .dimtfillclr_true_color
+            .unwrap_or_else(|| Color::from_index(text_background_index))
+    };
 
     vec![
         ("AlternateDimensioningSuffix", json!(field!(dimapost, 4))),
@@ -302,15 +309,15 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
         ("LimitsGeneration", json!(field!(dimlim, 72))),
         (
             "LineType",
-            optional_handle(line_type(Some(value.dimltex_handle))),
+            optional_handle(line_type(Some(value.dimltex_handle).filter(|_| !legacy_conversions))),
         ),
         (
             "LineTypeExt1",
-            optional_handle(line_type(Some(value.dimltex1_handle))),
+            optional_handle(line_type(Some(value.dimltex1_handle).filter(|_| !legacy_conversions))),
         ),
         (
             "LineTypeExt2",
-            optional_handle(line_type(Some(value.dimltex2_handle))),
+            optional_handle(line_type(Some(value.dimltex2_handle).filter(|_| !legacy_conversions))),
         ),
         ("LinearScaleFactor", number(field!(dimlfac, 144))),
         ("LinearUnitFormat", json!(linear_unit_format)),
@@ -338,7 +345,7 @@ pub(super) fn map(doc: &CadDocument, value: &DimStyle) -> Vec<(&'static str, Val
             json!(suppress_second_extension),
         ),
         ("TextBackgroundColor", appearance_color(text_background_color)),
-        ("TextBackgroundFillMode", json!(field!(dimtfill, 69))),
+        ("TextBackgroundFillMode", json!(if legacy_conversions { defaults.dimtfill } else { field!(dimtfill, 69) })),
         ("TextColor", appearance_color(text_color)),
         ("TextDirection", json!(field!(dimtxtdirection, 295) as i16)),
         ("TextHeight", number(text_height)),

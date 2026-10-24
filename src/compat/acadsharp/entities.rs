@@ -169,6 +169,12 @@ fn mtext_common<'a>(doc: &CadDocument, text: &'a crate::entities::MText) -> std:
     }
 }
 
+/// Whether the document is a source before R2007: ACadSharp does not read the lock of an attribute from the `AcDbAttr`
+/// extended data the file states it in (`autocad_conversions`).
+fn legacy_lock(doc: &CadDocument) -> bool {
+    super::registration::source_document(doc) && doc.version < crate::types::DxfVersion::AC1021
+}
+
 /// The version of a DWG source document whose entity records lack some of the values the native model holds.
 fn legacy_round_trip_version(doc: &CadDocument) -> Option<crate::types::DxfVersion> {
     let version = doc.dwg_source_version.or(doc.dxf_source_version)?;
@@ -2465,7 +2471,7 @@ fn attribute_definition_props(
         ("InsertPoint", vec3(value.insertion_point)),
         (
             "IsLocked",
-            bool_value(value.lock_position && !value.source.as_deref().is_some_and(|s| s.dxf)),
+            bool_value(value.lock_position && !value.source.as_deref().is_some_and(|s| s.dxf) && !legacy_lock(doc)),
         ),
         (
             "MText",
@@ -2552,7 +2558,7 @@ fn attribute_entity_props(
         ("InsertPoint", vec3(value.insertion_point)),
         (
             "IsLocked",
-            bool_value(value.lock_position && !value.source.as_deref().is_some_and(|s| s.dxf)),
+            bool_value(value.lock_position && !value.source.as_deref().is_some_and(|s| s.dxf) && !legacy_lock(doc)),
         ),
         (
             "MText",

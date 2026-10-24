@@ -1571,6 +1571,13 @@ pub struct CadDocument {
     /// Keyed by the object/table-entry handle. Not serialized.
     pub(crate) eed_by_handle: HashMap<Handle, Vec<(u64, Vec<u8>)>>,
 
+    /// The extended-data records `io::dwg::autocad_conversions` took out of an entity, object or table record when it restored the
+    /// native value they state (owner handle -> the position each record had among the owner's records, the record). The model holds
+    /// the value; the ACadSharp view puts the records back where the file had them, and a writer of an older version states them again
+    /// where the file had them. Not serialized.
+    #[doc(hidden)]
+    pub(crate) consumed_xdata: HashMap<Handle, Vec<(usize, crate::xdata::ExtendedDataRecord)>>,
+
     /// Structured XDATA for objects and symbol-table records, keyed by handle.
     /// Entity XDATA lives in `EntityCommon::extended_data`.
     pub object_xdata: HashMap<Handle, crate::xdata::ExtendedData>,
@@ -1825,6 +1832,7 @@ impl CadDocument {
             dgn_ls_definitions: HashMap::new(),
             dgn_ls_components: HashMap::new(),
             eed_by_handle: HashMap::new(),
+            consumed_xdata: HashMap::new(),
             object_xdata: HashMap::new(),
             xdic_by_handle: HashMap::new(),
             reactors_by_handle: HashMap::new(),

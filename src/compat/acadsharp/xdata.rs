@@ -263,21 +263,33 @@ fn append_text_style_font(
     );
 }
 
+/// The records `autocad_conversions` took out of the owner `handle`, for a document read from a file (the model holds the
+/// values they state; ACadSharp reads the records).
+fn consumed<'a>(doc: &'a CadDocument, handle: Handle) -> &'a [(usize, ExtendedDataRecord)] {
+    if super::registration::source_document(doc) {
+        doc.consumed_xdata.get(&handle).map_or(&[], Vec::as_slice)
+    } else {
+        &[]
+    }
+}
+
 fn project(
     doc: &CadDocument,
     data: Option<&ExtendedData>,
     raw: &[(u64, Vec<u8>)],
     style: Option<&TextStyle>,
+    consumed: &[(usize, ExtendedDataRecord)],
 ) -> Value {
     let data_raw = data.map(|data| data.raw_dwg_eed.as_slice()).unwrap_or(&[]);
     let has_style_font = style.is_some_and(|style| !style.true_type_font.is_empty());
-    if data.is_none() && data_raw.is_empty() && raw.is_empty() && !has_style_font {
+    if data.is_none() && data_raw.is_empty() && raw.is_empty() && !has_style_font && consumed.is_empty() {
         return json!([]);
     }
     if data.is_some_and(|data| data.records().is_empty())
         && data_raw.is_empty()
         && raw.is_empty()
         && !has_style_font
+        && consumed.is_empty()
     {
         return json!([]);
     }
@@ -295,6 +307,12 @@ fn project(
     let undecoded = append_raw(doc, data_raw, wide, &mut pairs, &mut emitted)
         || append_raw(doc, raw, wide, &mut pairs, &mut emitted);
     append_text_style_font(doc, style, &mut pairs, &mut emitted);
+    // The records the native model took out, back at the position the file had them (they came out in ascending order).
+    for (index, record) in consumed {
+        let mut put_back = Vec::new();
+        append_record(doc, record, trim_dwg_strings, &mut put_back, &mut emitted);
+        pairs.insert((*index).min(pairs.len()), put_back.remove(0));
+    }
     if undecoded {
         unmapped()
     } else {
@@ -312,7 +330,7 @@ pub(super) fn extended_data(
     _object_handle: Handle,
     data: &ExtendedData,
 ) -> Value {
-    project(doc, Some(data), &[], None)
+    project(doc, Some(data), &[], None, consumed(doc, _object_handle))
 }
 
 /// Project non-entity XDATA and raw EED stored in the document side maps.
@@ -325,6 +343,7 @@ pub(super) fn object_extended_data(doc: &CadDocument, object_handle: Handle) -> 
             .map(Vec::as_slice)
             .unwrap_or(&[]),
         None,
+        consumed(doc, object_handle),
     )
 }
 
@@ -343,5 +362,6 @@ pub(super) fn text_style_extended_data(doc: &CadDocument, style: &TextStyle) -> 
             .map(Vec::as_slice)
             .unwrap_or(&[]),
         Some(style),
+        &[],
     )
 }

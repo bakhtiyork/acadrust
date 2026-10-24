@@ -198,6 +198,8 @@ impl<'a> DxfWriter<'a> {
     ) -> Result<()> {
         let mut prepared = self.prepare();
         crate::io::dwg::autocad_roundtrip::prepare_for_dxf(&mut prepared, output_version);
+        crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, output_version);
+        crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, output_version, true);
         // The modern cell styles of a table style have no place in the DXF TABLESTYLE record: they travel
         // in a CELLSTYLEMAP object of its extension dictionary (an R2010+ DWG keeps them in the record). The
         // output states those objects besides the document's own; the document is not copied for them.
@@ -318,7 +320,9 @@ impl<'a> DxfWriter<'a> {
         if !native {
             return r12::write_r12(writer, self.document);
         }
-        let prepared = self.prepare();
+        let mut prepared = self.prepare();
+        // The attribute lock of an R12 drawing is a record (AutoCAD's R12 DXF holds `AcDbAttr`, sample_AC1009_ascii.dxf).
+        crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, crate::types::DxfVersion::AC1009, true);
         let document = prepared.as_ref();
         let (handle_start, handle_seed) =
             Self::handle_range(document, crate::types::DxfVersion::AC1009, None, true);

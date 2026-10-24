@@ -676,6 +676,9 @@ impl DxfReader {
         }
         // The values AutoCAD's own down-save keeps in round-trip extended data (true colour, line weight, material).
         crate::io::dwg::autocad_roundtrip::restore_document(&mut document);
+        // The native values of the version-gated records of AutoCAD's other conversions (attribute lock, dimension text fill,
+        // modeler revision, multileader version).
+        crate::io::dwg::autocad_conversions::restore_document(&mut document);
 
         // The legacy viewport-entity table (VX_CONTROL) exists in R13-R2000 files only. A DWG of a later
         // version has no such control object (its header handle is null); the document default would

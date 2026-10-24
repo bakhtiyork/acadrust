@@ -785,6 +785,7 @@ pub fn write_native_dump(doc: &CadDocument, out: &mut dyn Write) -> io::Result<(
         dgn_ls_definitions: _,
         dgn_ls_components: _,
         eed_by_handle,
+        consumed_xdata: _,
         object_xdata,
         xdic_by_handle,
         reactors_by_handle,
