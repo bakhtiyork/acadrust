@@ -201,8 +201,10 @@ pub(super) fn common(
     let legacy_color = legacy
         .filter(|version| !crate::io::dwg::autocad_roundtrip::stores_true_color(*version))
         .and_then(|_| crate::io::dwg::autocad_roundtrip::aci_index(common));
+    // Before R2004 the entity record has no colour-book reference (the restored one names the object of the record's name).
+    let legacy_book = legacy.is_some_and(|version| !crate::io::dwg::autocad_roundtrip::stores_true_color(version));
     vec![
-        ("BookColor", optional_handle(common.color_book_handle)),
+        ("BookColor", optional_handle(if legacy_book { None } else { common.color_book_handle })),
         (
             "Color",
             if let Some(index) = legacy_color {

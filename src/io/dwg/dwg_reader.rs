@@ -3670,9 +3670,10 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
 /// when the entity has no native fill flag. The colour is stored with the
 /// AutoCAD "method byte" (0xC2 = RGB, 0xC3 = ACI, 0xC0/0xC1 = ByLayer/ByBlock).
 ///
-/// A DWG read (`strip`) also takes the round-trip blocks of the MTEXT (`MTEXTBEGIN`, `ACAD_MTEXT_BBRT`) out of its extended
-/// data: the native model holds the line spacing and the fill, and the writer states the blocks again for the versions that
-/// need them (see `autocad_roundtrip`). A DXF keeps them, as AutoCAD's DXF of such a drawing states them.
+/// With `strip` (both the DWG and the DXF reader) it also takes the round-trip blocks of the MTEXT (`MTEXTBEGIN`,
+/// `ACAD_MTEXT_BBRT`) out of its extended data: the native model holds the line spacing and the fill, and the DWG and DXF
+/// writers state the blocks again for the versions that need them (see `autocad_roundtrip`), as AutoCAD's R14 and R2000 DWG
+/// and its R2000 DXF of such a drawing state them (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1015_ascii.dxf).
 pub(crate) fn recover_mtext_bg_roundtrip(document: &mut crate::document::CadDocument, strip: bool) {
     use crate::entities::EntityType;
     use crate::types::{Color, Handle};

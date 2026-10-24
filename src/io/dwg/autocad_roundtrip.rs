@@ -81,14 +81,15 @@ pub(crate) fn aci_index(properties: &EntityProperties) -> Option<u8> {
     }
 }
 
-/// The RGB value of an entity's true colour or colour-book colour.
+/// The RGB value of an entity's true colour or colour-book colour. The entity's own colour comes first: a colour-book object
+/// read from a DWG before R2004 holds an index only (its record has no colour value), the entity the restored RGB.
 fn true_color(document: &CadDocument, properties: &EntityProperties) -> Option<(u8, u8, u8)> {
-    match (book_color(document, properties), properties.color) {
-        (Some(book), _) => match book.color {
+    match (properties.color, book_color(document, properties)) {
+        (Color::Rgb { r, g, b }, _) => Some((r, g, b)),
+        (_, Some(book)) => match book.color {
             Color::Rgb { r, g, b } => Some((r, g, b)),
             color => color.rgb(),
         },
-        (None, Color::Rgb { r, g, b }) => Some((r, g, b)),
         _ => None,
     }
 }
@@ -198,6 +199,20 @@ impl Restorer {
         for (handle, object) in &document.objects {
             match object {
                 ObjectType::Material(material) if material.name.eq_ignore_ascii_case("ByBlock") => by_block_material = Some(*handle),
+                ObjectType::BookColor(color) if color.book_name.is_empty() && color.color_name.is_empty() => {
+                    // The DBCOLOR record before R2004 holds an index only; its names are the key of its entry in the colour
+                    // dictionary (sample_AC1014.dwg: "RAL_CLASSIC$RAL_1006", sample_AC1015.dwg: "RAL CLASSIC$RAL 1006").
+                    let key = match document.objects.get(&color.owner) {
+                        Some(ObjectType::Dictionary(dictionary)) => {
+                            dictionary.entries.iter().find(|(_, entry)| entry == handle).map(|(key, _)| key.as_str())
+                        }
+                        _ => None,
+                    };
+                    if let Some(key) = key {
+                        let (book, name) = crate::io::dxf::split_color_book_name(key);
+                        book_colors.push((book.unwrap_or_default(), name.unwrap_or_default(), *handle));
+                    }
+                }
                 ObjectType::BookColor(color) => book_colors.push((color.book_name.clone(), color.color_name.clone(), *handle)),
                 _ => {}
             }
@@ -301,27 +316,17 @@ impl Restorer {
     fn restore_color(&self, properties: &mut EntityProperties, word: u16, value: u32, identity: &str) {
         let [blue, green, red, method] = value.to_le_bytes();
         if word & WORD_BOOK != 0 {
-            // The entity record states the nearest ACI index and the colour-book object holds the colour, as an R2004 record does.
-            properties.color = Color::from_index((word & 0x0FFF) as i16);
+            // As an R2004 record of the colour states it (sample_AC1018.dwg, circle #99F): the RGB value, the name and the
+            // colour-book object of that name; the low byte of the word is the nearest index the entity record states.
+            properties.color = if method == 0xC2 { Color::from_rgb(red, green, blue) } else { Color::from_index((word & 0xFF) as i16) };
+            properties.color_name = Some(identity.to_string());
             let (book, name) = crate::io::dxf::split_color_book_name(identity);
             let (book, name) = (book.unwrap_or_default(), name.unwrap_or_default());
-            // An R14 colour-book object (DBCOLOR) holds its names as symbol names, spaces as underscores; the identity of the
-            // record is the colour's own name: the entity keeps it next to the object it names.
+            // The names of an R14 colour-book object (its dictionary key) are symbol names, spaces as underscores; the identity
+            // of the record is the colour's own name.
             let same = |a: &str, b: &str| a.chars().map(|c| if c == ' ' { '_' } else { c.to_ascii_uppercase() }).eq(b.chars().map(|c| if c == ' ' { '_' } else { c.to_ascii_uppercase() }));
-            match self.book_colors.iter().find(|(b, n, _)| same(b, &book) && same(n, &name)) {
-                Some((b, n, handle)) => {
-                    properties.color_book_handle = Some(*handle);
-                    if *b != book || *n != name {
-                        properties.color_name = Some(identity.to_string());
-                    }
-                }
-                // No colour-book object of that name: the colour and its name, as a DXF states a named colour.
-                None => {
-                    if method == 0xC2 {
-                        properties.color = Color::from_rgb(red, green, blue);
-                    }
-                    properties.color_name = Some(identity.to_string());
-                }
+            if let Some((_, _, handle)) = self.book_colors.iter().find(|(b, n, _)| same(b, &book) && same(n, &name)) {
+                properties.color_book_handle = Some(*handle);
             }
         } else {
             properties.color = match method {
@@ -751,6 +756,50 @@ mod tests {
         assert_eq!(properties.material_handle, Some(own));
         // The drawing of R2007 holds all three.
         assert!(Restorer::new(&CadDocument::with_version(DxfVersion::AC1021)).is_none());
+    }
+
+    /// AutoCAD's R14 file of its drawing: the circle #99F states `RTTcAl -16342 (0xC02A) -1025339392 (0xC2E29000) "RAL CLASSIC$RAL
+    /// 1006"` and the DBCOLOR #996 an index only, named by its colour dictionary key "RAL_CLASSIC$RAL_1006". The read gives what
+    /// the R2004 record states (sample_AC1018.dwg): the RGB value, the name and the colour-book object.
+    #[test]
+    fn a_colour_book_record_names_the_colour_book_object_of_its_dictionary_key() {
+        use crate::objects::{BookColor, Dictionary};
+        let mut old = CadDocument::with_version(DxfVersion::AC1014);
+        let mut dictionary = Dictionary::new();
+        dictionary.handle = old.allocate_handle();
+        let mut book = BookColor::new();
+        book.handle = old.allocate_handle();
+        book.owner = dictionary.handle;
+        book.color = Color::Index(42);
+        dictionary.add_entry("RAL_CLASSIC$RAL_1006", book.handle);
+        let (book_handle, dictionary_handle) = (book.handle, dictionary.handle);
+        old.objects.insert(book_handle, ObjectType::BookColor(book));
+        old.objects.insert(dictionary_handle, ObjectType::Dictionary(dictionary));
+        let restorer = Restorer::new(&old).unwrap();
+        let mut properties = line(Color::Index(42), LineWeight::ByLayer);
+        let mut values = vec![
+            X::String("RTTcAl".into()),
+            X::Integer16(0xC02Au16 as i16),
+            X::Integer32(0xC2E2_9000u32 as i32),
+            X::String("RAL CLASSIC$RAL 1006".into()),
+        ];
+        assert!(restorer.apply(&mut properties, &mut values));
+        assert!(values.is_empty());
+        assert_eq!(properties.color, Color::from_rgb(226, 144, 0));
+        assert_eq!(properties.color_name.as_deref(), Some("RAL CLASSIC$RAL 1006"));
+        assert_eq!(properties.color_book_handle, Some(book_handle));
+        // Written again, the record is AutoCAD's: the RGB of the entity, not that of the index the object holds.
+        assert_eq!(groups(&properties, &old, DxfVersion::AC1014), vec![
+            X::String("RTTcAl".into()),
+            X::Integer16(0xC02Au16 as i16),
+            X::Integer32(0xC2E2_9000u32 as i32),
+            X::String("RAL CLASSIC$RAL 1006".into()),
+        ]);
+        // A name without an object of that name keeps the colour and the name only.
+        let mut other = line(Color::Index(42), LineWeight::ByLayer);
+        let mut values = vec![X::String("RTTcAl".into()), X::Integer16(0xC02Au16 as i16), X::Integer32(0xC2E2_9000u32 as i32), X::String("RAL CLASSIC$RAL 9999".into())];
+        assert!(restorer.apply(&mut other, &mut values));
+        assert_eq!((other.color, other.color_book_handle), (Color::from_rgb(226, 144, 0), None));
     }
 
     #[test]

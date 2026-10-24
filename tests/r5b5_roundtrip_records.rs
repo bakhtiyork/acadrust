@@ -228,10 +228,11 @@ fn a_named_colour_goes_into_the_record_and_back() {
     let circle = document.add_entity(EntityType::Circle(circle)).unwrap();
     let read = read(write(&document, DxfVersion::AC1015));
     let restored = properties(&read, circle);
-    // A DWG before R2004 holds a colour-book object with an index only (no names): the read gives the colour and its name, the
-    // way a DXF states a named colour (420 and 430).
+    // A DWG before R2004 holds a colour-book object with an index only (its names are its dictionary key): the read gives the
+    // colour, its name and the object of that name, as an R2004 record states them.
     assert_eq!(restored.color, Color::from_rgb(226, 144, 0));
     assert_eq!(restored.color_name.as_deref(), Some("RAL CLASSIC$RAL 1006"));
+    assert_eq!(restored.color_book_handle, Some(book_handle));
     assert!(restored.extended_data.is_empty());
     // Written again it states the same record.
     assert_eq!(read_again(&read, DxfVersion::AC1015).get_entity(circle).unwrap().common().color_name.as_deref(), Some("RAL CLASSIC$RAL 1006"));

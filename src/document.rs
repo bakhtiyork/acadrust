@@ -6232,6 +6232,9 @@ impl CadDocument {
             .objects
             .iter()
             .filter_map(|(handle, object)| match object {
+                // A colour-book record before R2004 holds an index only and no names (its names are its dictionary key): it
+                // tells nothing about the entity, whose colour and name come from its round-trip record (autocad_roundtrip).
+                ObjectType::BookColor(color) if color.book_name.is_empty() && color.color_name.is_empty() => None,
                 ObjectType::BookColor(color) => Some((
                     *handle,
                     color.color,
