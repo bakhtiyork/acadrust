@@ -70,10 +70,10 @@ pub(super) fn collect(doc: &CadDocument, table: &Table, out: &mut Vec<Value>) {
                 0
             }),
         ),
-        ("ValueFlag", integer(table.value_flags as i64)),
+        ("ValueFlag", integer(table.dxf_legacy.0.as_deref().map_or(table.value_flags, |legacy| legacy.value_flags) as i64)),
         // DWG consumes the legacy override blocks without assigning these
         // DXF-facing booleans.
-        ("OverrideFlag", json!(source.dxf && table.override_flag)),
+        ("OverrideFlag", json!(source.dxf && table.dxf_legacy.0.as_deref().map_or(table.override_flag, |legacy| legacy.override_flag))),
         (
             "OverrideBorderColor",
             json!(source.dxf && table.override_border_color),
@@ -169,9 +169,9 @@ pub(in super::super) fn content_fields(
         };
         styles.as_ref().map_or(Value::Null, |s| s[key].clone())
     };
-    // A table a DXF reader completed from its TABLECONTENT object is projected as the oracle's DXF reader sees it:
+    // A table a reader completed from its TABLECONTENT object (a DXF, or a DWG before R2010) is projected as the oracle sees it:
     // from the legacy entity only.
-    let legacy = table.dxf_legacy.0.as_deref().filter(|_| source.dxf);
+    let legacy = table.dxf_legacy.0.as_deref();
     let base_style = legacy.map_or(table.base_style.as_ref(), |l| l.base_style.as_ref());
     let base_style_type = legacy.map_or(table.base_style_type, |l| l.base_style_type);
     let table_columns = legacy.map_or(&table.columns, |l| &l.columns);

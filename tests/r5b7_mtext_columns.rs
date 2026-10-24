@@ -36,28 +36,6 @@ fn column_record(document: &CadDocument, handle: Handle) -> Option<Vec<XDataValu
     Some(record[begin..=end].to_vec())
 }
 
-fn the_record() -> Vec<XDataValue> {
-    vec![
-        XDataValue::String("ACAD_MTEXT_COLUMN_INFO_BEGIN".into()),
-        XDataValue::Integer16(75),
-        XDataValue::Integer16(2),
-        XDataValue::Integer16(79),
-        XDataValue::Integer16(0),
-        XDataValue::Integer16(76),
-        XDataValue::Integer16(1),
-        XDataValue::Integer16(78),
-        XDataValue::Integer16(0),
-        XDataValue::Integer16(48),
-        XDataValue::Real(15.741414244987482),
-        XDataValue::Integer16(49),
-        XDataValue::Real(110.22316703811953),
-        XDataValue::Integer16(50),
-        XDataValue::Integer16(1),
-        XDataValue::Real(0.0),
-        XDataValue::String("ACAD_MTEXT_COLUMN_INFO_END".into()),
-    ]
-}
-
 #[test]
 fn a_dwg_before_r2018_states_the_columns_in_the_record_as_autocad_does() {
     let (document, handle) = drawing();
@@ -66,9 +44,20 @@ fn a_dwg_before_r2018_states_the_columns_in_the_record_as_autocad_does() {
         older.version = version;
         let bytes = DwgWriter::write_to_vec(&older).unwrap_or_else(|error| panic!("{version:?}: {error}"));
         let read = DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
-        assert_eq!(column_record(&read, handle), Some(the_record()), "{version:?}");
+        // R5b-8: the reader takes the block into the entity (it held the columns as a record of the extended data before), so the
+        // block is not data of the entity and the columns are native, with the height 0 the older file states.
+        assert_eq!(column_record(&read, handle), None, "{version:?}");
         let Some(EntityType::MText(text)) = read.get_entity(handle) else { panic!("{version:?}: no MTEXT") };
-        assert_eq!(text.column_data.column_type, 0, "{version:?}: the columns are the record's");
+        assert_eq!(
+            text.column_data,
+            MTextColumnData { column_type: 2, column_count: 1, flow_reversed: false, auto_height: false, width: 15.741414244987482, gutter: 110.22316703811953, heights: vec![0.0] },
+            "{version:?}"
+        );
+        // ... and a file written from it states the block again, as the first one did
+        assert!(read.get_entity(handle).is_some());
+        let again = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&read).unwrap())).read().unwrap();
+        let Some(EntityType::MText(text_again)) = again.get_entity(handle) else { panic!("{version:?}: no MTEXT") };
+        assert_eq!(text_again.column_data, text.column_data, "{version:?}: written again");
     }
     // R2018 states them in the MTEXT record, with the height it was given, and no record
     let bytes = DwgWriter::write_to_vec(&document).unwrap();
@@ -86,7 +75,11 @@ fn a_dxf_before_r2018_states_the_columns_in_the_record_as_autocad_does() {
         older.version = version;
         let bytes = DxfWriter::new(&older).write_to_vec().unwrap();
         let read = DxfReader::from_reader(Cursor::new(bytes.clone())).unwrap().read().unwrap();
-        assert_eq!(column_record(&read, handle), Some(the_record()), "{version:?}");
+        // R5b-8: the DXF reader takes the block into the entity's columns as the DWG reader does (it stayed a record before)
+        assert_eq!(column_record(&read, handle), None, "{version:?}");
+        let Some(EntityType::MText(column_text)) = read.get_entity(handle) else { panic!("{version:?}: no MTEXT") };
+        assert_eq!(column_text.column_data.heights, vec![0.0], "{version:?}");
+        assert_eq!((column_text.column_data.column_type, column_text.column_data.column_count), (2, 1), "{version:?}");
         let text = String::from_utf8_lossy(&bytes).replace("\r\n", "\n");
         let column = text.find("ACAD_MTEXT_COLUMN_INFO_BEGIN").expect("record");
         assert_eq!(text.contains("MTEXTBEGIN"), spacing, "{version:?}");
@@ -106,11 +99,14 @@ fn an_mtext_without_columns_of_its_own_keeps_the_record_its_source_stated() {
     r2013.version = DxfVersion::AC1027;
     let bytes = DwgWriter::write_to_vec(&r2013).unwrap();
     let mut read = DwgReader::from_stream(Cursor::new(bytes)).read().unwrap();
-    assert_eq!(column_record(&read, handle), Some(the_record()));
-    // written again at another version before R2018: the record is the source's, as it was read
+    // R5b-8: the block was taken into the entity's columns when it was read (it stayed a record of the extended data before)
+    assert_eq!(column_record(&read, handle), None);
+    // written again at another version before R2018: the same record, stated from the columns
     for version in [DxfVersion::AC1024, DxfVersion::AC1015] {
         read.version = version;
         let again = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&read).unwrap())).read().unwrap();
-        assert_eq!(column_record(&again, handle), Some(the_record()), "{version:?}");
+        let Some(EntityType::MText(text)) = again.get_entity(handle) else { panic!("{version:?}: no MTEXT") };
+        assert_eq!((text.column_data.column_type, text.column_data.heights.clone()), (2, vec![0.0]), "{version:?}: stated again, read again");
+        assert_eq!(column_record(&again, handle), None, "{version:?}");
     }
 }

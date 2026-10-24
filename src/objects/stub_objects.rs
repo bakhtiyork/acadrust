@@ -337,10 +337,22 @@ impl VisualStyle {
     pub(crate) fn restore_post_2010_properties(
         &mut self,
         entries: &[crate::objects::XRecordEntry],
+        require_values: bool,
     ) -> bool {
         use crate::objects::XRecordValue;
         // A legacy (24 properties) or R2010 (28) style; one that holds all 58 has nothing to restore.
         if !matches!(self.properties.len(), 24 | 28) {
+            return false;
+        }
+        // AutoCAD's round-trip record of an R2010 file states the value and the flag of each property from the 28th on
+        // (sample_AC1024.dwg: 126 entries, `RTVSPost2010Prop28`, `RTVSPost2010PropOp28`, ...), as this writer's R2010 files do; a
+        // record that states no value (flags only, such as the R2004 form `RTVSPropertyOp0` ..) leaves a style of 28 properties
+        // as it is. `require_values` is the reader's call; the R2013 up-conversion (`upgrade_r2010_visual_styles`) takes the
+        // flags too.
+        if require_values
+            && self.properties.len() == 28
+            && !entries.iter().any(|entry| entry.value.as_string().is_some_and(|key| key.starts_with("RTVSPost2010Prop") && !key.starts_with("RTVSPost2010PropOp")))
+        {
             return false;
         }
         let mut properties = self.core_properties();
@@ -433,12 +445,14 @@ impl VisualStyle {
 pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDocument) {
     use crate::objects::{ObjectType, XRecordEntry, XRecordValue};
     use crate::types::DxfVersion;
-    // Every layout before R2010 keeps the properties after the 24th in the record, as AutoCAD's own R14, R2000 and R2004
-    // files do (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg: 252 entries in each style's record). (An R2010
-    // record could carry the properties after the 28th too, but a re-read R2010 style then stays at 28 properties: open, R5b-4.)
-    if document.version >= DxfVersion::AC1024 {
+    // Every layout before R2013 keeps the properties after the 24th (R2010: the 28th) in the record, as AutoCAD's own R14, R2000
+    // and R2004 files do (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg: 252 entries in each style's record). The R2010
+    // record of AutoCAD (sample_AC1024.dwg: 126 entries) holds the values and flags of the properties from the 28th on and
+    // not the flags of the first 63 (the object states its own 28).
+    if document.version >= DxfVersion::AC1027 {
         return;
     }
+    let r2010 = document.version == DxfVersion::AC1024;
     let mut styles: Vec<_> = document
         .objects
         .iter()
@@ -459,6 +473,10 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
     };
     for (handle, properties) in styles {
         let full = properties.len() >= 58;
+        // A style of an R2010 file, restored from its record, is written with the record it came with.
+        if r2010 && full && record_states_properties(document, handle, &properties) {
+            continue;
+        }
         let mut group = Vec::new();
         // The flags of the properties after the 28th, for the style that keeps them in its record.
         let carried_flags: std::collections::HashMap<usize, i16> = document
@@ -540,7 +558,7 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
             });
         }
         // One flag per property id; the ids after the 58 properties are on.
-        for index in 0..63 {
+        for index in (0..63).filter(|_| !r2010) {
             group.push(key(format!("RTVSPropertyOp{index}")));
             group.push(XRecordEntry {
                 code: 70,
@@ -552,6 +570,10 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
                         .unwrap_or(1),
                 ),
             });
+        }
+        // A style that states nothing in the record (an R2010 style of 28 properties) does not get one.
+        if group.is_empty() {
+            continue;
         }
         let record = document.ensure_xrecord(handle, "ACAD_XREC_ROUNDTRIP");
         let Some(ObjectType::XRecord(record)) = document.objects.get_mut(&record) else {
@@ -576,17 +598,42 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
     }
 }
 
+/// Whether the round-trip record of a style states the properties from the 28th on exactly as the style holds them: the style of
+/// an R2010 file that was restored from it.
+fn record_states_properties(document: &crate::document::CadDocument, handle: crate::types::Handle, properties: &[VisualStyleProperty]) -> bool {
+    use crate::objects::ObjectType;
+    let Some(entries) = document
+        .extension_dictionary_handle(handle)
+        .and_then(|dictionary| match document.objects.get(&dictionary) {
+            Some(ObjectType::Dictionary(entries)) => entries.get("ACAD_XREC_ROUNDTRIP"),
+            _ => None,
+        })
+        .and_then(|record| match document.objects.get(&record) {
+            Some(ObjectType::XRecord(record)) => Some(record.entries.as_slice()),
+            _ => None,
+        })
+    else {
+        return false;
+    };
+    let Some(ObjectType::VisualStyle(style)) = document.objects.get(&handle) else {
+        return false;
+    };
+    let mut probe = style.clone();
+    probe.properties.truncate(28);
+    probe.restore_post_2010_properties(entries, true) && probe.properties == properties
+}
+
 pub(crate) fn restore_visual_style_roundtrip(document: &mut crate::document::CadDocument) {
-    restore_visual_style_roundtrip_of(document, &[24]);
+    restore_visual_style_roundtrip_of(document, &[24, 28], true);
 }
 
 /// Give the R2010 styles (28 properties) the properties after the 28th that their round-trip record states, for a
 /// file of R2013 or later, whose record states all 58 itself.
 pub(crate) fn upgrade_r2010_visual_styles(document: &mut crate::document::CadDocument) {
-    restore_visual_style_roundtrip_of(document, &[28]);
+    restore_visual_style_roundtrip_of(document, &[28], false);
 }
 
-fn restore_visual_style_roundtrip_of(document: &mut crate::document::CadDocument, lengths: &[usize]) {
+fn restore_visual_style_roundtrip_of(document: &mut crate::document::CadDocument, lengths: &[usize], require_values: bool) {
     use crate::objects::ObjectType;
     let records: Vec<_> = document
         .objects
@@ -615,7 +662,7 @@ fn restore_visual_style_roundtrip_of(document: &mut crate::document::CadDocument
         .collect();
     for (handle, entries) in records {
         if let Some(ObjectType::VisualStyle(style)) = document.objects.get_mut(&handle) {
-            style.restore_post_2010_properties(&entries);
+            style.restore_post_2010_properties(&entries, require_values);
         }
     }
 }

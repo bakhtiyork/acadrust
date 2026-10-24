@@ -70,7 +70,9 @@ pub(super) fn properties(doc: &CadDocument, text: &MText) -> Vec<(&'static str, 
         });
     let default_columns = MTextColumnData::default();
     // The oracle reads the embedded object, but ignores the older 75/76/... layout.
-    let columns = if dxf.is_some_and(|s| !s.has_embedded_columns) {
+    // A DWG before R2018 states the columns in the block `ACAD_MTEXT_COLUMN_INFO` of the extended data, which the oracle keeps as
+    // data and reads no columns from (the native model holds the columns the reader took out of the block).
+    let columns = if dxf.is_some_and(|s| !s.has_embedded_columns) || dwg.is_some_and(|v| v < DxfVersion::AC1032) {
         &default_columns
     } else {
         &text.column_data

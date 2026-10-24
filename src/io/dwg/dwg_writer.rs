@@ -111,6 +111,11 @@ impl DwgWriter {
                 if owned.dwg_source_version != Some(owned.version) {
                     if owned.dwg_source_version.is_some() && !owned.classes.is_empty() {
                         prepare_dwg_source_classes(&mut owned);
+                    } else if owned.dwg_source_version.is_none() && owned.classes.source_classes().is_some_and(|classes| !classes.is_empty()) {
+                        // A DXF of another version states the classes of AutoCAD's drawing, which its DWG of any version keeps whole
+                        // (the list of a DWG source): the source's list, then the profile of the version.
+                        prepare_dxf_source_classes(&mut owned);
+                        prepare_dwg_source_classes(&mut owned);
                     } else {
                         prepare_legacy_classes(&mut owned);
                     }
@@ -1155,7 +1160,10 @@ fn reconciled_classes(
                 // history objects kept in the ACDS data, annotation context data and the like): a file of this
                 // version states them, and the count stays as it stated it.
             } else if counts_complete {
-                let declared_live_unused = source_is_valid && class.instance_count == 0 && !class.was_zombie;
+                // A class a DXF source states live (a CLASSES section is AutoCAD's own list of the drawing's classes) stays live in
+                // any version it is written at, whatever count it stated: AutoCAD's DWG of the drawing states none of them as a
+                // zombie either, and CELLSTYLEMAP stays live with 0 instances in its R2010 and later files (sample_AC1024.dwg).
+                let declared_live_unused = (source_is_valid || document.dxf_source_version.is_some()) && !class.was_zombie;
                 class.instance_count = 0;
                 // The classes of a DWG source keep the flag their file stated: AutoCAD's own saves of one drawing state none of
                 // them as a zombie, including the classes without a record (sample_AC1014.dwg to sample_AC1032.dwg).

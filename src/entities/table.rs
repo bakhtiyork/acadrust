@@ -1746,6 +1746,10 @@ pub(crate) struct TableLegacyView {
     pub rows: Vec<TableRow>,
     pub base_style: Option<CellStyle>,
     pub base_style_type: Option<i32>,
+    /// The fields of the legacy entity record that an R2010 record does not have (see [`Table::as_r2010_record`]).
+    pub value_flags: i32,
+    pub override_flag: bool,
+    pub legacy_style_override: Option<LegacyTableStyleOverride>,
 }
 
 fn visit_table_value_handles(value: &mut CellValue, visit: &mut impl FnMut(&mut Handle)) {
@@ -2584,6 +2588,41 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
     }
 }
 
+/// Whether the document was read from a DWG or a DXF of R2007 or earlier: its tables are the legacy flat form (their typed cells
+/// are in the TABLECONTENT objects AutoCAD keeps with them).
+fn legacy_source(document: &crate::document::CadDocument) -> bool {
+    document.dwg_source_version.or(document.dxf_source_version).is_some_and(|version| version < crate::types::DxfVersion::AC1024)
+}
+
+/// Complete the tables of a document read from a DWG or a DXF of R2007 or earlier from the TABLECONTENT and TABLEGEOMETRY objects AutoCAD
+/// keeps with them (a legacy table, whose entity record holds the flat cells only): the typed data goes onto the entity as an
+/// R2010 DWG holds it (`Table::with_roundtrip_content`, the up-conversion the writer applies to such a table for a later version),
+/// and the legacy cells stay as the view of the ACadSharp compatibility layer. A table the objects do not describe (none, another
+/// cell grid, a cell edited since) is left as read.
+pub(crate) fn restore_dwg_table_roundtrip(document: &mut crate::document::CadDocument) {
+    use crate::entities::EntityType;
+    if !legacy_source(document) {
+        return;
+    }
+    // One look at the entities; only the restored tables are touched (by handle), and they keep their verbatim record: the
+    // legacy record they were read from is what `unrestored_legacy` writes again while nothing changes.
+    let restored: Vec<(Handle, Table)> = document
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::Table(table) => table.with_roundtrip_content(document).map(|mut restored| {
+                restored.as_r2010_record();
+                (table.common.handle, restored)
+            }),
+            _ => None,
+        })
+        .collect();
+    for (handle, restored) in restored {
+        if let Some(EntityType::Table(table)) = document.get_entity_mut_keep_raw(handle) {
+            **table = restored;
+        }
+    }
+}
+
 /// The custom data item of a table cell that holds the checksum of `cell_text_checksum`.
 const CELL_CHECKSUM: &str = "ACAD_ROUNDTRIP_2008_CELL_CHECKSUM";
 
@@ -2627,7 +2666,7 @@ impl Table {
     /// state (the cell was edited after the file was saved): the legacy cells are then converted cell by cell.
     pub(crate) fn with_roundtrip_content(&self, document: &crate::document::CadDocument) -> Option<Table> {
         use crate::objects::{DataObjectData, ObjectType};
-        if self.dxf_legacy.0.is_some() || !document.dwg_source_version.is_some_and(|v| v < crate::types::DxfVersion::AC1024) {
+        if self.dxf_legacy.0.is_some() || !legacy_source(document) {
             return None;
         }
         let link = table_roundtrip(document, self.common.handle)?;
@@ -2739,6 +2778,66 @@ impl Table {
         Some(table)
     }
 
+    /// The table as the DWG before R2010 it was read from stated it, when it is a table `restore_dwg_table_roundtrip` completed from
+    /// its objects and nothing has changed since: the legacy cells, which are written again as they were read. `None` for any
+    /// other table (a table completed from a DXF, an edited one: the typed cells are converted back cell by cell).
+    pub(crate) fn unrestored_legacy(&self, document: &crate::document::CadDocument) -> Option<Table> {
+        let legacy = self.dxf_legacy.0.as_deref()?;
+        if !legacy_source(document) {
+            return None;
+        }
+        let mut base = self.clone();
+        base.dxf_legacy = DxfLegacyView(None);
+        base.columns = legacy.columns.clone();
+        base.rows = legacy.rows.clone();
+        base.base_style = legacy.base_style.clone();
+        base.base_style_type = legacy.base_style_type;
+        base.value_flags = legacy.value_flags;
+        base.override_flag = legacy.override_flag;
+        base.legacy_style_override = legacy.legacy_style_override.clone();
+        let mut again = base.with_roundtrip_content(document)?;
+        again.as_r2010_record();
+        (again == *self).then_some(base)
+    }
+
+    /// The fields of the legacy entity record that an R2010 record has no place for take the values an R2010 record reads with
+    /// (AutoCAD's own R2010 and later files of a table read back: the value flags 0, no table style override, no edge flags, no
+    /// block pointer or scale in the cell, none of the cell's content items for a cell a merge covers or a value that is unset).
+    /// A table completed from its objects holds them as an R2010 record does, and the legacy cells it was read with stay in
+    /// `dxf_legacy`.
+    pub(crate) fn as_r2010_record(&mut self) {
+        self.value_flags = 0;
+        self.override_flag = false;
+        self.legacy_style_override = None;
+        let covered: Vec<Vec<bool>> = (0..self.rows.len())
+            .map(|row| (0..self.rows[row].cells.len()).map(|column| self.is_merged_away(row, column)).collect())
+            .collect();
+        for (row_index, row) in self.rows.iter_mut().enumerate() {
+            for (column_index, cell) in row.cells.iter_mut().enumerate() {
+                cell.edge_flags = 0;
+                cell.value_handle = None;
+                cell.block_scale = 1.0;
+                cell.auto_fit = false;
+                if covered[row_index][column_index]
+                    && !cell.contents.is_empty()
+                    && cell.contents.iter().all(|content| content.is_empty_item() || content.is_empty_text())
+                {
+                    cell.contents.clear();
+                }
+                for content in &mut cell.contents {
+                    if content.content_type == TableCellContentType::Value && content.value.flags & 1 != 0 {
+                        content.value.data_size = 0;
+                        content.value.binary_value.clear();
+                        if content.value.flags == 7 {
+                            content.value.value_type = CellValueType::Unknown;
+                            content.value.raw_type_code = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether cell (`row`, `col`) lies inside a merged range of one row without being its first cell.
     pub fn is_merged_away(&self, row: usize, col: usize) -> bool {
         self.merged_ranges.iter().any(|range| {
@@ -2763,6 +2862,9 @@ impl Table {
             rows: self.rows.clone(),
             base_style: self.base_style.clone(),
             base_style_type: self.base_style_type,
+            value_flags: self.value_flags,
+            override_flag: self.override_flag,
+            legacy_style_override: self.legacy_style_override.clone(),
         })));
         self.name = content.name.clone();
         self.description = content.description.clone();

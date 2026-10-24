@@ -5344,8 +5344,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             return Ok(());
         }
         // Standard DXF MTEXT column layout. Rotation is emitted above before
-        // the first column marker because code 50 is reused for column heights.
-        if mtext.column_data.column_type != 0 {
+        // the first column marker because code 50 is reused for column heights. A version before R2018 states the columns the
+        // block can state in the block `ACAD_MTEXT_COLUMN_INFO` of the extended data alone, as AutoCAD's DXF does (the reference
+        // application reads group 48 of the standard layout as the linetype scale).
+        if mtext.column_data.column_type != 0
+            && !crate::io::dwg::autocad_roundtrip::states_columns_in_block(mtext, self.dxf_version)
+        {
             self.writer.write_i16(75, mtext.column_data.column_type)?;
             let manual_heights =
                 mtext.column_data.column_type == 2 && !mtext.column_data.auto_height;
@@ -12543,6 +12547,24 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     /// Write ACAD_TABLE entity
     fn write_acad_table(&mut self, table: &table::Table, owner: Handle) -> Result<()> {
+        // A table the reader completed from its TABLECONTENT object states the words of the legacy entity it was read with (a DWG
+        // before R2010 read back: the value flags and the table style override, which an R2010 record does not have).
+        let patched;
+        let table = match table.dxf_legacy.0.as_deref() {
+            Some(legacy)
+                if legacy.value_flags != table.value_flags
+                    || legacy.override_flag != table.override_flag
+                    || legacy.legacy_style_override != table.legacy_style_override =>
+            {
+                let mut view = table.clone();
+                view.value_flags = legacy.value_flags;
+                view.override_flag = legacy.override_flag;
+                view.legacy_style_override = legacy.legacy_style_override.clone();
+                patched = view;
+                &patched
+            }
+            _ => table,
+        };
         self.writer.write_entity_type("ACAD_TABLE")?;
         self.write_common_entity_data(&table.common, owner)?;
         self.writer.write_subclass("AcDbBlockReference")?;
@@ -12626,6 +12648,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                         let mut view = cell.clone();
                         view.style = legacy.style.clone();
                         view.source_style_type = legacy.source_style_type;
+                        view.edge_flags = legacy.edge_flags;
+                        view.auto_fit = legacy.auto_fit;
+                        view.value_handle = legacy.value_handle;
+                        view.block_scale = legacy.block_scale;
                         // The items too, while the cell still shows what the legacy entity showed (the legacy
                         // block cell has a block pointer and a value of its own; the completed cell has the
                         // pointer only).
@@ -12634,7 +12660,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
                                 .first()
                                 .map(|content| (content.content_type, content.value.display().to_string()))
                         };
-                        if shown(cell) == shown(legacy) {
+                        // (A cell a merge covers has no items in the completed table, as in an R2010 record; the legacy entity
+                        // stated its empty item.)
+                        if shown(cell) == shown(legacy) || cell.contents.is_empty() {
                             view.contents = legacy.contents.clone();
                         }
                         self.write_table_cell(&view, anchor_range, merged_range.is_some())?;

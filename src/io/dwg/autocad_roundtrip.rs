@@ -532,6 +532,44 @@ pub(crate) fn with_mtext_blocks(xdata: &ExtendedData, blocks: Vec<X>, applicatio
     Some(result)
 }
 
+/// `xdata` with the `ACAD_MTEXT_COLUMN_INFO` block of the columns of `text` at the front of its `ACAD` record (AutoCAD's files state it
+/// before the other blocks of the record: sample_AC1015.dwg), and the other blocks of the record as they are; `None` when the
+/// columns are not stated (`column_block` is empty) or the application has a block that was not decoded into a record. The ACadSharp
+/// view of an MTEXT whose columns the readers took out of that block.
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn with_column_block(xdata: &ExtendedData, text: &crate::entities::MText, application: Option<u64>) -> Option<ExtendedData> {
+    let block = column_block(&text.column_data);
+    if block.is_empty() {
+        return None;
+    }
+    let mut result = xdata.clone();
+    let existing = result
+        .records()
+        .iter()
+        .position(|record| record.application_name.eq_ignore_ascii_case(APPLICATION));
+    match existing {
+        Some(index) => {
+            let values = &mut result.records_mut()[index].values;
+            if let Some(range) = block_range(values, COLUMN_BEGIN, COLUMN_END) {
+                values.drain(range);
+            }
+            values.splice(0..0, block);
+        }
+        None => {
+            if application.is_some_and(|application| result.raw_dwg_eed.iter().any(|(app, _)| *app == application)) {
+                return None;
+            }
+            let mut record = ExtendedDataRecord::new(APPLICATION);
+            record.values = block;
+            result.add_record(record);
+        }
+    }
+    if let Some(application) = application {
+        result.raw_dwg_eed.retain(|(app, _)| *app != application);
+    }
+    Some(result)
+}
+
 /// Remove the MTEXT blocks from the `ACAD` data of `properties` (the record, when nothing else is left, and the verbatim
 /// block); returns the line spacing the `MTEXTBEGIN` block stated.
 pub(crate) fn take_mtext_blocks(properties: &mut EntityProperties, application: Option<u64>) -> (bool, Option<(i16, f64)>) {
@@ -570,6 +608,106 @@ pub(crate) fn take_mtext_blocks(properties: &mut EntityProperties, application: 
         }
     }
     (had_spacing, spacing)
+}
+
+/// The columns an `ACAD_MTEXT_COLUMN_INFO` block states, in the exact form `column_block` writes (one dynamic column with a height
+/// of its own: `75 2`, `79 0`, `76 1`, `78 <reversed>`, `48 <width>`, `49 <gutter>`, `50 1`, the height). The height is as old as
+/// the file: AutoCAD's R2018 record states the height of the text it laid out as a negative number, its older files 0 (see
+/// `column_block`). `None` for any other shape.
+fn parse_column_block(values: &[X]) -> Option<crate::entities::MTextColumnData> {
+    let [X::String(begin), X::Integer16(75), X::Integer16(2), X::Integer16(79), X::Integer16(0), X::Integer16(76), X::Integer16(1), X::Integer16(78), X::Integer16(flow), X::Integer16(48), X::Real(width), X::Integer16(49), X::Real(gutter), X::Integer16(50), X::Integer16(1), X::Real(height), X::String(end)] =
+        values
+    else {
+        return None;
+    };
+    if begin != COLUMN_BEGIN || end != COLUMN_END || !matches!(flow, 0 | 1) {
+        return None;
+    }
+    Some(crate::entities::MTextColumnData {
+        column_type: 2,
+        column_count: 1,
+        flow_reversed: *flow == 1,
+        auto_height: false,
+        width: *width,
+        gutter: *gutter,
+        heights: vec![*height],
+    })
+}
+
+/// Take the `ACAD_MTEXT_COLUMN_INFO` block out of an entity that holds the columns it states, leaving the entity's columns as
+/// they are. Whether the block was taken.
+pub(crate) fn drop_stated_column_block(text: &mut crate::entities::MText, application: Option<u64>) -> bool {
+    if !column_block_states_columns(text) {
+        return false;
+    }
+    take_column_block_if(&mut text.common, application, |_| true).is_some()
+}
+
+/// Whether the `ACAD` data of `properties` holds an `ACAD_MTEXT_COLUMN_INFO` block.
+pub(crate) fn has_column_block(properties: &EntityProperties) -> bool {
+    properties
+        .extended_data
+        .records()
+        .iter()
+        .any(|record| record.application_name.eq_ignore_ascii_case(APPLICATION) && block_range(&record.values, COLUMN_BEGIN, COLUMN_END).is_some())
+}
+
+/// Whether a file of `version` states the columns of `text` in the `ACAD_MTEXT_COLUMN_INFO` block (the form AutoCAD's own DXF and
+/// DWG of those versions use: sample_AC1027_ascii.dxf states the column type 0 in the MTEXT's own group 75 and the columns in the
+/// block) and not in the group codes of the entity.
+pub(crate) fn states_columns_in_block(text: &crate::entities::MText, version: DxfVersion) -> bool {
+    states_mtext_columns(version) && !column_block(&text.column_data).is_empty()
+}
+
+/// Whether the `ACAD_MTEXT_COLUMN_INFO` block of the entity is the one `column_block` makes from the columns the entity already
+/// holds (a DXF the fork wrote states the columns in the entity's own group codes and in the block).
+pub(crate) fn column_block_states_columns(text: &crate::entities::MText) -> bool {
+    let wanted = column_block(&text.column_data);
+    !wanted.is_empty()
+        && text
+            .common
+            .extended_data
+            .records()
+            .iter()
+            .any(|record| record.application_name.eq_ignore_ascii_case(APPLICATION) && block_range(&record.values, COLUMN_BEGIN, COLUMN_END).is_some_and(|range| record.values[range] == wanted[..]))
+}
+
+/// Take the `ACAD_MTEXT_COLUMN_INFO` block out of the `ACAD` data of `properties` when it is exactly the form `column_block`
+/// writes, and return the columns it states: the native model holds the columns themselves (R2018 states them in the MTEXT
+/// record), and the writers and the ACadSharp view state the block again for the versions before R2018. Another shape of block,
+/// or one followed by `ACAD_MTEXT_COLUMNS` blocks (the MTEXT entities of further columns), stays data of the file.
+pub(crate) fn take_column_block(properties: &mut EntityProperties, application: Option<u64>) -> Option<crate::entities::MTextColumnData> {
+    take_column_block_if(properties, application, |_| true)
+}
+
+/// [`take_column_block`] when `accept` approves the columns the block states.
+fn take_column_block_if(
+    properties: &mut EntityProperties,
+    application: Option<u64>,
+    accept: impl FnOnce(&crate::entities::MTextColumnData) -> bool,
+) -> Option<crate::entities::MTextColumnData> {
+    let index = properties
+        .extended_data
+        .records()
+        .iter()
+        .position(|record| record.application_name.eq_ignore_ascii_case(APPLICATION))?;
+    let values = &mut properties.extended_data.records_mut()[index].values;
+    if values.iter().any(|value| matches!(value, X::String(text) if text == "ACAD_MTEXT_COLUMNS_BEGIN")) {
+        return None;
+    }
+    let range = block_range(values, COLUMN_BEGIN, COLUMN_END)?;
+    let columns = parse_column_block(&values[range.clone()])?;
+    if !accept(&columns) {
+        return None;
+    }
+    values.drain(range);
+    if properties.extended_data.records()[index].values.is_empty() {
+        properties.extended_data.remove_record_ignore_case(APPLICATION);
+    }
+    if let Some(application) = application {
+        properties.extended_data.raw_dwg_eed.retain(|(app, _)| *app != application);
+    }
+    Some(columns)
 }
 
 /// Restore the values of the round-trip records of every entity of a document read from a DXF (a DWG reader does it

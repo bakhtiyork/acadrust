@@ -3847,7 +3847,8 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn write_table(&mut self, e: &table::Table) {
         // A table of a DWG before R2010 goes into an R2010 record with the typed cells of its round-trip objects.
-        let restored = if self.version.r2010_plus() { e.with_roundtrip_content(self.document) } else { None };
+        // A table the reader completed from those objects goes back as the legacy cells it was read with, while nothing changed.
+        let restored = if self.version.r2010_plus() { e.with_roundtrip_content(self.document) } else { e.unrestored_legacy(self.document) };
         let e = restored.as_ref().unwrap_or(e);
         let type_code = self.class_type_code("ACAD_TABLE", common::OBJ_TABLE);
         self.entity_preamble(type_code, &e.common);
