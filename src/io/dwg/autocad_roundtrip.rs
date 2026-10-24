@@ -380,6 +380,8 @@ const MTEXT_BEGIN: &str = "MTEXTBEGIN";
 const MTEXT_END: &str = "MTEXTEND";
 const BACKGROUND_BEGIN: &str = "ACAD_MTEXT_BBRT";
 const BACKGROUND_END: &str = "ACAD_MTEXT_BERT";
+const COLUMN_BEGIN: &str = "ACAD_MTEXT_COLUMN_INFO_BEGIN";
+const COLUMN_END: &str = "ACAD_MTEXT_COLUMN_INFO_END";
 
 /// Whether a drawing of `version` holds the MTEXT line spacing in a record of the `ACAD` data (every MTEXT of AutoCAD's R14
 /// and R2000 files: sample_AC1014.dwg, sample_AC1015.dwg; its R2004 file has none).
@@ -398,12 +400,57 @@ fn packed_color(color: Color) -> i32 {
     }) as i32
 }
 
-/// The blocks of the `ACAD` data that a drawing before R2004 holds for an MTEXT, as AutoCAD's R14 and R2000 files state
-/// them (sample_AC1014.dwg, sample_AC1015.dwg): `MTEXTBEGIN 73 <line spacing style> 44 <line spacing factor> 74 0 MTEXTEND`
-/// for every MTEXT, and for one with a background fill `ACAD_MTEXT_BBRT 91 <fill flags> 46 <scale> 64 <colour> 65 "" 66 ""
-/// 442 <transparency> ACAD_MTEXT_BERT` (the fields those versions predate).
+/// Whether a drawing of `version` holds the columns of an MTEXT in a record of the `ACAD` data: R2018 states them in the MTEXT
+/// record, every version before it in `ACAD_MTEXT_COLUMN_INFO` (sample_AC1015.dwg to sample_AC1027.dwg, and their DXF twins).
+pub(crate) fn states_mtext_columns(version: DxfVersion) -> bool {
+    version < DxfVersion::AC1032
+}
+
+/// The `ACAD_MTEXT_COLUMN_INFO` block of AutoCAD's files before R2018 for dynamic columns with heights of their own (the
+/// four MTEXT of sample_AC1015.dwg to sample_AC1027.dwg that sample_AC1032.dwg states as column type 2): `75` column type, `79`
+/// auto height, `76` the number of columns, `78` flow reversed, `48` column width, `49` gutter, `50` the number of heights and
+/// the heights. A height AutoCAD's R2018 record states as a negative number (-2.94, -23.73, -3, -204.35 for the four MTEXT: the
+/// height of the text it laid out) is 0 in all of the older files; the corpus files that state a height of their own state it
+/// positive (ezdxf columns_R2007.dxf: 23.85, 52.56). One column only: in that file every record of two or more columns, of
+/// static columns or of automatic heights (11 of 24) is followed by `ACAD_MTEXT_COLUMNS_BEGIN 47 <n> <handles>
+/// ACAD_MTEXT_COLUMNS_END`, the MTEXT entities that hold the text of the other columns, which a drawing of R2018 does not have
+/// and the writer does not make: such columns are not stated.
+fn column_block(columns: &crate::entities::MTextColumnData) -> Vec<X> {
+    if columns.column_type != 2 || columns.auto_height || columns.heights.len() != 1 {
+        return Vec::new();
+    }
+    let mut values = vec![
+        X::String(COLUMN_BEGIN.into()),
+        X::Integer16(75),
+        X::Integer16(columns.column_type),
+        X::Integer16(79),
+        X::Integer16(0),
+        X::Integer16(76),
+        X::Integer16(columns.heights.len() as i16),
+        X::Integer16(78),
+        X::Integer16(columns.flow_reversed as i16),
+        X::Integer16(48),
+        X::Real(columns.width),
+        X::Integer16(49),
+        X::Real(columns.gutter),
+        X::Integer16(50),
+        X::Integer16(columns.heights.len() as i16),
+    ];
+    values.extend(columns.heights.iter().map(|height| X::Real(if *height < 0.0 { 0.0 } else { *height })));
+    values.push(X::String(COLUMN_END.into()));
+    values
+}
+
+/// The blocks of the `ACAD` data that a drawing before R2018 holds for an MTEXT, as AutoCAD's files state them. Before R2018 the
+/// columns (`ACAD_MTEXT_COLUMN_INFO`, `column_block`); before R2004 (sample_AC1014.dwg, sample_AC1015.dwg) also
+/// `MTEXTBEGIN 73 <line spacing style> 44 <line spacing factor> 74 0 MTEXTEND` for every MTEXT, and for one with a background
+/// fill `ACAD_MTEXT_BBRT 91 <fill flags> 46 <scale> 64 <colour> 65 "" 66 "" 442 <transparency> ACAD_MTEXT_BERT` (the fields those
+/// versions predate), in this order (the column block first in sample_AC1015.dwg).
 pub(crate) fn mtext_blocks(text: &crate::entities::MText, version: DxfVersion) -> Vec<X> {
     let mut values = Vec::new();
+    if states_mtext_columns(version) {
+        values.extend(column_block(&text.column_data));
+    }
     if !states_mtext_spacing(version) {
         return values;
     }
@@ -458,7 +505,12 @@ pub(crate) fn with_mtext_blocks(xdata: &ExtendedData, blocks: Vec<X>, applicatio
     match existing {
         Some(index) => {
             let values = &mut result.records_mut()[index].values;
-            for (begin, end) in [(MTEXT_BEGIN, MTEXT_END), (BACKGROUND_BEGIN, BACKGROUND_END)] {
+            // The columns of a record a source states stay unless the MTEXT states columns of its own.
+            let states_columns = blocks.iter().any(|value| matches!(value, X::String(text) if text == COLUMN_BEGIN));
+            for (begin, end) in [(MTEXT_BEGIN, MTEXT_END), (BACKGROUND_BEGIN, BACKGROUND_END), (COLUMN_BEGIN, COLUMN_END)] {
+                if begin == COLUMN_BEGIN && !states_columns {
+                    continue;
+                }
                 if let Some(range) = block_range(values, begin, end) {
                     values.drain(range);
                 }
@@ -548,95 +600,36 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
     }
 }
 
-/// A document as a DXF of `version` states it: the entities get the records of the values their version cannot hold in their
-/// extended data, as the DWG writer states them (the DXF writer states the nearest index for the colour and no line weight or
-/// material before the versions that have them).
+/// A document as a DXF of `version` states it: the MTEXT blocks of the versions that hold them. The `RT*` records are not
+/// stated: AutoCAD adds them when it saves a DWG for an older release, and its DXF files of R2000 and R2004 hold none
+/// (sample_AC1015_ascii.dxf: the point #29A states colour 230 and nothing else; neither that file nor
+/// sample_AC1018_ascii.dxf has `RTTcAl`, `RTLwPs` or `RTMaterial`, while the R2000 file states `MTEXTBEGIN` in all 36 MTEXT,
+/// as its DWG does), so a DXF carries the nearest index for the colour and no line weight or material where its version
+/// has no group for them. The DXF reader still restores the values from a file that has the records (`restore_document`).
 pub(crate) fn prepare_for_dxf(document: &mut std::borrow::Cow<'_, CadDocument>, version: DxfVersion) {
     use crate::entities::EntityType;
-    if !(applies(version) || states_mtext_spacing(version)) {
+    if !states_mtext_columns(version) {
         return;
     }
     let application = document.app_ids.get(APPLICATION).map(|app| app.handle.value());
-    let mut changes: Vec<(crate::types::Handle, Option<ExtendedData>, Vec<(usize, ExtendedData)>)> = Vec::new();
+    let mut changes: Vec<(crate::types::Handle, ExtendedData)> = Vec::new();
     for entity in document.entities() {
-        let mut data = None;
-        let values = groups(entity.common(), document, version);
-        let mut current = entity.common().extended_data.clone();
-        let mut touched = false;
-        if !values.is_empty() {
-            if let Some(merged) = with_groups(&current, values, application) {
-                current = merged;
-                touched = true;
-            }
-        }
         if let EntityType::MText(text) = entity {
             let blocks = mtext_blocks(text, version);
             if !blocks.is_empty() {
-                if let Some(merged) = with_mtext_blocks(&current, blocks, application) {
-                    current = merged;
-                    touched = true;
-                }
-            }
-        }
-        if touched {
-            data = Some(current);
-        }
-        let mut attributes = Vec::new();
-        if let EntityType::Insert(insert) = entity {
-            for (index, attribute) in insert.attributes.iter().enumerate() {
-                let values = groups(&attribute.common, document, version);
-                if !values.is_empty() {
-                    if let Some(merged) = with_groups(&attribute.common.extended_data, values, application) {
-                        attributes.push((index, merged));
-                    }
-                }
-            }
-        }
-        if data.is_some() || !attributes.is_empty() {
-            changes.push((entity.common().handle, data, attributes));
-        }
-    }
-    // The BLOCK and ENDBLK markers: in the block record when the source kept them there, else the entities of the document.
-    let mut markers: Vec<(Handle, bool, Handle, ExtendedData)> = Vec::new();
-    for record in document.block_records.iter() {
-        for (begin, retained, handle) in [
-            (true, record.block_entity_common.as_deref(), record.block_entity_handle),
-            (false, record.block_end_common.as_deref(), record.block_end_handle),
-        ] {
-            let common = retained.or_else(|| document.get_entity(handle).map(|entity| entity.common()));
-            let Some(common) = common else { continue };
-            let values = groups(common, document, version);
-            if !values.is_empty() {
-                if let Some(merged) = with_groups(&common.extended_data, values, application) {
-                    markers.push((record.handle, begin, handle, merged));
+                if let Some(merged) = with_mtext_blocks(&text.common.extended_data, blocks, application) {
+                    changes.push((text.common.handle, merged));
                 }
             }
         }
     }
-    if changes.is_empty() && markers.is_empty() {
+    if changes.is_empty() {
         return;
     }
     let document = document.to_mut();
-    for (record_handle, begin, entity_handle, data) in markers {
-        let retained = document.block_records.iter_mut().find(|record| record.handle == record_handle).and_then(|record| {
-            if begin { record.block_entity_common.as_deref_mut() } else { record.block_end_common.as_deref_mut() }
-        });
-        if let Some(common) = retained {
-            common.extended_data = data;
-        } else if let Some(entity) = document.get_entity_mut(entity_handle) {
-            entity.common_mut().extended_data = data;
-        }
-    }
-    for (handle, data, attributes) in changes {
+    for (handle, data) in changes {
         if let Some(entity) = document.get_entity_mut(handle) {
-            if let Some(data) = data {
-                entity.common_mut().extended_data = data;
-            }
-            if let EntityType::Insert(insert) = entity {
-                for (index, data) in attributes {
-                    insert.attributes[index].common.extended_data = data;
-                }
-            }
+            entity.common_mut().extended_data = data;
         }
     }
 }
@@ -800,6 +793,100 @@ mod tests {
         let mut values = vec![X::String("RTTcAl".into()), X::Integer16(0xC02Au16 as i16), X::Integer32(0xC2E2_9000u32 as i32), X::String("RAL CLASSIC$RAL 9999".into())];
         assert!(restorer.apply(&mut other, &mut values));
         assert_eq!((other.color, other.color_book_handle), (Color::from_rgb(226, 144, 0), None));
+    }
+
+    /// sample_AC1015.dwg to sample_AC1027.dwg state the columns of the MTEXT #3EC (dynamic, width 15.741414244987482, gutter
+    /// 110.22316703811953) as `ACAD_MTEXT_COLUMN_INFO` with the height 0; sample_AC1032.dwg states the height -2.9442928603910867.
+    #[test]
+    fn dynamic_columns_are_stated_in_the_record_before_r2018_with_the_heights_autocad_states() {
+        use crate::entities::{MText, MTextColumnData};
+        let mut text = MText::new();
+        text.column_data = MTextColumnData {
+            column_type: 2,
+            column_count: 0,
+            flow_reversed: false,
+            auto_height: false,
+            width: 15.741414244987482,
+            gutter: 110.22316703811953,
+            heights: vec![-2.9442928603910867],
+        };
+        let expected = vec![
+            X::String("ACAD_MTEXT_COLUMN_INFO_BEGIN".into()),
+            X::Integer16(75),
+            X::Integer16(2),
+            X::Integer16(79),
+            X::Integer16(0),
+            X::Integer16(76),
+            X::Integer16(1),
+            X::Integer16(78),
+            X::Integer16(0),
+            X::Integer16(48),
+            X::Real(15.741414244987482),
+            X::Integer16(49),
+            X::Real(110.22316703811953),
+            X::Integer16(50),
+            X::Integer16(1),
+            X::Real(0.0),
+            X::String("ACAD_MTEXT_COLUMN_INFO_END".into()),
+        ];
+        for version in [DxfVersion::AC1021, DxfVersion::AC1024, DxfVersion::AC1027] {
+            assert_eq!(mtext_blocks(&text, version), expected, "{version:?}");
+        }
+        // R2000 states the line spacing after it; R2018 states the columns in the MTEXT record itself
+        let r2000 = mtext_blocks(&text, DxfVersion::AC1015);
+        assert_eq!(r2000[..expected.len()], expected[..]);
+        assert_eq!(r2000[expected.len()], X::String("MTEXTBEGIN".into()));
+        assert!(mtext_blocks(&text, DxfVersion::AC1032).is_empty());
+        // a height of its own is kept; the flow direction is the record's 78
+        text.column_data.heights = vec![52.563114843856];
+        text.column_data.flow_reversed = true;
+        let own = mtext_blocks(&text, DxfVersion::AC1027);
+        assert_eq!(&own[5..9], &[X::Integer16(76), X::Integer16(1), X::Integer16(78), X::Integer16(1)]);
+        assert_eq!(&own[13..16], &[X::Integer16(50), X::Integer16(1), X::Real(52.563114843856)]);
+        // two columns need the MTEXT of the second column (`ACAD_MTEXT_COLUMNS`, columns_R2007.dxf), which the drawing does not
+        // have: no record
+        text.column_data.heights = vec![11.069645635849, 0.0];
+        assert!(mtext_blocks(&text, DxfVersion::AC1027).is_empty());
+        assert_eq!(mtext_blocks(&text, DxfVersion::AC1015)[0], X::String("MTEXTBEGIN".into()));
+        text.column_data.heights = vec![0.0];
+        // static columns, automatic heights and an MTEXT without columns state no record either
+        text.column_data.column_type = 1;
+        assert!(mtext_blocks(&text, DxfVersion::AC1027).is_empty());
+        text.column_data.column_type = 2;
+        text.column_data.auto_height = true;
+        assert!(mtext_blocks(&text, DxfVersion::AC1027).is_empty());
+        assert!(mtext_blocks(&MText::new(), DxfVersion::AC1027).is_empty());
+    }
+
+    /// The columns of a record a source states stay when the MTEXT has none of its own, and are replaced when it has.
+    #[test]
+    fn a_column_record_of_the_source_is_replaced_only_by_columns_of_the_mtext() {
+        use crate::entities::{MText, MTextColumnData};
+        let old = vec![
+            X::String("ACAD_MTEXT_COLUMN_INFO_BEGIN".into()),
+            X::Integer16(75),
+            X::Integer16(2),
+            X::String("ACAD_MTEXT_COLUMN_INFO_END".into()),
+        ];
+        let mut xdata = ExtendedData::new();
+        let mut record = ExtendedDataRecord::new("ACAD");
+        record.values = [X::String("PLUGIN".into())].into_iter().chain(old.clone()).collect();
+        xdata.add_record(record);
+        // an MTEXT of R2000 without columns of its own: the line spacing is stated, the record stays
+        let plain = MText::new();
+        let blocks = mtext_blocks(&plain, DxfVersion::AC1015);
+        let kept = with_mtext_blocks(&xdata, blocks, None).unwrap();
+        assert!(kept.records()[0].values.starts_with(&[X::String("PLUGIN".into())]));
+        assert!(kept.records()[0].values.windows(old.len()).any(|window| window == old.as_slice()));
+        // an MTEXT with columns: the record is the MTEXT's, the other data stays
+        let mut columned = MText::new();
+        columned.column_data = MTextColumnData { column_type: 2, column_count: 0, flow_reversed: false, auto_height: false, width: 5.0, gutter: 1.0, heights: vec![0.0] };
+        let replaced = with_mtext_blocks(&xdata, mtext_blocks(&columned, DxfVersion::AC1027), None).unwrap();
+        let values = &replaced.records()[0].values;
+        assert_eq!(values[0], X::String("PLUGIN".into()));
+        assert!(!values.windows(old.len()).any(|window| window == old.as_slice()));
+        assert_eq!(values.iter().filter(|value| matches!(value, X::String(text) if text == "ACAD_MTEXT_COLUMN_INFO_BEGIN")).count(), 1);
+        assert!(values.contains(&X::Real(5.0)));
     }
 
     #[test]

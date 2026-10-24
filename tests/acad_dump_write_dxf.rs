@@ -62,6 +62,28 @@ fn write_dxf_writes_ascii_and_binary_files_that_read_back() {
 }
 
 #[test]
+fn write_dxf_writes_the_version_it_is_given() {
+    let input = source();
+    for (name, version, header) in [("v2000.dxf", "AC1015", "AC1015"), ("v2004.dxf", "AC1018", "AC1018"), ("v14.dxf", "AC1014", "AC1014")] {
+        let output = scratch(name);
+        let _ = std::fs::remove_file(&output);
+        let result = run(&["write-dxf".as_ref(), input.as_os_str(), output.as_os_str(), "--version".as_ref(), version.as_ref()]);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+        let text = String::from_utf8_lossy(&std::fs::read(&output).unwrap()).replace("\r\n", "\n");
+        assert!(text.contains(&format!("$ACADVER\n  1\n{header}\n")), "{version}");
+        assert_eq!(lines_in(&output), 1, "{version}");
+    }
+    // an unknown version or a missing one is a usage error and writes nothing
+    let output = scratch("never-version.dxf");
+    let _ = std::fs::remove_file(&output);
+    for args in [["--version", "ACXXXX"], ["--version", "2000"]] {
+        let result = run(&["write-dxf".as_ref(), input.as_os_str(), output.as_os_str(), args[0].as_ref(), args[1].as_ref()]);
+        assert_eq!(result.status.code(), Some(2), "{args:?}");
+    }
+    assert!(!output.exists());
+}
+
+#[test]
 fn write_dxf_reports_read_failures_and_usage_errors_with_distinct_exit_codes() {
     let garbage = scratch("missing.dxf");
     let _ = std::fs::remove_file(&garbage);

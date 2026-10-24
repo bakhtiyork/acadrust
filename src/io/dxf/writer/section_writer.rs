@@ -2821,6 +2821,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         Ok(())
     }
 
+    /// Whether a drawing before R2000 holds the description or the preview image of a block record in the record `application` of
+    /// its extended data (`autocad_conversions`), which then stands for the group the DXF of R2000 and later has.
+    fn states_block_content_in_record(&self, document: &CadDocument, block: Handle, application: &str) -> bool {
+        self.dxf_version < DxfVersion::AC1015
+            && document.object_xdata.get(&block).is_some_and(|data| data.get_record(application).is_some())
+    }
+
     fn write_block_record_entry(
         &mut self,
         block_record: &BlockRecord,
@@ -2846,8 +2853,11 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             }
             self.writer.write_string(102, "}")?;
         }
-        for chunk in block_record.preview_data.chunks(127) {
-            self.writer.write_binary(310, chunk)?;
+        // Before R2000 the image is the record `CONTENTBLOCKICON` of the block record's extended data, where the drawing states one.
+        if !self.states_block_content_in_record(document, block_record.handle, "CONTENTBLOCKICON") {
+            for chunk in block_record.preview_data.chunks(127) {
+                self.writer.write_binary(310, chunk)?;
+            }
         }
         if self.dxf_version >= DxfVersion::AC1021 {
             // A record read from DXF writes only the groups its source had (or whose value changed): an
@@ -3129,7 +3139,12 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             || document
                 .dwg_source_version
                 .is_some_and(|version| version >= DxfVersion::AC1015);
-        if (!block_record.description.is_empty() || description_present) && !self.r12 {
+        // Before R2000 the description is the record `CONTENTBLOCKDESCRIPTION` of the block record's extended data, where the
+        // drawing states one.
+        if (!block_record.description.is_empty() || description_present)
+            && !self.r12
+            && !self.states_block_content_in_record(document, block_record.handle, "CONTENTBLOCKDESCRIPTION")
+        {
             self.writer.write_string(4, &block_record.description)?;
         }
         self.write_xdata(&begin_common.extended_data)?;

@@ -5,30 +5,47 @@ use acadrust::types::DxfVersion;
 use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
-/// `write-dxf <in.dwg|in.dxf> <out.dxf> [--binary]`: failsafe read as `dump` does, then write the document back
-/// in its own version. Exit 0 on success, 1 on a read/write failure (stderr `read failed: ...`/`write failed: ...`,
-/// the lines `Tools/roundtrip-report.sh` classifies), 2 on a usage error.
+/// `write-dxf <in.dwg|in.dxf> <out.dxf> [--binary] [--version ACxxxx]`: failsafe read as `dump` does, then write the
+/// document back in its own version (or, with `--version`, as a DXF of that version, as `write-dwg` does). Exit 0 on
+/// success, 1 on a read/write failure (stderr `read failed: ...`/`write failed: ...`, the lines
+/// `Tools/roundtrip-report.sh` classifies), 2 on a usage error.
 fn write_dxf(args: &[std::ffi::OsString]) -> i32 {
+    let usage = || {
+        eprintln!("usage: acad-dump write-dxf <in.dwg|in.dxf> <out.dxf> [--binary] [--version ACxxxx]");
+        2
+    };
     let mut binary = false;
+    let mut version = None;
     let mut paths = Vec::new();
-    for arg in &args[2..] {
+    let mut i = 2;
+    while i < args.len() {
+        let arg = &args[i];
         if arg == "--binary" {
             binary = true;
+        } else if arg == "--version" && i + 1 < args.len() {
+            i += 1;
+            match args[i].to_str().and_then(DxfVersion::parse) {
+                Some(parsed) if args[i].to_str().is_some_and(|name| name.starts_with("AC")) => version = Some(parsed),
+                _ => return usage(),
+            }
         } else {
             paths.push(arg);
         }
+        i += 1;
     }
     if paths.len() != 2 {
-        eprintln!("usage: acad-dump write-dxf <in.dwg|in.dxf> <out.dxf> [--binary]");
-        return 2;
+        return usage();
     }
-    let document = match read_document_file(Path::new(paths[0])) {
+    let mut document = match read_document_file(Path::new(paths[0])) {
         Ok(document) => document,
         Err(error) => {
             eprintln!("read failed: {error}");
             return 1;
         }
     };
+    if let Some(version) = version {
+        document.version = version;
+    }
     let written = std::panic::catch_unwind(|| {
         let writer = if binary {
             DxfWriter::new_binary(&document)
