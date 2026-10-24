@@ -1649,6 +1649,7 @@ impl<R: Read + Seek> DwgReader<R> {
         document.source_path = self.source_path.clone();
         decode_field_xdata(&mut document);
         decode_block_units_xdata(&mut document);
+        crate::io::dwg::autocad_conversions::restore_document(&mut document);
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
         resolve_header_names(&mut document);
@@ -1725,6 +1726,7 @@ impl<R: Read + Seek> DwgReader<R> {
         document.source_path = self.source_path.clone();
         decode_field_xdata(&mut document);
         decode_block_units_xdata(&mut document);
+        crate::io::dwg::autocad_conversions::restore_document(&mut document);
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
         resolve_header_names(&mut document);
@@ -3524,7 +3526,7 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
     ];
 
     // Phase 1 — collect (immutable): which hatches need a gradient, and what.
-    let mut recovered: Vec<(Handle, u8, u8, String)> = Vec::new();
+    let mut recovered: Vec<(Handle, u8, u8, String, Option<[Color; 2]>)> = Vec::new();
     for e in document.entities() {
         let EntityType::Hatch(h) = e else { continue };
         if h.gradient_color.enabled || !h.is_solid {
@@ -3561,6 +3563,7 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
         // (hatch xdict → "ACAD_XREC_ROUNDTRIP" → XRecord raw_data).
         let mut name = String::new();
         let mut has_roundtrip = false;
+        let mut exact_colors = None;
         if let Some(xd) = h.common.xdictionary_handle {
             if let Some(ObjectType::Dictionary(d)) = document.objects.get(&xd) {
                 // R14 mis-sizes dictionary key strings, leaving trailing
@@ -3571,6 +3574,7 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
                 }) {
                     has_roundtrip = true;
                     if let Some(ObjectType::XRecord(xr)) = document.objects.get(xrec_h) {
+                        exact_colors = gradient_record_colors(&xr.raw_data);
                         let ascii: String = xr
                             .raw_data
                             .iter()
@@ -3626,11 +3630,11 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
         if name.is_empty() {
             name = "LINEAR".to_string();
         }
-        recovered.push((e.common().handle, c1, c2, name));
+        recovered.push((e.common().handle, c1, c2, name, exact_colors));
     }
 
     // Phase 2 — apply (mutable).
-    for (handle, c1, c2, name) in recovered {
+    for (handle, c1, c2, name, exact_colors) in recovered {
         if let Some(EntityType::Hatch(h)) = document.get_entity_mut(handle) {
             // Preserve the source gradient without cloning its colors/name.
             // The recovery remains native behavior; compat can expose the
@@ -3642,16 +3646,19 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
             h.gradient_color.color_tint = source.color_tint;
             h.gradient_color.enabled = true;
             h.gradient_color.is_single_color = c1 == c2;
+            // The round-trip record states the two colours as AutoCAD's R2004 file does (true colour); the EED holds the nearest
+            // index only.
+            let [first, second] = exact_colors.unwrap_or([Color::from_index(c1 as i16), Color::from_index(c2 as i16)]);
             h.gradient_color.colors = vec![
                 crate::entities::hatch::GradientColorEntry {
                     value: 0.0,
-                    color: Color::from_index(c1 as i16),
+                    color: first,
                     color_name: None,
                     book_name: None,
                 },
                 crate::entities::hatch::GradientColorEntry {
                     value: 1.0,
-                    color: Color::from_index(c2 as i16),
+                    color: second,
                     color_name: None,
                     book_name: None,
                 },
@@ -3660,6 +3667,33 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
             h.gradient_recovery_source = Some(Box::new(source));
         }
     }
+}
+
+/// The two colours of the `ACAD_XREC_ROUNDTRIP` record of a down-saved gradient hatch. Each is a 24-byte block: its size
+/// (24), 1, the packed colour (blue, green, red, method `0xC2` RGB or `0xC3` index) and twelve zero bytes
+/// (sample_AC1015.dwg, the hatches #371 and #376: `18000000 01000000 ff0000c2 ...` and `18000000 01000000 00ffffc2 ...`,
+/// which AutoCAD's R2004 file of the drawing states as the true colours 0x0000FF and 0xFFFF00).
+fn gradient_record_colors(data: &[u8]) -> Option<[crate::types::Color; 2]> {
+    use crate::types::Color;
+    let mut colors = Vec::new();
+    let mut at = 0;
+    while at + 24 <= data.len() && colors.len() < 2 {
+        let block = &data[at..at + 24];
+        if block[..8] == [24, 0, 0, 0, 1, 0, 0, 0] && block[12..] == [0u8; 12] {
+            let color = match block[11] {
+                0xC2 => Some(Color::from_rgb(block[10], block[9], block[8])),
+                0xC3 => Some(Color::from_index(block[8] as i16)),
+                _ => None,
+            };
+            if let Some(color) = color {
+                colors.push(color);
+                at += 24;
+                continue;
+            }
+        }
+        at += 1;
+    }
+    (colors.len() == 2).then(|| [colors[0], colors[1]])
 }
 
 /// Recover an MTEXT background fill that a pre-R2004 (R2000/R14) save stored as
@@ -3762,6 +3796,46 @@ pub(crate) fn recover_mtext_bg_roundtrip(document: &mut crate::document::CadDocu
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod gradient_record_tests {
+    use super::*;
+    use crate::types::Color;
+
+    fn block(bgr_method: [u8; 4]) -> Vec<u8> {
+        let mut out = vec![24, 0, 0, 0, 1, 0, 0, 0];
+        out.extend(bgr_method);
+        out.extend([0u8; 12]);
+        out
+    }
+
+    /// sample_AC1015.dwg, the hatches #371 and #376: the record states `18000000 01000000 ff0000c2 ...` and
+    /// `18000000 01000000 00ffffc2 ...` (blue and yellow), which AutoCAD's R2004 file of the drawing states as the true colours
+    /// 0x0000FF and 0xFFFF00; the EED `GradientColor1ACI` / `GradientColor2ACI` hold the nearest indices 5 and 2 only.
+    #[test]
+    fn the_round_trip_record_of_a_gradient_states_its_true_colours() {
+        let mut data = vec![0x7b, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0];
+        data.extend([0u8; 20]);
+        data.extend(block([0xff, 0, 0, 0xc2]));
+        data.extend([0x01, 0x02]);
+        data.extend(block([0, 0xff, 0xff, 0xc2]));
+        data.extend(b"LINEAR\0");
+        assert_eq!(gradient_record_colors(&data), Some([Color::from_rgb(0, 0, 255), Color::from_rgb(255, 255, 0)]));
+        // an index colour is a colour method of its own
+        let mut indexed = block([5, 0, 0, 0xc3]);
+        indexed.extend(block([2, 0, 0, 0xc3]));
+        assert_eq!(gradient_record_colors(&indexed), Some([Color::from_index(5), Color::from_index(2)]));
+        // one colour only, a block of another size, another method, or no zero tail: not the record
+        assert_eq!(gradient_record_colors(&block([1, 2, 3, 0xc2])), None);
+        let mut other = block([1, 2, 3, 0x42]);
+        other.extend(block([1, 2, 3, 0x42]));
+        assert_eq!(gradient_record_colors(&other), None);
+        let mut short = block([1, 2, 3, 0xc2]);
+        short.extend(block([1, 2, 3, 0xc2]));
+        short[20] = 1;
+        assert_eq!(gradient_record_colors(&short), None);
     }
 }
 

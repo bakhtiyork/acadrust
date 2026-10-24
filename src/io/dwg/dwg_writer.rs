@@ -74,7 +74,10 @@ impl DwgWriter {
         prepare_table_keys(&mut prepared);
         prepare_active_viewport_elevation(&mut prepared);
         prepare_roundtrip_records(&mut prepared);
+        let target = prepared.version;
+        crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, target);
         prepare_book_colors(&mut prepared)?;
+        crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, target, false);
         let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();
@@ -176,7 +179,10 @@ impl DwgWriter {
         prepare_table_keys(&mut prepared);
         prepare_active_viewport_elevation(&mut prepared);
         prepare_roundtrip_records(&mut prepared);
+        let target = prepared.version;
+        crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, target);
         prepare_book_colors(&mut prepared)?;
+        crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, target, false);
         write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
 

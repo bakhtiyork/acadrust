@@ -2584,6 +2584,16 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
     }
 }
 
+/// The custom data item of a table cell that holds the checksum of `cell_text_checksum`.
+const CELL_CHECKSUM: &str = "ACAD_ROUNDTRIP_2008_CELL_CHECKSUM";
+
+/// The checksum AutoCAD keeps with a table cell: the sum of every UTF-16 unit of the displayed text times its 1-based position
+/// (sample_AC1018.dwg: "Table sample" 7783, "Text" 1110, the number cell shown "0.500000" 1739, an empty cell 0; 19 of 19 cells
+/// of its two tables). Non-ASCII text: UTF-16 units assumed (no sample).
+pub(crate) fn cell_text_checksum(text: &str) -> f64 {
+    text.encode_utf16().enumerate().map(|(index, unit)| (index as f64 + 1.0) * f64::from(unit)).sum()
+}
+
 /// The SYSTEMTIME (year, month, day of week, day, hour, minute, second, millisecond; 16 bits each) of the day nearest to
 /// `seconds` since 1970-01-01 UTC, with the time of day zero. A date cell holds the local midnight of its day, whose UTC
 /// second count is up to twelve hours before or after the midnight of UTC (the sample's cell, 2024-11-15, is
@@ -2633,7 +2643,17 @@ impl Table {
         let unchanged = self.rows.iter().zip(&content.rows).all(|(row, from)| {
             row.cells.iter().zip(&from.cells).all(|(cell, from)| {
                 let legacy = cell.text_value();
+                // AutoCAD stores the checksum of the displayed text with every cell of the content object and trusts the value of
+                // the cell only while the legacy cell's display still sums to it (19 of 19 cells of sample_AC1018.dwg's two tables:
+                // text, numbers, a point, a date, a percentage, a currency). It tells an edit of any cell, also one that no longer
+                // parses as the value's type.
+                let checksum = from.custom_data_items.iter().find(|data| {
+                    data.name == CELL_CHECKSUM && data.value.value_type == CellValueType::Double
+                });
                 match from.contents.as_slice() {
+                    [item] if item.content_type == TableCellContentType::Value && checksum.is_some() => {
+                        checksum.is_some_and(|data| (cell_text_checksum(legacy) - data.value.numeric_value).abs() < 0.5)
+                    }
                     // A text the objects state must be the text of the legacy cell; a typed value (number, date, point) has
                     // only its display in the legacy cell, which AutoCAD checks by a checksum of its own.
                     [item] if item.content_type == TableCellContentType::Value && item.value.value_type == CellValueType::String => {
@@ -2840,6 +2860,16 @@ mod tests {
         // 2000-02-29 (a Tuesday) and the epoch (a Thursday).
         assert_eq!(&system_time_of_day(951_782_400)[..8], &[0xD0, 7, 2, 0, 2, 0, 29, 0]);
         assert_eq!(&system_time_of_day(0)[..8], &[0xB2, 7, 1, 0, 4, 0, 1, 0]);
+    }
+
+    /// The checksums of sample_AC1018.dwg's table cells (the content object states them as the first custom data item).
+    #[test]
+    fn the_cell_checksum_sums_the_position_weighted_units_of_the_displayed_text() {
+        assert_eq!(cell_text_checksum("Table sample"), 7783.0);
+        assert_eq!(cell_text_checksum("Text"), 1110.0);
+        assert_eq!(cell_text_checksum("0.500000"), 1739.0);
+        assert_eq!(cell_text_checksum(""), 0.0);
+        assert_eq!(cell_text_checksum("Hello this is a title"), 21385.0);
     }
 
     #[test]

@@ -332,6 +332,7 @@ fn invalidate_object_passthrough(object: &mut ObjectType) {
 fn migrate_object_side_data(document: &mut CadDocument, old: Handle, new: Handle) {
     if let Some(value) = document.eed_by_handle.remove(&old) { document.eed_by_handle.insert(new, value); }
     if let Some(value) = document.object_xdata.remove(&old) { document.object_xdata.insert(new, value); }
+    if let Some(value) = document.consumed_xdata.remove(&old) { document.consumed_xdata.insert(new, value); }
     if let Some(value) = document.xdic_by_handle.remove(&old) { document.xdic_by_handle.insert(new, value); }
     if let Some(value) = document.reactors_by_handle.remove(&old) { document.reactors_by_handle.insert(new, value); }
     if let Some(value) = document.block_visibility_params.remove(&old) { document.block_visibility_params.insert(new, value); }
@@ -928,6 +929,23 @@ mod tests {
         assert_eq!(first.after.count(AuditIssueCode::StaleTableKey), 0);
         assert!(document.layers.get("Renamed").is_some());
         assert!(document.repair().actions.is_empty());
+    }
+
+    /// The records a reader took out of an object (`consumed_xdata`) move with the object when the repair gives it a handle, as
+    /// its extended data does: they never stay under the old handle for another object to take.
+    #[test]
+    fn records_taken_out_of_an_object_move_with_its_new_handle() {
+        let mut document = CadDocument::new();
+        let mut style = crate::objects::VisualStyle::new();
+        style.handle = Handle::NULL;
+        document.objects.insert(Handle::NULL, ObjectType::VisualStyle(style));
+        let mut stamp = crate::xdata::ExtendedDataRecord::new("ACAD");
+        stamp.values = vec![crate::xdata::XDataValue::String("AcDbSavedByObjectVersion".into()), crate::xdata::XDataValue::Integer16(0)];
+        document.consumed_xdata.insert(Handle::NULL, vec![(0, stamp.clone())]);
+        document.repair();
+        assert!(!document.consumed_xdata.contains_key(&Handle::NULL));
+        let (handle, _) = document.objects.iter().find(|(_, object)| matches!(object, ObjectType::VisualStyle(_))).expect("style");
+        assert_eq!(document.consumed_xdata.get(handle), Some(&vec![(0, stamp)]));
     }
 
     #[test]

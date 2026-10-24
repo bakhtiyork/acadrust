@@ -44,6 +44,7 @@
 
 pub mod parser;
 pub mod primitives;
+pub(crate) mod reversion;
 pub mod sab;
 pub mod types;
 pub mod writer;

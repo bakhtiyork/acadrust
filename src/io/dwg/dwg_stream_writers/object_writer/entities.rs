@@ -4849,7 +4849,11 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ Attribute Entity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn gradient_name<'b>(&self, gradient: &'b crate::entities::hatch::HatchGradientPattern) -> &'b str {
-        if gradient.name.is_empty() && !gradient.enabled && self.document.dxf_source_version.is_some() {
+        // A gradient that is off still states AutoCAD's default name from R2004 on (the 8 hatches of sample_AC1018.dwg, of which
+        // sample_AC1015.dwg's R2000 records state colours only): a source that cannot hold a name gets it.
+        let nameless_source = self.document.dxf_source_version.is_some()
+            || self.document.dwg_source_version.is_some_and(|version| version < crate::types::DxfVersion::AC1018);
+        if gradient.name.is_empty() && !gradient.enabled && nameless_source {
             "LINEAR"
         } else {
             &gradient.name
@@ -5483,7 +5487,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit(false);
         if extra.is_binary && !extra.sab_data.is_empty() {
             self.writer.write_bit_short(2);
-            self.writer.write_bytes(&extra.sab_data);
+            self.writer.write_bytes(&extra.sab_for_version(self.dxf_version));
             return;
         }
 
@@ -5547,7 +5551,7 @@ impl<'a> DwgObjectWriter<'a> {
         if acis.is_binary && !acis.sab_data.is_empty() {
             // Already have SAB binary data
             self.sab_entries
-                .push((entity_handle, acis.sab_for_save().into_owned()));
+                .push((entity_handle, acis.sab_for_version(self.dxf_version).into_owned()));
         } else if !acis.sat_data.is_empty() {
             // Convert SAT text → SAB binary via SatDocument
             if let Ok(mut sat_doc) = crate::entities::acis::SatDocument::parse(&acis.sat_data) {
@@ -5593,7 +5597,7 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit(false); // acis_empty
         self.writer.write_bit(false); // binary payload
         self.writer.write_bit_short(2_i16);
-        self.writer.write_bytes(&acis.sab_for_save());
+        self.writer.write_bytes(&acis.sab_for_version(self.dxf_version));
     }
 
     fn write_acis_data_impl(
@@ -5623,7 +5627,7 @@ impl<'a> DwgObjectWriter<'a> {
             if acis.is_binary && !acis.sab_data.is_empty() {
                 // SAB binary (version 2) — write raw bytes directly.
                 self.writer.write_bit_short(2_i16);
-                self.writer.write_bytes(&acis.sab_for_save());
+                self.writer.write_bytes(&acis.sab_for_version(self.dxf_version));
                 if self.version.r2007_plus() {
                     let wireframe_present =
                         self.write_acis_wireframe(point, acis, wires, silhouettes);
