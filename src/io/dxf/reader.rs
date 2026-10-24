@@ -672,8 +672,10 @@ impl DxfReader {
             crate::io::dwg::dwg_reader::recover_roundtrip_gradients(&mut document);
             // Pre-R2004 also stores an MTEXT background fill as round-trip EED
             // rather than the native codes; rebuild it (dimension text fills).
-            crate::io::dwg::dwg_reader::recover_mtext_bg_roundtrip(&mut document);
+            crate::io::dwg::dwg_reader::recover_mtext_bg_roundtrip(&mut document, true);
         }
+        // The values AutoCAD's own down-save keeps in round-trip extended data (true colour, line weight, material).
+        crate::io::dwg::autocad_roundtrip::restore_document(&mut document);
 
         // The legacy viewport-entity table (VX_CONTROL) exists in R13-R2000 files only. A DWG of a later
         // version has no such control object (its header handle is null); the document default would

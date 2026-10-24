@@ -101,6 +101,19 @@ impl ExtendedData {
         self.records.push(record);
     }
 
+    pub(crate) fn insert_record(&mut self, index: usize, record: ExtendedDataRecord) {
+        self.records.insert(index, record);
+    }
+
+    /// Remove the record of an application, whatever the case of its name.
+    pub(crate) fn remove_record_ignore_case(&mut self, application_name: &str) -> Option<ExtendedDataRecord> {
+        let index = self
+            .records
+            .iter()
+            .position(|record| record.application_name.eq_ignore_ascii_case(application_name))?;
+        Some(self.records.remove(index))
+    }
+
     /// Insert a record, replacing the existing record for the same application.
     ///
     /// XDATA permits only one logical payload per registered application on an

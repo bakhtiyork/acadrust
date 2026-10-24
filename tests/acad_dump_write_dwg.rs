@@ -21,10 +21,15 @@ fn source(name: &str) -> PathBuf {
     line.start = Vector3::new(1.0, 2.0, 3.0);
     line.end = Vector3::new(4.0, 5.0, 6.0);
     doc.add_entity(EntityType::Line(line)).unwrap();
-    // A named (color book) color: the library refuses to write it before R2004.
+    // A named (color book) color: before R2004 it goes into AutoCAD's round-trip record of the colour.
     let mut named = Line::new();
+    named.common.color = acadrust::types::Color::from_rgb(1, 2, 3);
     named.common.color_name = Some("DIC COLOR GUIDE(R)$DIC 14".into());
     doc.add_entity(EntityType::Line(named)).unwrap();
+    // A name without a color value: the library refuses it before R2004; the tool drops the name, as ACadSharp does.
+    let mut unvalued = Line::new();
+    unvalued.common.color_name = Some("DIC COLOR GUIDE(R)$DIC 15".into());
+    doc.add_entity(EntityType::Line(unvalued)).unwrap();
     doc.header.fingerprint_guid = "{11111111-2222-3333-4444-555555555555}".into();
     doc.header.total_editing_time = 0.25;
     let path = scratch(name);
@@ -66,8 +71,18 @@ fn write_dwg_changes_the_version_and_pins_the_volatile_values() {
         assert!(result.status.success(), "{name}: {}", String::from_utf8_lossy(&result.stderr));
         let document = read(&output);
         assert_eq!(document.version, version);
-        let lines = document.entities().filter(|e| matches!(e, EntityType::Line(_))).count();
-        assert_eq!(lines, 2, "{name}: both lines, the named color too");
+        let names: Vec<Option<String>> = document
+            .entities()
+            .filter(|e| matches!(e, EntityType::Line(_)))
+            .map(|e| e.common().color_name.clone())
+            .collect();
+        assert_eq!(names.len(), 3, "{name}: all three lines, the named colors too");
+        assert!(names.contains(&Some("DIC COLOR GUIDE(R)$DIC 14".into())), "{name}: the valued name stays: {names:?}");
+        assert_eq!(
+            names.contains(&Some("DIC COLOR GUIDE(R)$DIC 15".into())),
+            version >= DxfVersion::AC1018,
+            "{name}: the name without a value only from R2004: {names:?}"
+        );
         // Pinned: 2000-01-01, no editing time, zero GUIDs.
         assert_eq!(document.header.total_editing_time, 0.0, "{name}");
         // R14 headers have no GUIDs.

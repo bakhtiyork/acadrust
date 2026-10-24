@@ -1691,7 +1691,7 @@ impl<R: Read + Seek> DwgReader<R> {
             recover_roundtrip_gradients(&mut document);
             // Pre-R2004 stores an MTEXT background fill as round-trip EED
             // instead of the native codes (dimension text fills, etc.).
-            recover_mtext_bg_roundtrip(&mut document);
+            recover_mtext_bg_roundtrip(&mut document, true);
         }
 
         // 7. Preview / thumbnail image. Stored uncompressed at the raw file
@@ -3669,7 +3669,12 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
 /// a down-saved dimension text (or any MTEXT) shows no background. Applied only
 /// when the entity has no native fill flag. The colour is stored with the
 /// AutoCAD "method byte" (0xC2 = RGB, 0xC3 = ACI, 0xC0/0xC1 = ByLayer/ByBlock).
-pub(crate) fn recover_mtext_bg_roundtrip(document: &mut crate::document::CadDocument) {
+///
+/// With `strip` (both the DWG and the DXF reader) it also takes the round-trip blocks of the MTEXT (`MTEXTBEGIN`,
+/// `ACAD_MTEXT_BBRT`) out of its extended data: the native model holds the line spacing and the fill, and the DWG and DXF
+/// writers state the blocks again for the versions that need them (see `autocad_roundtrip`), as AutoCAD's R14 and R2000 DWG
+/// and its R2000 DXF of such a drawing state them (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1015_ascii.dxf).
+pub(crate) fn recover_mtext_bg_roundtrip(document: &mut crate::document::CadDocument, strip: bool) {
     use crate::entities::EntityType;
     use crate::types::{Color, Handle};
     use crate::xdata::XDataValue;
@@ -3741,6 +3746,21 @@ pub(crate) fn recover_mtext_bg_roundtrip(document: &mut crate::document::CadDocu
             m.background_scale = scale;
             m.background_color = color;
             m.background_transparency = transp;
+        }
+    }
+    if strip {
+        let application = document.app_ids.get("ACAD").map(|app| app.handle.value());
+        let r14 = document.version < crate::types::DxfVersion::AC1015;
+        for entity in document.entities_mut() {
+            if let EntityType::MText(m) = entity {
+                let (had_spacing, spacing) = crate::io::dwg::autocad_roundtrip::take_mtext_blocks(&mut m.common, application);
+                m.dwg_without_spacing_block = !had_spacing;
+                // R14 has no line spacing fields: its record states them.
+                if let (true, Some((style, factor))) = (r14, spacing) {
+                    m.line_spacing_style = style.into();
+                    m.line_spacing_factor = factor;
+                }
+            }
         }
     }
 }

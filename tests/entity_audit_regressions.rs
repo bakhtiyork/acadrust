@@ -365,7 +365,7 @@ fn pyramid_planes_contain_apex_and_coedges_have_reciprocal_partners() {
 }
 
 #[test]
-fn legacy_mtext_omits_post_r14_spacing_fields() {
+fn legacy_mtext_keeps_post_r14_spacing_fields_in_its_data() {
     for version in [DxfVersion::AC1012, DxfVersion::AC1014, DxfVersion::AC1015] {
         let mut doc = CadDocument::with_version(version);
         let mut text = MText::new();
@@ -379,14 +379,9 @@ fn legacy_mtext_omits_post_r14_spacing_fields() {
             panic!()
         };
         assert!(text.value.contains("Second line"));
-        assert_eq!(
-            text.line_spacing_factor,
-            if version <= DxfVersion::AC1014 {
-                1.0
-            } else {
-                1.5
-            }
-        );
+        // The R13 and R14 records have no line spacing fields; AutoCAD's own R14 file keeps the spacing in the MTEXTBEGIN block of the
+        // entity's ACAD data (sample_AC1014.dwg: 33 MTEXT), which the read restores.
+        assert_eq!(text.line_spacing_factor, 1.5, "{version:?}");
     }
 }
 

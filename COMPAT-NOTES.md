@@ -294,6 +294,15 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5b-4 SPLINE knot parameterization | The R2013+ spline record of a source read from a DWG before R2013 states 15 (custom) for a spline without fit points whose parameterization is the 0 the older reader leaves. | AutoCAD's R2013 file states 15 for the control-point spline of the drawing (#433 in sample_AC1027.dwg and sample_AC1032.dwg; corrected in the review: #434 is a fit-point spline there, 2, and 15 with control points in sample_AC1024.dwg), and ACadSharp reads every pre-R2013 control-point record as 15. |
 | R5b-4 R14 header, dimension style and viewport data of a newer drawing | The R14 header states OSMODE 4133 (AutoCAD's default) when the source is an R2000+ DWG (the reader leaves 0); the R14 DIMSTYLE states DIMFIT from DIMATFIT for such a source; the MVIEW xdata of an R14 viewport states fast zoom 1 and the UCS icon from the status word. | sample_AC1014.dwg from sample_AC1015.dwg / sample_AC1032.dwg: DimensionFit 3, fast zoom 1 and icon words 1 / 3. OSMODE (corrected in the review): AutoCAD's own R14 file states 39, its session value; no R2000+ file (DWG or DXF) states OSMODE, so 4133 is AutoCAD's initial value and ACadSharp's default (the 4133 it reads from the R2000+ files), not a value of the drawing. DIMFIT ignores DIMTMOVE (the samples state DIMTMOVE 0; R14 has no DIMTMOVE). UNVERIFIED in AutoCAD itself. |
 | R5b-4 review: deterministic class table | `prepare_legacy_classes`, `required_class_names` and `add_missing_object_classes` take the objects in handle order (`objects_in_handle_order`). | They took them in the object map's iteration order, which changes with every map and every process: the classes appended for a DXF source written at another version below R2013 came in a different order on each run (88 of the 288 G5 cells wrote different bytes on repeated runs, e.g. dynamic-blocks/BLOCKFLIPPARAMETER.dxf at AC1018: 32,844 or 32,876 bytes). Test `r5b4_write_determinism`. Upstream candidate (HashMap order in the writer). |
+| R5b-5 AutoCAD's round-trip records (`RTTcAl`, `RTLwPs`, `RTMaterial`) | `io/dwg/autocad_roundtrip.rs`: an R14, R2000 or R2004 DWG (and a DXF of R2000 or R14) read by the fork has the true colour (before R2004), line weight (R14) and material (before R2007) of an entity restored from the leading records of its `ACAD` extended data, which are then removed (`Restorer`, DWG builder and `restore_document` of the DXF reader); the writers state them again for the versions that cannot store them (`DwgObjectWriter::round_trip_xdata`, `prepare_for_dxf`). A named colour is stated in the `RTTcAl` identity and no longer refused before R2004 when the entity has a colour value; the pre-R2004 `BookColor` refusal stays for a name without a colour. | AutoCAD's own down-saves keep exactly these values this way (sample_AC1014.dwg: 75 `RTLwPs`, 36 `RTTcAl`; sample_AC1015.dwg, sample_AC1018.dwg: `RTMaterial`); before, the fork wrote the ACI index and lost the value. Entities of a class (type code 500 and up: the PDF underlay) get none, as in AutoCAD's files. Compat: the ACadSharp view states the nearest index, no line weight (R14) or material and the records (`EntityCommon` view in `compat/acadsharp/entities.rs`). Native fields `dwg_transparency_dropped` (the transparency flag of the colour word, whose value AutoCAD does not keep) are provenance. DXF (corrected in the review): AutoCAD's own R2000 and R2004 DXF of the drawing hold no `RT*` record (sample_AC1015_ascii.dxf: the point #29A states colour 230 and nothing else; sample_AC1018_ascii.dxf has no `RTMaterial`), so `prepare_for_dxf` keeps in the DXF what AutoCAD's DXF drops (the fork's DXF of a DWG source of these versions carried the records as plain extended data before this job too); UNVERIFIED that AutoCAD restores the records from a DXF. R13 (AC1012) gets the records and blocks as R14 does: no AutoCAD file of R13 is in the samples. A colour-book record (word 0x4000) restores the RGB value, the name and the colour-book object of that name (review: before, the object was never found, see the next row). Upstream-PR candidate (data loss). |
+| R5b-5 review: colour-book objects of a DWG before R2004 | `CadDocument::resolve_book_colors` skips a colour-book object without names (the DBCOLOR record before R2004 holds an index only; its names are its dictionary key); `autocad_roundtrip::Restorer` matches an `RTTcAl` identity against that key. | The resolution gave such an entity the object's index and dropped its name, so the restore could not name the object: an R14 / R2000 read had the colour and the name but no colour-book handle where the R2004 read of the drawing has it (circle #99F and DBCOLOR #996 "RAL_CLASSIC$RAL_1006" in sample_AC1014.dwg, "RAL CLASSIC$RAL 1006" in sample_AC1015.dwg). The compat view states no colour-book handle for such an entity (ACadSharp reads none from an R14 / R2000 record). |
+| R5b-5 MTEXT blocks before R2004 | `MTEXTBEGIN 73 <style> 44 <factor> 74 0 MTEXTEND` for every MTEXT and `ACAD_MTEXT_BBRT 91 <flags> 46 <scale> 64 <colour> 65 "" 66 "" 442 <transparency> ACAD_MTEXT_BERT` for one with a background fill are stated by the DWG and DXF writers below R2004 and taken out of the extended data on read (`recover_mtext_bg_roundtrip(.., strip)`); R14 takes the line spacing from them. `MText::dwg_without_spacing_block` (provenance) keeps that a source stated no `MTEXTBEGIN`. | AutoCAD's R14 and R2000 files (sample_AC1014.dwg: 33 of 36 MTEXT; sample_AC1015.dwg: 36 of 36; corrected in the review: the three without the block, #1229, #1233 and #123E, are the texts of the dimension blocks *D4, *D5 and *D8 AutoCAD regenerated for R14, handles no other file of the drawing has; every MTEXT AutoCAD carries over gets the block, as the fork's writer states it); a fill was lost before in a down-save. Reader and DXF writer used to leave the blocks in the data. |
+| R5b-5 TABLE of a legacy DWG written as R2010+ | `Table::with_roundtrip_content`: a table read from a DWG before R2010 whose extension dictionary links the TABLECONTENT / TABLEGEOMETRY AutoCAD keeps (`ACAD_ROUNDTRIP_2008_TABLE_ENTITY`) takes the typed cells, cell styles, row styles and geometry from them when writing R2010+, with the legacy text as display, the value format and unit of the content, AutoCAD's value flags (6 / 4 / 5 / 7) and a date as the SYSTEMTIME of its day; a plain text or number cell edited since the save makes the table keep its converted legacy cells (review: a typed or formatted cell, date, angle, currency, percentage, point, is not checked, so an edit of such a cell in memory is replaced by the round-trip value: open; the date is the day nearest to its UTC seconds, which shifts a date stored with a time of day after noon to the next day). `table_roundtrip` stops at the first pre-R2007 marker (group 102), which took its handles for the content before. | sample_AC1018.dwg to sample_AC1024.dwg: date, angle, currency, block cells and border override flags (63 / 37) come from the round-trip object; AutoCAD's up-conversion does not derive them from the legacy cells. The native model of the legacy table is unchanged (the compat view keeps the legacy cells). |
+| R5b-5 TABLE written before R2010 | `TableCell::legacy_layout_in`: a cell without a text height of its own takes that of its row style (title 0.1425, other rows 0.1026 in the sample) and a last-column cell takes its right edge (flag 2, line weight, visibility) from the inside horizontal border; a block cell states the content format scale as its block scale. | sample_AC1015.dwg (edge flags 11 against 9, text heights, BlockScale 0.00596) from sample_AC1032.dwg. Review: fitted to one table (#528: 11 cells for the text heights, the 2 last-column cells of rows 4 and 5 for the edge); the other table (#A35) exercises neither; UNVERIFIED as AutoCAD's rule. |
+| R5b-5 LEADER extents before R2010 | The R14 to R2007 record states the extents of the MTEXT annotation as its box height and width when the leader (read from R2010+) holds the defaults. | sample_AC1015.dwg: 1.8448 and 16.374 are the extents of MTEXT #513, which sample_AC1032.dwg states in the MTEXT itself. |
+| R5b-5 MLEADERSTYLE attachments | A style read from a DWG before R2010 whose attachments are the defaults (top of top line, bottom of bottom line) states 9 and 9 (center of text) in the R2010+ record. | AutoCAD's R2010 and later files of the drawing (sample_AC1024.dwg ...) state 9 / 9, as 69 of the 70 R2010+ MLEADERSTYLEs of the sample dumps do (AutoCAD's default); the samples hold no up-save of a pre-R2010 file by AutoCAD itself (corrected in the review: UNVERIFIED as AutoCAD's conversion). |
+| R5b-5 DXF writer before R2015 | Group 370 (line weight) is not written below AC1015 (R14 DXF has none; `RTLwPs` carries it). `named colours` without a colour value are still refused below R2004. | R14 DXF; see the round-trip records. |
+| R5b-5 acad-dump `write-dwg` | Below R2004 the tool drops the colour-book name and handle only of an entity without a colour value (no RGB colour, no colour-book object with a colour), which the library refuses; a named colour with a value goes into `RTTcAl` (review: the agent had removed the drop, so such a document could no longer be written below R2004). | The library no longer refuses a named colour that has a colour value. |
 
 ## ACadSharp differential dump
 
@@ -1310,3 +1319,96 @@ candidates for hand rules citing the format; none was written (no cell would pas
 * Counts (clean build, `--jobs 3`, 288 cells): G5-RR 41 (same-version 41 / 42, cross 0 / 246; no rules 20); RC same-version 42 / 42 (no rules 0,
   pin 21, hand 21); RC sample_V 12 / 36 (6 diagonal + 6 `reported`; no rules 0, pin 6, hand 6, all 12); idem 283; C# -> fork 204. G4 RR 94,
   RC 94, idem 96 / 96 (no per-cell change). G1 45 / 49. Tests 2,562 passed, 0 failed, 60 ignored.
+
+
+## R5b-5: AutoCAD's round-trip records, TABLE conversion and cross-version rules (2026-10-24)
+
+Fork tree: r5a at e91457e + this job's working-tree changes; CadKit `Tools/g4_relations.py` (`both_integers`, `extra_class_named`), `Tools/g4-native-compare.py` (`input_any_output_const`,
+`input_const_output_int`, `input_const_output_positive`, `integer_to_integer`), `Tools/g5-rc-allowlist.json` (G5-RC-043..046), `Tools/g5-rr-allowlist.json` (G5-RR-051..).
+
+### Counts (final run: all 288 cells with the C# columns; clean rebuild; before = R5b-4 review)
+
+| | before | after |
+|---|---|---|
+| G5-RR (288) | 41 (same-version 41 / 42, cross-version 0 / 246) | 41 (41 / 42, 0 / 246): see the families |
+| G5-RC same-version (42) | 42 | **42** (no rules 0, pin rules 21, hand rules 21, all 42) |
+| G5-RC sample_V (36) | 12 (6 diagonal + 6 reported) | **23** (6 diagonal + 17 reported; per version AC1014 3, AC1015 4, AC1018 4, AC1024 4, AC1027 4, AC1032 4 of 6); no rules 0, pin 6, hand 6, all 23 |
+| G5-idem (288) | 283 (5 AecObjects refusals) | 283 |
+| C# -> fork | 204 | 204 |
+| G4 (96 cells) | RR 94, RC 94, idem 96 / 96 | unchanged (only AecObjects fails) |
+| G1 | 45 / 49 | 45 / 49 (rs-gap.tsv identical) |
+
+The 17 reported cells pass with the generated `equals_source` rules next to the hand rules, as before; the hand rules alone rescue none of the cross cells. Rescued by this job (11 cells): AC1015 -> AC1014, AC1018 -> AC1014 and AC1018 -> AC1015 (round-trip records and MTEXT blocks), AC1024 / AC1027 -> AC1015 (TABLE down-save, leader extents),
+AC1018 -> AC1024 / AC1027 / AC1032 (TABLE up-conversion from the round-trip content, MLEADERSTYLE attachments, G5-RC-043 / 044 / 046) and AC1024 / AC1027 / AC1032 -> AC1018 (G5-RC-044 / 045). AC1032 -> AC1015 / AC1014 / AC1018
+need the MTEXT column records; AC1024 / AC1027 -> AC1014 the R14 BlockRecord data; the 13 cells with an R14 or R2000 source other than those above fail on Hatch gradient, BookColor, viewport, ACIS and header data the older file cannot hold.
+
+### Rules
+
+* G5-RC-043 BlockRecord.CanScale true -> false (source R14 to R2004, target R2010+): the scaling byte exists from R2007 only; AutoCAD's later files state 1 for 4 of 27 blocks, no older file states why.
+* G5-RC-044 DxfClass.InstanceCount, two integers: the count follows the objects, which the cell reports as `kept` / `unreachable`.
+* G5-RC-045 DxfClass.DwgVersion 23 -> 0 (DATATABLE written as R2004): a version stamp, no data.
+* G5-RC-046 an extra class DATATABLE in the fork's file (R2004 source, R2010+ target): its DataTable objects are `kept`.
+* G5-RR-051..: format-inherent differences of cross-version cells, each citing AutoCAD's own files: the referenced bit (64) of symbol table records and `xref_reference` (7 rules), class instance counts, material channel flags (both
+  directions), spline knot parameterization 0 -> 15, MLEADERSTYLE attachments (both directions), leader annotation box (4 rules), TOLERANCE derived gap and height, VPORT grid bits, maintenance version, DIMALTMZS / DIMMZS, the
+  document version of a cell between two versions (6 rules), entity transparency below R2004 (6 entity types), layer material and plot style, DIMMZF / DIMALTMZF, DIMFIT (both directions), TEXT alignment point.
+  Rows left after them: the cross-version RR rows are 214,245 in 242 cells (R5b-4 review: 210,893 in 246 cells; the TABLE family grew from 48,318 to 62,082 rows because the cells of a legacy table are compared with the restored
+  R2010 cells AutoCAD's up-conversion produces; VisualStyle 53,628, XRecord 33,695, doc 18,584 (R5b-4: 21,804), Dictionary 6,452). No cross-version RR cell passes.
+
+### Doubts and UNVERIFIED
+
+* UNVERIFIED (no AutoCAD here): AutoCAD opening the fork's R14 / R2000 / R2004 files with the `RT*` records, the MTEXT blocks and the named-colour identity; the order `RTLwPs`, `RTTcAl`, `RTMaterial` when an entity holds more than one kind (the samples
+  show `RTLwPs` first; no entity holds `RTTcAl` and `RTMaterial` together); an `RTLwPs` record for the default line weight (the samples have none); `RTLwPs` bits 5-6 (all plot style flags are 0 in the samples).
+* The date of a round-trip cell is the day nearest to its UTC seconds (local midnight within twelve hours of UTC; one cell).
+* Entities of a class (type code 500 and up) get no `RT*` records because the one such entity of the samples (PDF underlay) has none: the generalisation to other class entities is unverified.
+* The round-trip content of a table is used when the plain numbers and strings of the legacy cells still match it; AutoCAD checks a checksum of its own. A typed cell with a format is accepted without a check.
+* Not done: MTEXT columns (R2010 xdata <-> R2013 native; 4 MTEXT of the samples), the 29th+ visual-style properties of R2010, DIMFIT against DIMTMOVE 1 / 2 (no sample has a TMOVE other than 0), R14 BlockRecord `CONTENTBLOCKDESCRIPTION` / `CONTENTBLOCKICON` data
+  (the apps carry handles AutoCAD created), the Hatch gradient records for R14 / R2000 sources, the TABLE round-trip objects in the fork's own down-saves (the native model of a legacy table stays the legacy layout: cross-version RR
+  of tables is open).
+* G8 was not re-run: the reader additions run only for files below R2007 (`Restorer::new` is `None` otherwise) and the writer additions only below R2007 / R2010.
+
+### Review of R5b-5 (2026-10-24)
+
+* **The no-loss rules hid conversions again; sample_V is 6 / 36, not 23.** `equals_source` accepted, in all 17 `reported` cells (and in the six
+  AC1024 / AC1027 / AC1032 cells the R5b-4 review counted), rows where AutoCAD converts and the fork does not: the extended data AutoCAD's
+  down-saves add and its up-saves consume (sample_AC1032.dwg -> AC1018: ACAD_MTEXT_COLUMN_INFO of the MTEXT columns, the attribute lock record,
+  ACAD_MLEADERVER, ACAD_DSTYLE_DIMTEXT_FILL; -> AC1014: the R14 DSTYLE overrides of dimensions and leaders, block records' data; sample_AC1018.dwg
+  -> AC1024+: the fork keeps those records and leaves DIMTFILLCLR, the dimension line types and the attribute lock at their defaults where AutoCAD
+  restores them; sample_AC1027.dwg -> AC1024: the spline and solid records of R2010), and the modeler data of every down-save (the fork's R14
+  file holds the SAT 400 of an R2000 source or the binary ACIS of an R2004 one where AutoCAD writes SAT 106; its R2000 / R2004 files of an R2018
+  source hold ASM data). CadKit `Tools/g4_relations.py` `source_row_excluded`: `equals_source` no longer accepts the contents of ExtendedData
+  (only the renumbered application handle `ExtendedData[i][0]`) nor AcisData / IsBinaryAcisData in a down-save; `Tools/g5-twin-rules.py` skips
+  the same rows (`g5-rc-source-allowlist.json` regenerated: 288 rules, the 20 ExtendedData-only families gone); g5 self-test cases. Each of the
+  17 cells now fails on such rows only (no other column changed). Open: the round-trip records of MTEXT columns, attributes, multileaders,
+  dimension styles, splines and solids both ways, and the ACIS / ASM version of a down-save.
+* **Rules.** G5-RC-044 (any two integers for any class count) split: DICTIONARYVAR by `equals_object_count` (the count equals the fork's
+  DictionaryVariable objects), and G5-RC-047 `both_integers` for ACDB_TEXTOBJECTCONTEXTDATA_CLASS, CELLSTYLEMAP and DATATABLE only (objects the
+  dumps do not enumerate; `both_integers` now requires the class list). G5-RR-058 (any two integers for every class count of every cross cell)
+  deleted, its relation `integer_to_integer` removed: an arbitrary count (1,740 rows, no cell). G5-RR-091 / 094 (TEXT alignment point: any value
+  from none, at every version) narrowed to exactly none <-> (0, 0, 0) between an R14 file and a later source. Other new rules checked against
+  the samples and kept: the referenced bit and xref flags (051-057), channel flags (059 / 060), knot parameterization 0 -> 15 (061), leader box
+  (066-069), TOLERANCE gap and height (070 / 071), grid bits (072), maintenance version (073), DIMALTMZS (074), the document version (075-080),
+  transparency below R2004 (081-086; AutoCAD keeps only the 0x2000 flag), layer material (087) and plot style (088), DIMMZF / DIMALTMZF
+  (089 / 090) and DIMFIT (092 / 093): AutoCAD's older files keep none of these values in extended data (their layers carry AcAecLayerStandard
+  and AcCmTransparency only; their dimension styles ACAD_DSTYLE_DIMJAG / DIMTALN / DIMBREAK / DIMTEXT_FILL / DIM linetypes, no DIMMZF).
+  MLEADERSTYLE 062-065: evidence corrected (behaviour row).
+* **Verified.** The `RT*` records the fork writes from sample_AC1018.dwg and sample_AC1032.dwg at R14 / R2000 / R2004 equal AutoCAD's at every
+  handle both files hold (C# values of the word, the packed colour, the identity, the line-weight word and the material handle; the only
+  differing MTEXT records are those with columns); "72 / 72 ACI choices equal `nearest_aci`" is true (sample_AC1014.dwg and sample_AC1015.dwg,
+  and every entity record states the same index); the MTEXT blocks equal AutoCAD's; the leader box is the MTEXT extents; the date conversion is
+  free of the machine's time zone (pure arithmetic; the unit test fixes UTC seconds).
+* **The TABLE RR family** grew by 13.8k rows because the cross cells now compare the source's legacy model with the modern cells the up-conversion
+  takes from AutoCAD's round-trip objects (+1,091 rows in each of the nine legacy -> R2010+ cells of the six samples) and the down-conversion
+  states row text heights, edges and block scales (+163 in each of the nine R2010+ -> legacy cells): a different representation of one table,
+  not a loss of the fork's own round trip (same-version cells unchanged).
+* **Changed older tests** follow AutoCAD's files and are as strict: R14 line weights restored (`acadsharp_common_appearance`), R13 / R14 MTEXT
+  spacing restored (`entity_audit_regressions`; R13 has no sample), the R2000 MTEXT fill in ACAD_MTEXT_BBRT (`r5a_tests`, sample_AC1015.dwg).
+  `acad_dump_write_dwg` had lost its named colour without a value: restored (with the valued one), and the tool drops only such a name.
+* **New tests fail without their fix** (checked by reverting the 102 marker stop and the last-column edge: two tests of `r5b5_conversions`
+  fail); `a_document_without_such_values_gets_no_record` and `an_mtext_without_the_block_in_its_source_is_written_without_it` are guards that
+  passed before the job too.
+* Counts (clean build, `--jobs 3`, 288 cells): G5-RR 41 / 288 (same-version 41 / 42, cross 0 / 246; no rules 20; unexplained cross rows
+  215,949); RC same-version 42 / 42 (no rules 0, pin 21, hand 21, all 42); RC sample_V 6 / 36 (diagonal; up-saves 0 / 15, down-saves 0 / 15; no
+  rules 0, pin 6, hand 6, all 6); idem 283 / 288; C# -> fork 204. G4 RR 94, RC 94, idem 96 / 96 (no per-cell change from the R5b-4 review).
+  G1 45 / 49 (rs-gap.tsv identical). Tests 2,583 passed, 0 failed, 60 ignored. G8 not run: the review changes no reader hot path (one dictionary
+  lookup per colour-book object in `Restorer::new`, a filter in `resolve_book_colors`); the job's own reader passes (one pass over the objects
+  and entities of an R14 to R2004 file) are UNVERIFIED under G8.

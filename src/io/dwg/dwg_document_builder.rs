@@ -3035,6 +3035,7 @@ impl DwgDocumentBuilder {
                 .iter()
                 .map(|l| (l.handle.value(), l.name.clone()))
                 .collect();
+            let round_trip = crate::io::dwg::autocad_roundtrip::Restorer::new(document);
             if !app_name_by_handle.is_empty() {
                 let decode_records = |xd: &crate::xdata::ExtendedData| {
                     xd.raw_dwg_eed
@@ -3060,6 +3061,11 @@ impl DwgDocumentBuilder {
                             xd.add_record(record);
                         }
                     }
+                    if let Some(restorer) = &round_trip {
+                        if restorer.wants(entity.common()) {
+                            restorer.restore(&mut std::sync::Arc::make_mut(entity).common_mut());
+                        }
+                    }
                     // Children retain raw EED too. Decode them after APPID/layer
                     // resolution, using the same pass for serial and rayon reads.
                     if matches!(entity.as_ref(), EntityType::Insert(_) | EntityType::Polyline2D(_)
@@ -3067,6 +3073,11 @@ impl DwgDocumentBuilder {
                         let decode_child = |common: &mut EntityCommon| {
                             for record in decode_records(&common.extended_data) {
                                 common.extended_data.add_record(record);
+                            }
+                            if let Some(restorer) = &round_trip {
+                                if restorer.wants(common) {
+                                    restorer.restore(common);
+                                }
                             }
                         };
                         let seqend = match std::sync::Arc::make_mut(entity) {

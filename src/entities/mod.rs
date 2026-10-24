@@ -359,6 +359,10 @@ pub struct EntityProperties {
     /// with shared properties; native color and transparency remain decoded.
     #[cfg_attr(feature = "serde", serde(skip))]
     pub dwg_color_source: Option<(u16, u32)>,
+    /// The drawing this entity was read from has no field for the transparency the entity had: AutoCAD's round-trip
+    /// record of the colour (`RTTcAl`) keeps the fact in its colour word and no value. Provenance, not appearance.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dwg_transparency_dropped: bool,
     /// Named/color-book identity from DXF group code 430.
     #[cfg_attr(feature = "serde", serde(default))]
     pub color_name: Option<String>,
@@ -456,6 +460,7 @@ impl EntityCommon {
         self.graphic_data = source.graphic_data.clone();
         self.color_book_handle = source.color_book_handle;
         self.dwg_color_source = source.dwg_color_source;
+        self.dwg_transparency_dropped = source.dwg_transparency_dropped;
         self.face_visual_style_handle = source.face_visual_style_handle;
         self.edge_visual_style_handle = source.edge_visual_style_handle;
         self.material_flags = source.material_flags;
@@ -505,6 +510,7 @@ impl Default for EntityProperties {
             linetype_scale: 1.0,
             transparency: Transparency::BY_LAYER,
             dwg_color_source: None,
+            dwg_transparency_dropped: false,
             color_name: None,
             invisible: false,
             extended_data: crate::xdata::ExtendedData::new(),

@@ -112,6 +112,8 @@ pub const EXCLUDED_FIELDS: &[(&str, &str, &str)] = &[
     // ---- dwg-image: verbatim DWG bytes or bit positions -------------------------------------------------------
     ("EntityCommon", "raw_record", "dwg-image: 'the exact merged-stream bytes this entity was decoded from (DWG only)'"),
     ("EntityProperties", "dwg_color_source", "dwg-image: 'original R2004+ DWG ENC word and packed transparency'; the decoded color and transparency are compared; custom PartialEq skips it"),
+    ("MText", "dwg_without_spacing_block", "provenance: 'the DWG of a version before R2004 stated no line-spacing block for the MTEXT'; custom PartialEq skips it"),
+    ("EntityProperties", "dwg_transparency_dropped", "provenance: 'the DWG version the entity was read from has no field for its transparency; AutoCAD\'s round-trip colour record keeps the fact'; custom PartialEq skips it"),
     ("EntityProperties", "layer_handle", "dwg-image: 'DWG layer handle as read from the file'; DXF names the layer (group 8) and `layer` is compared"),
     ("EntityProperties", "linetype_handle", "dwg-image: 'DWG linetype handle'; DXF names the linetype (group 6) and `linetype` is compared"),
     ("EntityProperties", "entity_mode", "dwg-image: 'entity mode (0=owned, 1=paper, 2=model), raw DWG value for round-trip'; the owner (`owner_handle`) is compared"),

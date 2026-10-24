@@ -209,8 +209,9 @@ fn validate_unknown_records(document: &CadDocument) -> Result<()> {
         if document.version < DxfVersion::AC1018 {
             if let crate::entities::EntityType::Insert(insert) = entity {
                 for attribute in &insert.attributes {
-                    if attribute.common.color_name.as_ref().is_some_and(|name| !name.is_empty())
-                        || attribute.common.color_book_handle.is_some_and(|handle| !handle.is_null())
+                    if (attribute.common.color_name.as_ref().is_some_and(|name| !name.is_empty())
+                        || attribute.common.color_book_handle.is_some_and(|handle| !handle.is_null()))
+                        && !crate::io::dwg::autocad_roundtrip::can_state_color_name(&attribute.common, document)
                     {
                         return Err(DxfError::NotImplemented(format!(
                             "Named color on attribute {} requires DWG R2004 or later",
@@ -220,9 +221,12 @@ fn validate_unknown_records(document: &CadDocument) -> Result<()> {
                 }
             }
         }
+        // Before R2004 an entity record has no colour-book reference; AutoCAD states the name in the round-trip record
+        // of the true colour, which needs a colour value to go with it.
         if document.version < DxfVersion::AC1018
             && (entity.common().color_name.as_ref().is_some_and(|name| !name.is_empty())
                 || entity.common().color_book_handle.is_some_and(|handle| !handle.is_null()))
+            && !crate::io::dwg::autocad_roundtrip::can_state_color_name(entity.common(), document)
         {
             return Err(DxfError::NotImplemented(format!(
                 "Named color on entity {} requires DWG R2004 or later",
@@ -287,10 +291,10 @@ fn prepare_book_colors(document: &mut std::borrow::Cow<'_, CadDocument>) -> Resu
     if missing.is_empty() {
         return Ok(());
     }
+    // A drawing before R2004 has no colour-book reference in its entity records: the name goes into AutoCAD's round-trip
+    // record of the colour (`RTTcAl`), written with each entity.
     if document.version < DxfVersion::AC1018 {
-        return Err(DxfError::NotImplemented(
-            "Named entity colors require DWG R2004 or later".to_string(),
-        ));
+        return Ok(());
     }
     let output = document.to_mut();
     output.synchronize_handle_allocator();
