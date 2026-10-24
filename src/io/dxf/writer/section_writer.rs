@@ -4783,8 +4783,8 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_double(48, common.linetype_scale)?;
         }
 
-        // Write lineweight if not default
-        if common.line_weight != crate::types::LineWeight::ByLayer && !self.r12 {
+        // Write lineweight if not default (an R14 drawing has none: AutoCAD's RTLwPs record holds it)
+        if common.line_weight != crate::types::LineWeight::ByLayer && !self.r12 && self.dxf_version >= DxfVersion::AC1015 {
             self.writer.write_i16(370, common.line_weight.value())?;
         }
 

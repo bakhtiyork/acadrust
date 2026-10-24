@@ -1169,6 +1169,15 @@ impl TableCell {
     /// edge's border overrides, which also set the edge in the cell's edge flags (top 1, right 2, bottom 4, left 8). A cell
     /// of the legacy layout, or with nothing overridden, is returned as it is.
     pub fn legacy_layout(&self) -> std::borrow::Cow<'_, TableCell> {
+        self.legacy_layout_in(None, false)
+    }
+
+    /// [`legacy_layout`](Self::legacy_layout) of a cell of a row with the style `row` and of a table whose last column holds the
+    /// cell when `last_column`. In AutoCAD's R2000 and R2004 files of a table whose rows state text heights of their own
+    /// (sample_AC1015.dwg, sample_AC1018.dwg: title 0.1425, other rows 0.1026) a cell that overrides no text height states
+    /// the row's, and a cell of the last column takes its right edge from the inside horizontal border (edge flags 11 where the
+    /// cells to its left have 9).
+    pub fn legacy_layout_in(&self, row: Option<&CellStyle>, last_column: bool) -> std::borrow::Cow<'_, TableCell> {
         use CellStylePropertyFlags as P;
         let modern_style = self.style.as_ref().is_some_and(|s| !s.legacy_override_bits);
         let content_format = self.contents.first().map_or(0, |c| c.format_override_flags as u32);
@@ -1206,9 +1215,33 @@ impl TableCell {
                 style.text_height = content.text_height;
             }
         }
+        // A row that states a text height of its own (override bit 0x80 of its style; AutoCAD's R2010 and later files of the
+        // sample drawing: the title row 0.1425, the others 0.1026) gives it to the cells of the row that override none.
+        if flags & 0x20 == 0 && modern_style {
+            if let Some(row) = row.filter(|row| row.override_flags & 0x80 != 0 && row.text_height > 0.0) {
+                flags |= 0x20;
+                style.text_height = row.text_height;
+            }
+        }
         // A value type or format the content overrides sets the one bit above the borders' (AutoCAD's flag word 0x40000).
         if content_format & (P::DATA_TYPE | P::DATA_FORMAT).bits() != 0 {
             flags |= 0x40000;
+        }
+        let explicit = |border: &CellBorder| {
+            border
+                .override_flags
+                .intersects(BorderPropertyFlags::COLOR | BorderPropertyFlags::LINE_WEIGHT | BorderPropertyFlags::INVISIBILITY)
+        };
+        if last_column && !explicit(&style.right_border) {
+            let inside = style
+                .additional_borders
+                .iter()
+                .find(|(edge, border)| *edge == CellEdgeFlags::INSIDE_HORIZONTAL.bits() as u32 && explicit(border))
+                .map(|(_, border)| border.clone());
+            if let Some(inside) = inside {
+                style.right_border = inside;
+                style.applied_border_edges |= CellEdgeFlags::RIGHT;
+            }
         }
         let mut edges = 0u8;
         for (color_bit, weight_bit, edge, edge_bit, border) in [
@@ -2449,6 +2482,9 @@ fn table_roundtrip(document: &crate::document::CadDocument, table: Handle) -> Op
     let mut rows = Vec::new();
     for entry in entries {
         match (entry.code, &entry.value) {
+            // The record of a drawing saved before R2007 goes on with the markers of the pre-R2007 table and its cells
+            // (ACAD_ROUNDTRIP_PRE2007_TABLE, ACAD_ROUNDTRIP_PRE2007_TABLECELL) and their own handles.
+            (102, _) => break,
             (360, XRecordValue::Handle(handle)) => content = Some(*handle),
             (361, XRecordValue::Handle(handle)) => geometry = Some(*handle),
             (90, value) => match value.as_i32() {
@@ -2548,7 +2584,141 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
     }
 }
 
+/// The SYSTEMTIME (year, month, day of week, day, hour, minute, second, millisecond; 16 bits each) of the day nearest to
+/// `seconds` since 1970-01-01 UTC, with the time of day zero. A date cell holds the local midnight of its day, whose UTC
+/// second count is up to twelve hours before or after the midnight of UTC (the sample's cell, 2024-11-15, is
+/// 2024-11-14 23:00 UTC).
+fn system_time_of_day(seconds: u32) -> [u8; 16] {
+    let days = (i64::from(seconds) + 43_200) / 86_400;
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 { month_index + 3 } else { month_index - 9 };
+    let year = year_of_era + era * 400 + i64::from(month <= 2);
+    let weekday = (days + 4).rem_euclid(7);
+    let mut bytes = [0u8; 16];
+    for (index, value) in [year, month, weekday, day].into_iter().enumerate() {
+        bytes[index * 2..index * 2 + 2].copy_from_slice(&(value as u16).to_le_bytes());
+    }
+    bytes
+}
+
 impl Table {
+    /// The table as an R2010 record states it, when it is a legacy table (read from a DWG before R2010) whose extension
+    /// dictionary links the round-trip TABLECONTENT and TABLEGEOMETRY objects AutoCAD keeps with it: the typed cells, styles
+    /// and geometry of those objects, as AutoCAD's own up-conversion takes them (sample_AC1018.dwg to sample_AC1024.dwg: the
+    /// date, angle, currency and block cells, the border overrides, the row styles of R14). `None` when the table has no such
+    /// objects, when its cell grid differs from theirs or when the text of a legacy cell is no longer the text the objects
+    /// state (the cell was edited after the file was saved): the legacy cells are then converted cell by cell.
+    pub(crate) fn with_roundtrip_content(&self, document: &crate::document::CadDocument) -> Option<Table> {
+        use crate::objects::{DataObjectData, ObjectType};
+        if self.dxf_legacy.0.is_some() || !document.dwg_source_version.is_some_and(|v| v < crate::types::DxfVersion::AC1024) {
+            return None;
+        }
+        let link = table_roundtrip(document, self.common.handle)?;
+        let Some(ObjectType::TableContent(content)) = document.objects.get(&link.content) else {
+            return None;
+        };
+        let same_grid = content.rows.len() == self.rows.len()
+            && content.columns.len() == self.columns.len()
+            && content.rows.iter().zip(&self.rows).all(|(a, b)| a.cells.len() == b.cells.len());
+        if !same_grid {
+            return None;
+        }
+        let unchanged = self.rows.iter().zip(&content.rows).all(|(row, from)| {
+            row.cells.iter().zip(&from.cells).all(|(cell, from)| {
+                let legacy = cell.text_value();
+                match from.contents.as_slice() {
+                    // A text the objects state must be the text of the legacy cell; a typed value (number, date, point) has
+                    // only its display in the legacy cell, which AutoCAD checks by a checksum of its own.
+                    [item] if item.content_type == TableCellContentType::Value && item.value.value_type == CellValueType::String => {
+                        // A format changes how the text is displayed (%tc1: upper case).
+                        !item.value_format.is_empty()
+                            || legacy == item.value.formatted_value
+                            || legacy.eq_ignore_ascii_case(&item.value.text)
+                    }
+                    // A plain number states its display exactly (AutoCAD's checksum of the cell would tell the same).
+                    [item]
+                        if matches!(item.value.value_type, CellValueType::Double | CellValueType::Long)
+                            && item.value_format.is_empty()
+                            && !legacy.is_empty() =>
+                    {
+                        legacy.trim().parse::<f64>().map_or(true, |shown| (shown - item.value.numeric_value).abs() < 1e-5)
+                    }
+                    _ => true,
+                }
+            })
+        });
+        if !unchanged {
+            return None;
+        }
+        let geometry = link.geometry.and_then(|handle| match document.objects.get(&handle) {
+            Some(ObjectType::DataObject(object)) => match &object.data {
+                DataObjectData::TableGeometry(geometry) => Some(geometry.clone()),
+                _ => None,
+            },
+            _ => None,
+        });
+        let mut table = self.clone();
+        table.restore_modern_content(content, geometry.as_ref(), link.break_ranges);
+        // The objects state the value of a cell, not what its entity record states about it: the displayed text is the legacy
+        // cell's, the value carries the format of its content (and the unit of that format), and the flags are AutoCAD's (the
+        // R2010 file of the sample drawing: 6 for a value without a format, 4 with one, 5 for a typed cell without a value, 7
+        // for an untyped one). The legacy cell's own custom data (the cell checksum) stays.
+        for (row, legacy) in table.rows.iter_mut().zip(&self.rows) {
+            for (cell, legacy) in row.cells.iter_mut().zip(&legacy.cells) {
+                if !legacy.custom_data_items.is_empty() {
+                    cell.custom_data_items = legacy.custom_data_items.clone();
+                }
+                // The record of a cell in the entity states the checksum value with the flag 2.
+                for item in &mut cell.custom_data_items {
+                    if item.value.flags == 0 {
+                        item.value.flags = 2;
+                    }
+                }
+                let text = legacy.text_value();
+                if let [item] = cell.contents.as_mut_slice() {
+                    if item.content_type != TableCellContentType::Value {
+                        continue;
+                    }
+                    let unset = text.is_empty();
+                    // The objects state a date as 32-bit seconds since 1970 (8 bytes); the entity record, as AutoCAD's
+                    // up-conversion writes it, a Windows SYSTEMTIME of the day (16 bytes: sample_AC1024.dwg, 2024-11-15 is
+                    // `E8 07 0B 00 05 00 0F 00` and eight zero bytes).
+                    if item.value.value_type == CellValueType::Date && item.value.binary_value.len() == 8 {
+                        let seconds = u32::from_le_bytes([
+                            item.value.binary_value[0],
+                            item.value.binary_value[1],
+                            item.value.binary_value[2],
+                            item.value.binary_value[3],
+                        ]);
+                        item.value.binary_value = system_time_of_day(seconds).to_vec();
+                        item.value.data_size = 16;
+                    }
+                    item.value.format = item.value_format.clone();
+                    item.value.formatted_value = text.to_string();
+                    let unit = item.format_value_unit_type;
+                    item.value.unit_type = ValueUnitType::from(unit as u32);
+                    item.value.raw_unit_type_code = unit;
+                    // A cell whose content format is no data type (0, 4 text, 512 none) is untyped.
+                    let untyped = matches!(item.format_value_data_type, 0 | 4 | 512);
+                    item.value.flags = match (unset, untyped, item.value_format.is_empty()) {
+                        (true, true, _) => 7,
+                        (true, false, _) => 5,
+                        (false, _, true) => 6,
+                        (false, _, false) => 4,
+                    };
+                }
+            }
+        }
+        Some(table)
+    }
+
     /// Whether cell (`row`, `col`) lies inside a merged range of one row without being its first cell.
     pub fn is_merged_away(&self, row: usize, col: usize) -> bool {
         self.merged_ranges.iter().any(|range| {
@@ -2660,6 +2830,17 @@ impl Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_date_of_the_round_trip_object_becomes_the_system_time_autocad_states() {
+        // The cell of sample_AC1018.dwg (F0 80 36 67 00 00 00 00 = 1731625200, 2024-11-14 23:00 UTC): AutoCAD's R2010 record
+        // states E8 07 0B 00 05 00 0F 00 and eight zero bytes.
+        assert_eq!(system_time_of_day(0x6736_80F0), [0xE8, 7, 0x0B, 0, 5, 0, 0x0F, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(&system_time_of_day(1_731_628_800)[..8], &[0xE8, 7, 0x0B, 0, 5, 0, 0x0F, 0]);
+        // 2000-02-29 (a Tuesday) and the epoch (a Thursday).
+        assert_eq!(&system_time_of_day(951_782_400)[..8], &[0xD0, 7, 2, 0, 2, 0, 29, 0]);
+        assert_eq!(&system_time_of_day(0)[..8], &[0xB2, 7, 1, 0, 4, 0, 1, 0]);
+    }
 
     #[test]
     fn test_table_creation() {

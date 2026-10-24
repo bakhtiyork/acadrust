@@ -96,23 +96,6 @@ fn write_dwg(args: &[std::ffi::OsString]) -> i32 {
     if let Some(version) = version {
         document.version = version;
     }
-    // The library refuses to write a named (color book) color before R2004, where the format has no room for the
-    // name (issue #132). ACadSharp writes the entity's color index and drops the name; this tool does the same
-    // before writing, so the round trip compares what is left.
-    if document.version < DxfVersion::AC1018 {
-        for entity in document.entities_mut() {
-            let drop_name = |common: &mut acadrust::entities::EntityCommon| {
-                common.color_name = None;
-                common.color_book_handle = None;
-            };
-            drop_name(entity.common_mut());
-            if let acadrust::EntityType::Insert(insert) = entity {
-                for attribute in &mut insert.attributes {
-                    drop_name(&mut attribute.common);
-                }
-            }
-        }
-    }
     if pin {
         let header = &mut document.header;
         header.create_date_julian = PINNED_JULIAN;

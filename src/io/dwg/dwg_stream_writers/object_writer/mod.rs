@@ -2412,6 +2412,7 @@ impl<'a> DwgObjectWriter<'a> {
         // loosely decoded BLOCK marker carried a different common owner.
         common.owner_handle = record.handle;
 
+        let xdata = self.round_trip_xdata(common::OBJ_BLOCK, &common);
         self.write_common_entity_data(
             common::OBJ_BLOCK,
             common.handle,
@@ -2424,7 +2425,7 @@ impl<'a> DwgObjectWriter<'a> {
             common.linetype_scale,
             &common.linetype,
             &common.linetype_handle,
-            &common.extended_data,
+            &xdata,
             &common.reactors,
             &common.xdictionary_handle,
             common.graphic_data.as_deref(),
@@ -2478,6 +2479,7 @@ impl<'a> DwgObjectWriter<'a> {
         common.handle = record.block_end_handle;
         common.owner_handle = record.handle;
 
+        let xdata = self.round_trip_xdata(common::OBJ_ENDBLK, &common);
         self.write_common_entity_data(
             common::OBJ_ENDBLK,
             common.handle,
@@ -2490,7 +2492,7 @@ impl<'a> DwgObjectWriter<'a> {
             common.linetype_scale,
             &common.linetype,
             &common.linetype_handle,
-            &common.extended_data,
+            &xdata,
             &common.reactors,
             &common.xdictionary_handle,
             common.graphic_data.as_deref(),

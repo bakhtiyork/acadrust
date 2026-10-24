@@ -165,6 +165,7 @@ impl<'a> DwgObjectWriter<'a> {
 
     fn entity_preamble(&mut self, type_code: i16, c: &EntityCommon) {
         self.pending_layer_handle = c.layer_handle;
+        let xdata = self.round_trip_xdata(type_code, c);
         self.write_common_entity_data(
             type_code,
             c.handle,
@@ -177,7 +178,7 @@ impl<'a> DwgObjectWriter<'a> {
             c.linetype_scale,
             &c.linetype,
             &c.linetype_handle,
-            &c.extended_data,
+            &xdata,
             &c.reactors,
             &c.xdictionary_handle,
             c.graphic_data.as_deref(),
@@ -845,7 +846,24 @@ impl<'a> DwgObjectWriter<'a> {
     // â”€â”€ MText â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn write_mtext(&mut self, e: &MText) {
-        self.entity_preamble(common::OBJ_MTEXT, &e.common);
+        // A version before R2004 states the line spacing and the background fill in the MTEXT's `ACAD` data.
+        let blocks = crate::io::dwg::autocad_roundtrip::mtext_blocks(e, self.dxf_version);
+        let stated;
+        let common = if blocks.is_empty() {
+            &e.common
+        } else {
+            let application = self.document.app_ids.get("ACAD").map(|app| app.handle.value());
+            match crate::io::dwg::autocad_roundtrip::with_mtext_blocks(&e.common.extended_data, blocks, application) {
+                Some(xdata) => {
+                    let mut common = e.common.clone();
+                    common.extended_data = xdata;
+                    stated = common;
+                    &stated
+                }
+                None => &e.common,
+            }
+        };
+        self.entity_preamble(common::OBJ_MTEXT, common);
 
         // Insertion pt 3BD 10
         self.writer.write_3bit_double(e.insertion_point);
@@ -1285,6 +1303,7 @@ impl<'a> DwgObjectWriter<'a> {
         handle: Handle,
         owner: Handle,
     ) {
+        let xdata = self.round_trip_xdata(common::OBJ_ATTRIB, &att.common);
         self.write_common_entity_data(
             common::OBJ_ATTRIB,
             handle,
@@ -1297,7 +1316,7 @@ impl<'a> DwgObjectWriter<'a> {
             att.common.linetype_scale,
             &att.common.linetype,
             &att.common.linetype_handle,
-            &att.common.extended_data,
+            &xdata,
             &att.common.reactors,
             &att.common.xdictionary_handle,
             att.common.graphic_data.as_deref(),
@@ -1726,10 +1745,19 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit_double(e.dimension_gap);
         }
 
-        // R13-R2007: annotation box height / width.
+        // R13-R2007: annotation box height / width. A leader read from R2010 or later states neither; AutoCAD's own R14 to
+        // R2004 files of such a drawing give the extents of the leader's MTEXT annotation (sample_AC1015.dwg: the extents
+        // of the MTEXT #513, which sample_AC1032.dwg states in its own record).
         if self.dxf_version <= crate::types::DxfVersion::AC1021 {
-            self.writer.write_bit_double(e.text_height);
-            self.writer.write_bit_double(e.text_width);
+            let annotation = match self.document.get_entity(e.annotation_handle) {
+                Some(EntityType::MText(text)) if e.text_width == 0.0 && text.extents_width > 0.0 => {
+                    Some((text.extents_height, text.extents_width))
+                }
+                _ => None,
+            };
+            let (height, width) = annotation.unwrap_or((e.text_height, e.text_width));
+            self.writer.write_bit_double(height);
+            self.writer.write_bit_double(width);
         }
 
         // Hooklineonxdir B
@@ -3566,8 +3594,8 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     /// Pre-R2010 flat-format cell.
-    fn write_table_cell_data(&mut self, cell: &TableCell) {
-        let cell = cell.legacy_layout();
+    fn write_table_cell_data(&mut self, cell: &TableCell, row_style: Option<&CellStyle>, last_column: bool) {
+        let cell = cell.legacy_layout_in(row_style, last_column);
         let cell: &TableCell = &cell;
         let cell_type = match cell.cell_type {
             CellType::Block => 2,
@@ -3593,7 +3621,19 @@ impl<'a> DwgObjectWriter<'a> {
                 self.writer.write_variable_text(cell.text_value());
             }
         } else if cell_type == 2 {
-            self.writer.write_bit_double(cell.block_scale);
+            // A cell of the R2010 layout states the scale of its block in its content format.
+            let scale = cell
+                .contents
+                .iter()
+                .find(|content| content.content_type == TableCellContentType::Block)
+                .map_or(cell.block_scale, |content| {
+                    if cell.block_scale == 1.0 && content.scale > 0.0 {
+                        content.scale
+                    } else {
+                        cell.block_scale
+                    }
+                });
+            self.writer.write_bit_double(scale);
             let attributes = cell
                 .contents
                 .iter()
@@ -3806,6 +3846,9 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn write_table(&mut self, e: &table::Table) {
+        // A table of a DWG before R2010 goes into an R2010 record with the typed cells of its round-trip objects.
+        let restored = if self.version.r2010_plus() { e.with_roundtrip_content(self.document) } else { None };
+        let e = restored.as_ref().unwrap_or(e);
         let type_code = self.class_type_code("ACAD_TABLE", common::OBJ_TABLE);
         self.entity_preamble(type_code, &e.common);
 
@@ -3900,8 +3943,8 @@ impl<'a> DwgObjectWriter<'a> {
                 e.table_style_handle.map(|h| h.value()).unwrap_or(0),
             );
             for row in &e.rows {
-                for cell in &row.cells {
-                    self.write_table_cell_data(cell);
+                for (column, cell) in row.cells.iter().enumerate() {
+                    self.write_table_cell_data(cell, row.style.as_ref(), column + 1 == row.cells.len());
                 }
             }
             self.writer.write_bit(e.legacy_style_override.is_some());

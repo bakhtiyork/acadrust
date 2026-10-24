@@ -817,7 +817,10 @@ fn pre_r2004_background_and_gradient_restored_from_legacy_data_stay_in_that_data
     let text = write(&doc);
     let mtexts = records(&text, "MTEXT");
     assert!(first(mtexts[0], 90).is_none(), "restored fill: legacy data only");
-    assert!(first(mtexts[1], 90).is_some(), "no legacy data: the native groups are the only carrier");
+    // A fill without legacy data gets it from the writer: R2000 has no native groups for the fill, AutoCAD's own R2000 file
+    // of such an MTEXT states ACAD_MTEXT_BBRT (sample_AC1015.dwg, MTEXT #9DA), and the writer states the same.
+    assert!(first(mtexts[1], 90).is_none(), "the legacy data is the carrier before R2004");
+    assert!(mtexts[1].contains("ACAD_MTEXT_BBRT"), "{}", mtexts[1]);
     let hatches = records(&text, "HATCH");
     assert!(first(hatches[0], 450).is_none());
     assert!(first(hatches[1], 450).is_some());

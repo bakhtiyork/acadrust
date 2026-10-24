@@ -148,6 +148,36 @@ fn spline_knot_tolerance(value: &Spline) -> f64 {
     }
 }
 
+/// The common data of an MTEXT as ACadSharp reads it from a DWG of a version before R2004: the line spacing and the background
+/// fill are blocks of the `ACAD` extended data (the native model holds the values).
+fn mtext_common<'a>(doc: &CadDocument, text: &'a crate::entities::MText) -> std::borrow::Cow<'a, EntityCommon> {
+    let Some(version) = legacy_round_trip_version(doc) else {
+        return std::borrow::Cow::Borrowed(&text.common);
+    };
+    let blocks = crate::io::dwg::autocad_roundtrip::mtext_blocks(text, version);
+    if blocks.is_empty() {
+        return std::borrow::Cow::Borrowed(&text.common);
+    }
+    let application = doc.app_ids.get("ACAD").map(|app| app.handle.value());
+    match crate::io::dwg::autocad_roundtrip::with_mtext_blocks(&text.common.extended_data, blocks, application) {
+        Some(xdata) => {
+            let mut common = text.common.clone();
+            common.extended_data = xdata;
+            std::borrow::Cow::Owned(common)
+        }
+        None => std::borrow::Cow::Borrowed(&text.common),
+    }
+}
+
+/// The version of a DWG source document whose entity records lack some of the values the native model holds.
+fn legacy_round_trip_version(doc: &CadDocument) -> Option<crate::types::DxfVersion> {
+    let version = doc.dwg_source_version.or(doc.dxf_source_version)?;
+    (super::registration::source_document(doc)
+        && doc.version == version
+        && crate::io::dwg::autocad_roundtrip::applies(version))
+    .then_some(version)
+}
+
 pub(super) fn common(
     doc: &CadDocument,
     common: &EntityCommon,
@@ -156,11 +186,28 @@ pub(super) fn common(
     subclass: &str,
     dynamic: bool,
 ) -> Vec<(&'static str, Value)> {
+    // A drawing of R14, R2000 or R2004 that AutoCAD saved from a later version states the true colour, line weight and
+    // material of an entity in round-trip records and the entity record holds the nearest index, no line weight or no
+    // material (ACadSharp reads exactly that): the native model holds the values themselves.
+    let legacy = legacy_round_trip_version(doc);
+    let legacy_data = legacy.and_then(|version| {
+        let values = crate::io::dwg::autocad_roundtrip::groups(common, doc, version);
+        if values.is_empty() {
+            return None;
+        }
+        let application = doc.app_ids.get("ACAD").map(|app| app.handle.value());
+        crate::io::dwg::autocad_roundtrip::with_groups(&common.extended_data, values, application)
+    });
+    let legacy_color = legacy
+        .filter(|version| !crate::io::dwg::autocad_roundtrip::stores_true_color(*version))
+        .and_then(|_| crate::io::dwg::autocad_roundtrip::aci_index(common));
     vec![
         ("BookColor", optional_handle(common.color_book_handle)),
         (
             "Color",
-            if super::registration::source_document(doc) {
+            if let Some(index) = legacy_color {
+                color(crate::types::Color::Index(index))
+            } else if super::registration::source_document(doc) {
                 super::common::entity_color(common)
             } else {
                 color(common.color)
@@ -168,7 +215,7 @@ pub(super) fn common(
         ),
         (
             "ExtendedData",
-            super::xdata::extended_data(doc, common.handle, &common.extended_data),
+            super::xdata::extended_data(doc, common.handle, legacy_data.as_ref().unwrap_or(&common.extended_data)),
         ),
         ("HasDynamicSubclass", bool_value(dynamic)),
         ("IsInvisible", bool_value(common.invisible)),
@@ -193,8 +240,26 @@ pub(super) fn common(
             })),
         ),
         ("LineTypeScale", number(common.linetype_scale)),
-        ("LineWeight", enum_value(common.line_weight.value() as i64)),
-        ("Material", optional_handle(material_handle(doc, common))),
+        (
+            "LineWeight",
+            enum_value(
+                if legacy.is_some_and(|version| !crate::io::dwg::autocad_roundtrip::stores_line_weight(version)) {
+                    crate::types::LineWeight::ByLayer.value()
+                } else {
+                    common.line_weight.value()
+                } as i64,
+            ),
+        ),
+        (
+            "Material",
+            optional_handle(
+                if legacy.is_some_and(|version| !crate::io::dwg::autocad_roundtrip::stores_material(version)) {
+                    None
+                } else {
+                    material_handle(doc, common)
+                },
+            ),
+        ),
         ("ObjectName", Value::String(object_name.to_string())),
         ("ObjectType", enum_value(object_type)),
         // DwgReaderConfiguration.IgnoreProxyGraphics defaults to true; the
@@ -1623,7 +1688,7 @@ fn collect_entity_part(
         ),
         EntityType::MText(value) => field_common(
             doc,
-            &value.common,
+            &mtext_common(doc, value),
             "MText",
             "MTEXT",
             0x2C,

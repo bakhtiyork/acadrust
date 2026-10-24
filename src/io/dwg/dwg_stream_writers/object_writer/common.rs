@@ -338,6 +338,34 @@ impl<'a> DwgObjectWriter<'a> {
             .unwrap_or(Handle::NULL)
     }
 
+    /// The extended data of an entity as the target version states it: a version without a field for the entity's true
+    /// colour, line weight or material keeps the value in the `ACAD` round-trip records AutoCAD writes (see
+    /// `autocad_roundtrip`).
+    ///
+    /// The records go with the entity types of the format itself. An entity of a class (type code 500 and up: the PDF
+    /// underlay of the AutoCAD samples) has none: AutoCAD's own R14 and R2000 files state the nearest index for its true
+    /// colour and no record.
+    pub(super) fn round_trip_xdata<'x>(
+        &self,
+        type_code: i16,
+        common: &'x crate::entities::EntityCommon,
+    ) -> std::borrow::Cow<'x, crate::xdata::ExtendedData> {
+        use crate::io::dwg::autocad_roundtrip as round_trip;
+        let unchanged = std::borrow::Cow::Borrowed(&common.extended_data);
+        if type_code >= 500 || !round_trip::applies(self.dxf_version) {
+            return unchanged;
+        }
+        let values = round_trip::groups(common, self.document, self.dxf_version);
+        if values.is_empty() {
+            return unchanged;
+        }
+        let application = self.document.app_ids.get("ACAD").map(|app| app.handle.value());
+        match round_trip::with_groups(&common.extended_data, values, application) {
+            Some(xdata) => std::borrow::Cow::Owned(xdata),
+            None => unchanged,
+        }
+    }
+
     // ── write_common_entity_data ────────────────────────────────────
     /// Full preamble for an entity: type code, handle, xdata, graphic
     /// flag, entity mode, reactors/xdic, layer/linetype, colour,

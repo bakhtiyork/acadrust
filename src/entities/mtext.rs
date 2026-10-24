@@ -112,6 +112,10 @@ pub struct MText {
     /// Background fill was recovered from legacy round-trip XData.
     #[cfg_attr(feature = "serde", serde(default))]
     pub background_from_xdata: bool,
+    /// The DWG of a version before R2004 this MTEXT was read from stated no line-spacing block (`MTEXTBEGIN`) for it, as
+    /// AutoCAD's R14 file states none for three dimension texts; the writer then states none. Provenance, not appearance.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub dwg_without_spacing_block: bool,
     /// Common entity data
     pub common: EntityCommon,
     /// Text content (may contain formatting codes)
@@ -220,6 +224,7 @@ impl MText {
             source_value: None,
             dxf_source: None,
             background_from_xdata: false,
+            dwg_without_spacing_block: false,
             common: EntityCommon::new(),
             value: String::new(),
             insertion_point: Vector3::ZERO,

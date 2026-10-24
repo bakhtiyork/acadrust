@@ -21,8 +21,9 @@ fn source(name: &str) -> PathBuf {
     line.start = Vector3::new(1.0, 2.0, 3.0);
     line.end = Vector3::new(4.0, 5.0, 6.0);
     doc.add_entity(EntityType::Line(line)).unwrap();
-    // A named (color book) color: the library refuses to write it before R2004.
+    // A named (color book) color: before R2004 it goes into AutoCAD's round-trip record of the colour.
     let mut named = Line::new();
+    named.common.color = acadrust::types::Color::from_rgb(1, 2, 3);
     named.common.color_name = Some("DIC COLOR GUIDE(R)$DIC 14".into());
     doc.add_entity(EntityType::Line(named)).unwrap();
     doc.header.fingerprint_guid = "{11111111-2222-3333-4444-555555555555}".into();

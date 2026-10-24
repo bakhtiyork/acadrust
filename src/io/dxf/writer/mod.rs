@@ -196,7 +196,8 @@ impl<'a> DxfWriter<'a> {
         writer: &mut W,
         output_version: crate::types::DxfVersion,
     ) -> Result<()> {
-        let prepared = self.prepare();
+        let mut prepared = self.prepare();
+        crate::io::dwg::autocad_roundtrip::prepare_for_dxf(&mut prepared, output_version);
         // The modern cell styles of a table style have no place in the DXF TABLESTYLE record: they travel
         // in a CELLSTYLEMAP object of its extension dictionary (an R2010+ DWG keeps them in the record). The
         // output states those objects besides the document's own; the document is not copied for them.

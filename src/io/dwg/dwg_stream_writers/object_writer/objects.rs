@@ -2166,12 +2166,21 @@ impl<'a> DwgObjectWriter<'a> {
 
         // R2010+ additional fields
         if self.version.r2010_plus() {
+            // A style read from a DWG before R2010 has no attachment fields and holds the defaults of a DXF without groups
+            // 272 and 273; AutoCAD's own R2010 and later files of such a drawing state "center of text" (9) for both
+            // (sample_AC1018.dwg to sample_AC1024.dwg, sample_AC1027.dwg and sample_AC1032.dwg).
+            let converted = self.document.dwg_source_version.is_some_and(|source| source < crate::types::DxfVersion::AC1024)
+                && style.text_top_attachment == crate::objects::TextAttachmentType::TopOfTopLine
+                && style.text_bottom_attachment == crate::objects::TextAttachmentType::BottomOfBottomLine;
+            let (top, bottom) = if converted {
+                (crate::objects::TextAttachmentType::CenterOfText, crate::objects::TextAttachmentType::CenterOfText)
+            } else {
+                (style.text_top_attachment, style.text_bottom_attachment)
+            };
             self.writer
                 .write_bit_short(style.text_attachment_direction as i16);
-            self.writer
-                .write_bit_short(style.text_top_attachment as i16);
-            self.writer
-                .write_bit_short(style.text_bottom_attachment as i16);
+            self.writer.write_bit_short(top as i16);
+            self.writer.write_bit_short(bottom as i16);
         }
 
         // R2013+ undocumented flag (DXF code 298)

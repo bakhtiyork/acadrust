@@ -29,14 +29,9 @@ fn old_dwg_omitted_lineweights_keep_entity_and_layer_defaults() {
         let read = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
             .read()
             .unwrap();
-        assert_eq!(
-            read.get_entity(h).unwrap().common().line_weight,
-            if version == DxfVersion::AC1014 {
-                LineWeight::ByLayer
-            } else {
-                LineWeight::Value(35)
-            }
-        );
+        // R14 records hold no line weight; AutoCAD's own R14 file keeps the entity's in its RTLwPs record (sample_AC1014.dwg:
+        // 75 entities), which the read restores. The layers' line weights it does not keep.
+        assert_eq!(read.get_entity(h).unwrap().common().line_weight, LineWeight::Value(35));
         assert_eq!(
             read.layers.get("0").unwrap().line_weight,
             if version == DxfVersion::AC1014 {
