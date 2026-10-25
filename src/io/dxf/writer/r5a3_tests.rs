@@ -91,7 +91,7 @@ fn builtin_material_channel_flags_are_written_only_where_the_source_version_stat
     old.objects.insert(changed.handle, ObjectType::Material(changed));
     let text = write(&old);
     assert!(first(records(&text, "MATERIAL")[0], 94).is_none());
-    assert!(text.contains("MATERIAL\r\n"), "the round-trip record states the material's values");
+    assert!(text.contains("102\r\nMATERIAL\r\n"), "the round-trip record states the material's values");
     old.version = DxfVersion::AC1021;
     let text = write(&old);
     assert_eq!(first(records(&text, "MATERIAL")[0], 94).as_deref(), Some("5"));
@@ -105,6 +105,10 @@ fn builtin_material_channel_flags_are_written_only_where_the_source_version_stat
         m
     }));
     assert_eq!(first(records(&write(&memory), "MATERIAL")[0], 94).as_deref(), Some("127"));
+    // ... from R2007 on: AutoCAD's DXF of R2000 and R2004 states the channel flags of no material, the built-in ones included
+    // (sample_AC1015_ascii.dxf, sample_AC1018_ascii.dxf; the round-trip record carries them).
+    memory.version = DxfVersion::AC1015;
+    assert!(first(records(&write(&memory), "MATERIAL")[0], 94).is_none());
 }
 
 #[test]

@@ -1489,9 +1489,8 @@ fn dwg_roundtrip_deep_r2000() {
     let report = compare_documents(&doc, &rt);
     assert_eq!(rt.classes.len(), 38);
     // 13 objects and the table style and multileader style dictionaries with their two styles (AutoCAD's own R2000 file holds
-    // them: sample_AC1015.dwg), kept since R5b-4, and the round-trip records that file holds for each layout, the VPORT control
-    // object and each view or viewport (R5b-9: 8 objects).
-    assert_eq!(rt.objects.len(), 25);
+    // them: sample_AC1015.dwg), kept since R5b-4.
+    assert_eq!(rt.objects.len(), 17);
 
     let expected_profile_changes = ["Object count mismatch:", "Class count mismatch:"];
     let unexpected = DiffReport {

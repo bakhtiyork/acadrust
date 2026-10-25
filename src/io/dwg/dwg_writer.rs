@@ -3447,10 +3447,8 @@ mod tests {
         expected.retain_legacy_dwg_classes();
         assert_eq!(decoded.classes.len(), expected.len());
         // 13 objects and the table style and multileader style dictionaries with their two styles: AutoCAD's own R2000 file
-        // holds them (sample_AC1015.dwg: ACAD_TABLESTYLE and ACAD_MLEADERSTYLE in the root dictionary), R5b-4; and the round-trip
-        // records of the two layouts (shade plot) and of the VPORT table (display settings) with their extension dictionaries,
-        // which the same file holds for each layout and for its VPORT control object (R5b-9: 6 objects).
-        assert_eq!(decoded.objects.len(), 23);
+        // holds them (sample_AC1015.dwg: ACAD_TABLESTYLE and ACAD_MLEADERSTYLE in the root dictionary), R5b-4.
+        assert_eq!(decoded.objects.len(), 17);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 
 use std::io::Cursor;
 
-use acadrust::objects::{ClassObject, ClassObjectData, Layout, Material, ObjectType, SectionViewStyle, XRecord};
+use acadrust::objects::{ClassObject, ClassObjectData, DictionaryCloningFlags, Layout, Material, ObjectType, SectionViewStyle, XRecord};
 use acadrust::types::{DxfVersion, Handle};
 use acadrust::{CadDocument, DwgReader, DwgWriter, DxfReader, DxfWriter};
 
@@ -28,9 +28,14 @@ fn dxf_write_and_read(document: &CadDocument, version: DxfVersion) -> CadDocumen
         .unwrap_or_else(|error| panic!("{version:?}: DXF read failed: {error}"))
 }
 
-/// The round-trip record in the extension dictionary of `owner`.
-fn record_of(document: &CadDocument, owner: Handle) -> Option<&XRecord> {
-    document.xrecord(owner, "ACAD_XREC_ROUNDTRIP")
+/// The round-trip record the file held in the extension dictionary of `owner`. The reader takes a record it applied out of the
+/// model (`with_round_trip_records` puts it back as the file held it, as the ACadSharp view and the writers do): the model has none.
+fn record_of(document: &CadDocument, owner: Handle) -> Option<XRecord> {
+    let record = document.with_round_trip_records().xrecord(owner, "ACAD_XREC_ROUNDTRIP").cloned();
+    if record.is_some() {
+        assert!(document.xrecord(owner, "ACAD_XREC_ROUNDTRIP").is_none(), "the reader took the record out of the model");
+    }
+    record
 }
 
 /// The group-102 names of a record, in order.
@@ -81,7 +86,10 @@ fn a_view_style_keeps_its_display_name_and_flags_before_r2018() {
         assert_eq!(base.display_name, "Imperial24", "{version:?}");
         assert_eq!(base.flags, 5, "{version:?}");
         let record = record_of(&out, handle).unwrap_or_else(|| panic!("{version:?}: no record"));
-        assert_eq!(names(record), ["DISPLAYNAME", "FLAGS"], "{version:?}");
+        assert_eq!(names(&record), ["DISPLAYNAME", "FLAGS"], "{version:?}");
+        // AutoCAD's records of R2000 and later keep existing objects when cloned (sample_AC1015.dwg); R14 states no flags
+        let flags = if version >= DxfVersion::AC1015 { DictionaryCloningFlags::KeepExisting } else { DictionaryCloningFlags::NotApplicable };
+        assert_eq!(record.cloning_flags, flags, "{version:?}");
         assert_eq!((record.entries[0].code, record.entries[1].value.as_string()), (102, Some("Imperial24")));
         assert_eq!(record.entries[2].code, 102);
         assert_eq!(record.entries[3].code, 90);
@@ -181,7 +189,7 @@ fn a_material_keeps_its_late_values_before_r2007() {
             "{version:?}"
         );
         let record = record_of(&out, handle).unwrap_or_else(|| panic!("{version:?}: no record"));
-        assert_eq!(names(record), ["MATERIAL"]);
+        assert_eq!(names(&record), ["MATERIAL"]);
         let codes: Vec<i32> = record.entries.iter().skip(1).map(|entry| entry.code).collect();
         assert_eq!(codes, [148, 149, 149, 93, 94, 282, 72, 77, 171, 175, 179, 273]);
     }
@@ -259,11 +267,12 @@ fn a_layout_keeps_its_shade_plot_values_before_r2004() {
         let (handle, layout) = named_layout(&out, "Model");
         assert_eq!((layout.shade_plot_mode, layout.shade_plot_resolution, layout.shade_plot_dpi), (1, 3, 600), "{version:?}");
         let record = record_of(&out, handle).unwrap_or_else(|| panic!("{version:?}: no record"));
-        assert_eq!(names(record), ["SHADEPLOT", "SHADEPLOTRESLEVEL", "SHADEPLOTCUSTOMDPI"]);
-        // each layout holds one, with AutoCAD's defaults where the layout states none
+        assert_eq!(names(&record), ["SHADEPLOT", "SHADEPLOTRESLEVEL", "SHADEPLOTCUSTOMDPI"]);
+        // a layout made in memory with the values a file without the record gives loses nothing: it gets none (a layout converted
+        // from a file of another version gets one, as AutoCAD's down-saves state one for each layout)
         let (paper, layout) = named_layout(&out, "Layout1");
         assert_eq!((layout.shade_plot_mode, layout.shade_plot_resolution, layout.shade_plot_dpi), (0, 0, 300), "{version:?}");
-        assert!(record_of(&out, paper).is_some(), "{version:?}: every layout holds the record");
+        assert!(record_of(&out, paper).is_none(), "{version:?}: a default layout made in memory has no record");
     }
     let out = write_and_read(&source, DxfVersion::AC1018);
     let (handle, layout) = named_layout(&out, "Model");
@@ -375,18 +384,19 @@ fn a_viewport_a_view_and_a_vport_keep_their_display_settings_before_r2007() {
         // R2004 holds the shade plot mode in the entity; before it, the record does
         assert_eq!(viewport.shade_plot_mode, 2, "{version:?}: shade plot mode");
         let record = record_of(&out, viewport.common.handle).unwrap_or_else(|| panic!("{version:?}: no viewport record"));
-        let shade = names(record).contains(&"SHADEPLOT");
-        assert_eq!(shade, version < DxfVersion::AC1018, "{version:?}");
-        assert!(names(record).contains(&"GRIDDISPLAY") && names(record).contains(&"VISUALSTYLE"), "{version:?}");
+        // AutoCAD states the shade plot mode first (sample_AC1014.dwg, sample_AC1015.dwg)
+        let shade = names(&record).first() == Some(&"SHADEPLOT");
+        assert_eq!(shade, version < DxfVersion::AC1018, "{version:?}: {:?}", names(&record));
+        assert!(names(&record).contains(&"GRIDDISPLAY") && names(&record).contains(&"VISUALSTYLE"), "{version:?}");
         let view = out.views.iter().find(|view| view.name.eq_ignore_ascii_case("V1")).expect("the view");
         assert!(view.camera_plottable && view.visual_style_handle != Handle::NULL, "{version:?}");
         let record = record_of(&out, view.handle).unwrap_or_else(|| panic!("{version:?}: no view record"));
-        assert!(names(record).contains(&"CAMERAPLOTTABLE") && names(record).contains(&"VISUALSTYLE"), "{version:?}");
+        assert!(names(&record).contains(&"CAMERAPLOTTABLE") && names(&record).contains(&"VISUALSTYLE"), "{version:?}");
         let vport = out.vports.iter().next().expect("the VPORT");
         assert_eq!((vport.grid_flags.to_bits(), vport.grid_major, vport.brightness, vport.contrast, vport.default_lighting_type), (7, 3, 0.25, 0.75, 2), "{version:?}");
         assert_ne!(vport.visual_style_handle, Handle::NULL, "{version:?}");
         let record = record_of(&out, out.vports.handle()).unwrap_or_else(|| panic!("{version:?}: no VPORT record"));
-        assert!(names(record).iter().any(|name| name.starts_with("VTR_") && name.ends_with("_GRIDDISPLAY")), "{version:?}: {:?}", names(record));
+        assert!(names(&record).iter().any(|name| name.starts_with("VTR_") && name.ends_with("_GRIDDISPLAY")), "{version:?}: {:?}", names(&record));
     }
     // R2007 holds them in the objects and states no record
     let out = write_and_read(&source, DxfVersion::AC1021);
@@ -427,7 +437,7 @@ fn a_dxf_of_r2000_holds_the_shade_plot_record_of_a_viewport_only() {
     let viewport = the_viewport(&out);
     assert_eq!(viewport.shade_plot_mode, 2, "restored from the record");
     let record = record_of(&out, viewport.common.handle).expect("AutoCAD's DXF of R2000 holds it");
-    assert_eq!(names(record), ["SHADEPLOT"]);
+    assert_eq!(names(&record), ["SHADEPLOT"]);
     let view = out.views.iter().find(|view| view.name.eq_ignore_ascii_case("V1")).expect("the view");
     assert!(record_of(&out, view.handle).is_none(), "AutoCAD's DXF holds no view record");
     assert!(record_of(&out, out.vports.handle()).is_none());
@@ -459,7 +469,7 @@ fn a_solid_keeps_the_handle_of_its_history_before_r2007() {
         let (solid, found) = history_of(&out);
         assert!(found.is_some_and(|found| found != Handle::NULL), "{version:?}");
         let record = record_of(&out, solid).unwrap_or_else(|| panic!("{version:?}: no record"));
-        assert_eq!(names(record), ["ACAD_SOLID_HIST", "ACAD_SOLID_HIST1", "ACAD_SOLID_HIST2"]);
+        assert_eq!(names(&record), ["ACAD_SOLID_HIST", "ACAD_SOLID_HIST1", "ACAD_SOLID_HIST2"]);
         assert_eq!(record.entries[1].code, 360);
         assert_eq!(record.entries.last().map(|entry| entry.code), Some(90));
         let _ = handle;
@@ -498,25 +508,29 @@ fn the_spline(document: &CadDocument) -> acadrust::entities::Spline {
 }
 
 /// AutoCAD's files before R2013 keep a fit-point spline's knot parameterization in the extended data `ACAD_SPLINE_DATA 1070 100
-/// <a> 1070 101 <b> 1070 102 <knot parameterization>` (the spline #434 of sample_AC1014.dwg to sample_AC1024.dwg: 0, 0, 2); the
-/// fork states the closed and periodic flags in the first two, which the fit-point form has no place for.
+/// 1070 0 1070 101 1070 0 1070 102 <knot parameterization>` (the open spline #434 of sample_AC1014.dwg to sample_AC1024.dwg: 0, 0,
+/// 2). The meaning of the first two values is not known (the samples state 0 for an open, non-periodic spline only): a closed spline
+/// gets no record, and its flag is lost before R2013 as the fit-point form of the older record has none (`tests/issue114.rs`).
 #[test]
-fn a_fit_point_spline_keeps_its_knot_parameterization_and_closed_flag_before_r2013() {
-    for closed in [false, true] {
-        let source = fit_spline_document(closed);
-        for version in [DxfVersion::AC1014, DxfVersion::AC1015, DxfVersion::AC1018, DxfVersion::AC1024] {
-            let out = write_and_read(&source, version);
-            let spline = the_spline(&out);
-            assert_eq!(spline.knot_parameterization, 2, "{version:?}");
-            assert_eq!(spline.flags.closed, closed, "{version:?}");
-            assert_eq!(spline.fit_points.len(), 4, "{version:?}");
-            // the record is consumed by the reader (the model holds the values), so a second write states it again
-            assert!(spline.common.extended_data.get_record("ACAD_SPLINE_DATA").is_none(), "{version:?}");
-            let again = write_and_read(&out, version);
-            assert_eq!((the_spline(&again).knot_parameterization, the_spline(&again).flags.closed), (2, closed), "{version:?}");
-        }
-        let out = write_and_read(&source, DxfVersion::AC1027);
-        assert_eq!((the_spline(&out).knot_parameterization, the_spline(&out).flags.closed), (2, closed));
+fn an_open_fit_point_spline_keeps_its_knot_parameterization_before_r2013() {
+    let source = fit_spline_document(false);
+    for version in [DxfVersion::AC1014, DxfVersion::AC1015, DxfVersion::AC1018, DxfVersion::AC1024] {
+        let out = write_and_read(&source, version);
+        let spline = the_spline(&out);
+        assert_eq!((spline.knot_parameterization, spline.flags.closed, spline.fit_points.len()), (2, false, 4), "{version:?}");
+        // the record is consumed by the reader (the model holds the value), so a second write states it again
+        assert!(spline.common.extended_data.get_record("ACAD_SPLINE_DATA").is_none(), "{version:?}");
+        let again = write_and_read(&out, version);
+        assert_eq!(the_spline(&again).knot_parameterization, 2, "{version:?}");
+    }
+    let out = write_and_read(&source, DxfVersion::AC1027);
+    assert_eq!(the_spline(&out).knot_parameterization, 2);
+    // a closed spline: no record whose first values would be a guess
+    let closed = fit_spline_document(true);
+    for version in [DxfVersion::AC1015, DxfVersion::AC1024] {
+        let out = write_and_read(&closed, version);
+        assert_ne!(the_spline(&out).knot_parameterization, 2, "{version:?}: no record states it");
+        assert!(!the_spline(&out).flags.closed, "{version:?}");
     }
 }
 
@@ -525,11 +539,16 @@ fn a_spline_record_is_edited_with_the_model_and_a_dxf_has_none() {
     let mut down = write_and_read(&fit_spline_document(false), DxfVersion::AC1018);
     let handle = the_spline(&down).common.handle;
     if let Some(acadrust::entities::EntityType::Spline(spline)) = down.get_entity_mut(handle) {
-        spline.flags.closed = true;
         spline.knot_parameterization = 1;
     }
     let again = write_and_read(&down, DxfVersion::AC1018);
-    assert_eq!((the_spline(&again).knot_parameterization, the_spline(&again).flags.closed), (1, true));
+    assert_eq!(the_spline(&again).knot_parameterization, 1);
+    // closed after the read: the record goes (no guessed value is written)
+    let mut closed = again.clone();
+    if let Some(acadrust::entities::EntityType::Spline(spline)) = closed.get_entity_mut(handle) {
+        spline.flags.closed = true;
+    }
+    assert_ne!(the_spline(&write_and_read(&closed, DxfVersion::AC1018)).knot_parameterization, 1);
     // AutoCAD's DXF files of R2000 to R2013 hold no ACAD_SPLINE_DATA
     let out = dxf_write_and_read(&fit_spline_document(false), DxfVersion::AC1018);
     assert!(the_spline(&out).common.extended_data.get_record("ACAD_SPLINE_DATA").is_none());
@@ -575,11 +594,15 @@ fn the_dimension_linetypes_of_the_header_are_kept_before_r2007() {
     for version in [DxfVersion::AC1014, DxfVersion::AC1015, DxfVersion::AC1018] {
         let out = write_and_read(&source, version);
         assert_eq!(dimension_linetypes(&out), want, "{version:?}");
-        let dictionary = header_vars_dictionary(&out).unwrap_or_else(|| panic!("{version:?}: no dictionary"));
-        let Some(ObjectType::Dictionary(entries)) = out.objects.get(&dictionary) else { panic!("not a dictionary") };
-        let mut keys: Vec<&str> = entries.entries.iter().map(|(name, _)| name.as_str()).collect();
-        keys.sort();
+        assert!(header_vars_dictionary(&out).is_none(), "{version:?}: the reader took the chain out of the model");
+        let file = out.with_round_trip_records();
+        let dictionary = header_vars_dictionary(&file).unwrap_or_else(|| panic!("{version:?}: no dictionary"));
+        let Some(ObjectType::Dictionary(entries)) = file.objects.get(&dictionary) else { panic!("not a dictionary") };
+        // listed by name, as AutoCAD lists them; the entry is the first of the root dictionary (sample_AC1015.dwg)
+        let keys: Vec<&str> = entries.entries.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(keys, ["DIMLTEX1", "DIMLTEX2", "DIMLTYPE"], "{version:?}");
+        let Some(ObjectType::Dictionary(root)) = file.objects.get(&file.header.named_objects_dict_handle) else { panic!("no root") };
+        assert_eq!(root.entries[0].0, "ACAD_2007HEADERVARS_RT", "{version:?}");
     }
     let out = write_and_read(&source, DxfVersion::AC1021);
     assert_eq!(dimension_linetypes(&out), want);
@@ -603,7 +626,8 @@ fn the_dimension_linetype_records_are_edited_and_dropped_with_the_version() {
     for (version, held) in [(DxfVersion::AC1015, true), (DxfVersion::AC1018, true), (DxfVersion::AC1021, false)] {
         let out = dxf_write_and_read(&document_with_dimension_linetypes(), version);
         assert_eq!(dimension_linetypes(&out), ["DASHED", "DOT", "HIDDEN"].map(String::from), "{version:?}");
-        assert_eq!(header_vars_dictionary(&out).is_some(), held, "{version:?}");
+        assert_eq!(header_vars_dictionary(&out.with_round_trip_records()).is_some(), held, "{version:?}");
+        assert!(header_vars_dictionary(&out).is_none(), "{version:?}");
     }
 }
 
@@ -620,7 +644,13 @@ fn document_with_uniform_block() -> CadDocument {
     document
 }
 
+/// The `Edit` record of the block `name` the file held (the reader takes the chain it applied out of the model).
 fn block_chain(document: &CadDocument, name: &str) -> Option<Vec<i32>> {
+    assert!(native_block_chain(document, name).is_none(), "the reader took the chain out of the model");
+    native_block_chain(&document.with_round_trip_records(), name)
+}
+
+fn native_block_chain(document: &CadDocument, name: &str) -> Option<Vec<i32>> {
     let handle = document.block_records.iter().find(|block| block.name.eq_ignore_ascii_case(name))?.handle;
     let extension = document.extension_dictionary_handle(handle)?;
     let ObjectType::Dictionary(extension) = document.objects.get(&extension)? else { return None };
@@ -670,9 +700,12 @@ fn the_block_record_is_edited_and_dropped_with_the_version() {
     assert!(block_chain(&again, "B1").is_none() && block_chain(&again, "B2").is_some());
     let up = write_and_read(&again, DxfVersion::AC1032);
     assert!(scales_uniformly(&up, "B2") && block_chain(&up, "B2").is_none());
-    // AutoCAD's DXF files hold no such record
-    let out = dxf_write_and_read(&document_with_uniform_block(), DxfVersion::AC1018);
-    assert!(block_chain(&out, "B1").is_none());
+    // AutoCAD's DXF of R2000 and R2004 holds the chain too (sample_AC1015_ascii.dxf, sample_AC1018_ascii.dxf); R2007 holds the flag
+    for version in [DxfVersion::AC1015, DxfVersion::AC1018, DxfVersion::AC1021] {
+        let out = dxf_write_and_read(&document_with_uniform_block(), version);
+        assert!(scales_uniformly(&out, "B1") && !scales_uniformly(&out, "B2"), "{version:?}");
+        assert_eq!(block_chain(&out, "B1").is_some(), version < DxfVersion::AC1021, "{version:?}");
+    }
 }
 
 // ---- multi-line attributes ----------------------------------------------------------------------------------------------
@@ -750,15 +783,21 @@ fn a_multiline_attribute_keeps_its_mtext_before_r2018() {
         }
         assert_eq!(definition.mtext_flag, acadrust::entities::MTextFlag::ConstantMultiLine, "{version:?}");
         assert_eq!(attribute.mtext_flag, acadrust::entities::MTextFlag::MultiLine, "{version:?}");
-        let extension = out.extension_dictionary_handle(definition.common.handle).unwrap_or_else(|| panic!("{version:?}: no extension dictionary"));
-        let Some(ObjectType::Dictionary(extension)) = out.objects.get(&extension) else { panic!("not a dictionary") };
+        // the reader took the chain out of the model; the extension dictionary stays, empty (as AutoCAD's files keep one)
+        let kept = out.extension_dictionary_handle(definition.common.handle).unwrap_or_else(|| panic!("{version:?}: no extension dictionary"));
+        assert!(matches!(out.objects.get(&kept), Some(ObjectType::Dictionary(entries)) if entries.entries.is_empty()), "{version:?}");
+        let file = out.with_round_trip_records();
+        let extension = file.extension_dictionary_handle(definition.common.handle).unwrap_or_else(|| panic!("{version:?}: no extension dictionary"));
+        let Some(ObjectType::Dictionary(extension)) = file.objects.get(&extension) else { panic!("not a dictionary") };
+        let keys: Vec<&str> = extension.entries.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(keys, ["ACAD_MLATT", "ACAD_XREC_ROUNDTRIP"], "{version:?}: listed by name, as AutoCAD lists them");
         let mlatt = extension.get("ACAD_MLATT").unwrap_or_else(|| panic!("{version:?}: no ACAD_MLATT"));
-        let Some(ObjectType::XRecord(mlatt)) = out.objects.get(&mlatt) else { panic!("not a record") };
+        let Some(ObjectType::XRecord(mlatt)) = file.objects.get(&mlatt) else { panic!("not a record") };
         let codes: Vec<i32> = mlatt.entries.iter().map(|entry| entry.code).collect();
         assert_eq!(codes, [70, 70, 70, 40, 2, 1, 10, 40, 41, 46, 71, 72, 1, 73, 44], "{version:?}");
         assert_eq!(mlatt.entries[5].value.as_string(), Some("Embedded Object"));
         let height = record_of(&out, definition.common.handle).unwrap_or_else(|| panic!("{version:?}: no height record"));
-        assert_eq!(names(height), ["ACAD_MATT_HEIGHT"], "{version:?}");
+        assert_eq!(names(&height), ["ACAD_MATT_HEIGHT"], "{version:?}");
     }
     // R2018 states the MTEXT in the attribute records
     let out = write_and_read(&source, DxfVersion::AC1032);
@@ -844,7 +883,7 @@ fn a_modern_table_keeps_its_typed_cells_in_the_objects_autocad_keeps_them_in() {
         assert_eq!(cell.contents[0].value.value_type, acadrust::entities::CellValueType::Double, "{version:?}");
         assert_eq!(cell.contents[0].value.numeric_value, 0.5, "{version:?}");
         assert_eq!(table_objects(&out), (1, 1), "{version:?}: the objects stay in the document, as in a file of AutoCAD's");
-        let record = record_of(&out, table.common.handle).unwrap_or_else(|| panic!("{version:?}: no record"));
+        let record = out.xrecord(table.common.handle, "ACAD_XREC_ROUNDTRIP").unwrap_or_else(|| panic!("{version:?}: no record"));
         assert_eq!(record.entries[0].value.as_string(), Some("ACAD_ROUNDTRIP_2008_TABLE_ENTITY"));
         assert_eq!(record.entries[1].code, 360);
         assert_eq!(record.entries.last().map(|entry| entry.code), Some(361));
@@ -894,5 +933,52 @@ fn the_record_of_a_control_point_spline_stays_as_the_file_had_it() {
         // written again, the record is the file's (the writer does not make one from the control-point spline's values)
         let again = write_and_read(&out, version);
         assert_eq!(the_spline(&again).common.extended_data.get_record("ACAD_SPLINE_DATA").map(|r| r.values.clone()), Some(record.values.clone()), "{version:?}");
+        // the record was not applied: an up-save is not its writer's to drop (what it states is lost otherwise)
+        for up in [DxfVersion::AC1027, DxfVersion::AC1032] {
+            let out = write_and_read(&out, up);
+            assert_eq!(the_spline(&out).common.extended_data.get_record("ACAD_SPLINE_DATA").map(|r| r.values.clone()), Some(record.values.clone()), "{version:?} -> {up:?}");
+        }
     }
+}
+
+/// The reader takes only the groups it applied out of a record: a group of another producer stays in the model, and a writer
+/// keeps it.
+#[test]
+fn a_reader_takes_only_the_groups_it_applied_out_of_a_record() {
+    use acadrust::objects::XRecordEntry;
+    let (source, _) = document_with_material();
+    let out = write_and_read(&source, DxfVersion::AC1015);
+    let mut file = out.with_round_trip_records();
+    let (handle, _) = named_material(&file, "Brick");
+    let record = file.xrecord_mut(handle, "ACAD_XREC_ROUNDTRIP").expect("the record the file held");
+    record.entries.push(XRecordEntry::string(102, "OTHERAPP"));
+    record.entries.push(XRecordEntry::new(70, acadrust::objects::XRecordValue::Int16(7)));
+    let again = write_and_read(&file, DxfVersion::AC1015);
+    let (handle, material) = named_material(&again, "Brick");
+    assert_eq!((material.reflectivity, material.channel_flags), (0.15, 17));
+    let kept = again.xrecord(handle, "ACAD_XREC_ROUNDTRIP").expect("the group the reader did not apply stays");
+    assert_eq!(names(kept), ["OTHERAPP"]);
+    let file = again.with_round_trip_records();
+    assert_eq!(names(file.xrecord(handle, "ACAD_XREC_ROUNDTRIP").expect("the file's record")), ["MATERIAL", "OTHERAPP"]);
+}
+
+/// A record whose owner was deleted after the read is not written again.
+#[test]
+fn a_record_of_a_deleted_owner_is_not_written_again() {
+    let (source, _) = document_with_material();
+    let mut out = write_and_read(&source, DxfVersion::AC1015);
+    let (handle, _) = named_material(&out, "Brick");
+    // the material goes with its extension dictionary
+    let extension = out.extension_dictionary_handle(handle).expect("the extension dictionary the record was in");
+    out.objects.remove(&extension);
+    out.objects.remove(&handle);
+    for object in out.objects.values_mut() {
+        if let ObjectType::Dictionary(dictionary) = object {
+            dictionary.entries.retain(|(_, target)| *target != handle);
+        }
+    }
+    let file = out.with_round_trip_records();
+    assert!(file.objects.values().all(|object| !matches!(object, ObjectType::XRecord(record) if record.owner == extension)));
+    let again = write_and_read(&out, DxfVersion::AC1015);
+    assert!(again.objects.values().all(|object| !matches!(object, ObjectType::Material(material) if material.name == "Brick")));
 }

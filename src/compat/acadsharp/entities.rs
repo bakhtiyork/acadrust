@@ -53,10 +53,7 @@ fn spline_flags(doc: &CadDocument, value: &Spline) -> i64 {
     } else {
         i64::from(value.dxf_flags as u16)
     };
-    // The fit-point form of a record before R2013 has no closed or periodic flag: the native model holds the ones AutoCAD's
-    // `ACAD_SPLINE_DATA` record states, which ACadSharp reads as extended data.
-    let fit_form_before_r2013 = value.dwg_scenario == Some(2) && doc.version < DxfVersion::AC1027;
-    if value.flags.closed && !fit_form_before_r2013 {
+    if value.flags.closed {
         flags |= 1;
     }
     // ACadSharp seeds Flags from Flags1.Closed before reading the scenario
@@ -69,7 +66,7 @@ fn spline_flags(doc: &CadDocument, value: &Spline) -> i64 {
     {
         flags |= 1;
     }
-    if value.flags.periodic && !fit_form_before_r2013 {
+    if value.flags.periodic {
         flags |= 2;
     }
     if value.flags.rational {

@@ -10053,8 +10053,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if stated_r2007(93, obj.illumination_model != defaults.illumination_model) {
             self.writer.write_i32(93, obj.illumination_model)?;
         }
-        // Built-in materials always carry the channel flags; the others when the source or an edit has them.
-        if builtin && obj.dxf_source.is_none() && r2007_fields
+        // Built-in materials always carry the channel flags; the others when the source or an edit has them. Below R2007 none
+        // does (sample_AC1015_ascii.dxf and sample_AC1018_ascii.dxf: the record carries them for the built-in materials too).
+        if builtin && obj.dxf_source.is_none() && r2007_fields && body_has_them
             || stated_r2007(94, obj.channel_flags != defaults.channel_flags)
         {
             self.writer.write_i32(94, obj.channel_flags)?;

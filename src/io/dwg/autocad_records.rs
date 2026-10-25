@@ -22,8 +22,9 @@
 //! (The spline's `ACAD_SPLINE_DATA` is extended data: `autocad_conversions`. The R14 key of a table style's cell style map and the
 //! TABLECONTENT / TABLEGEOMETRY objects of a table: `objects::table_style`, `entities::table`.)
 //!
-//! The native model holds the values themselves. A reader restores them from the record (the record stays an object of the
-//! document, so the ACadSharp view of the file is unchanged: the view shows what ACadSharp reads, see `masked`); the writer
+//! The native model holds the values themselves. A reader restores them from the record and takes what it applied out of the model
+//! (`take_groups`, `take_chain`; the document keeps the changes, and the ACadSharp view, which shows what ACadSharp reads, and the
+//! writers put the objects back: `reinstate`, `masked`); the writer
 //! states the groups from the native values for the versions that need them, replacing an earlier copy and keeping any other
 //! group; for a version that holds the values itself the writer drops the groups it applied, and a record that holds anything
 //! else stays. A group that does not have the shape AutoCAD writes is another producer's data: it is neither read nor changed.
@@ -32,7 +33,8 @@
 //! reader gives a file without the record).
 //!
 //! A DXF holds a record only where AutoCAD's own DXF of the version does (owner decision 2026-10-24): R2000 to R2013 view styles,
-//! materials, dimension linetypes and multi-line attributes, and the layout's and the viewport's shade plot at R2000. For the
+//! materials, dimension linetypes and multi-line attributes, R2000 and R2004 the uniform scale of blocks, and the layout's and the
+//! viewport's shade plot at R2000. For the
 //! other kinds a DXF refreshes the groups a record has (a drawing read from a DWG keeps its objects) and makes and drops none.
 use crate::document::CadDocument;
 use crate::objects::{ObjectType, XRecordEntry, XRecordValue};
@@ -196,8 +198,9 @@ impl Ext {
         handle
     }
 
-    /// The XRECORD `key` of the extension dictionary of `owner`, made when it is missing.
-    fn ensure_record(&mut self, document: &mut CadDocument, owner: Handle, key: &str) -> Handle {
+    /// The XRECORD `key` of the extension dictionary of `owner`, made when it is missing (with the cloning flags AutoCAD gives a
+    /// record of `version`, listed by name).
+    fn ensure_record(&mut self, document: &mut CadDocument, owner: Handle, key: &str, version: DxfVersion) -> Handle {
         let dictionary = self.ensure(document, owner);
         if let Some(record) = dictionary_at(document, dictionary).and_then(|dictionary| dictionary.get(key)) {
             if matches!(document.objects.get(&record), Some(ObjectType::XRecord(_))) {
@@ -208,20 +211,18 @@ impl Ext {
         let mut record = crate::objects::XRecord::named(key);
         record.handle = handle;
         record.owner = dictionary;
+        record.cloning_flags = chain_flags(version).1;
         document.objects.insert(handle, ObjectType::XRecord(record));
         if let Some(ObjectType::Dictionary(entries)) = document.objects.get_mut(&dictionary) {
             if let Some((_, target)) = entries.entries.iter_mut().find(|(name, _)| name.eq_ignore_ascii_case(key)) {
                 *target = handle;
             } else {
-                entries.add_entry(key, handle);
+                add_sorted(entries, key, handle, false);
             }
         }
         handle
     }
 
-    fn forget(&mut self, owner: Handle) {
-        self.by_owner.remove(&owner);
-    }
 }
 
 /// The handle of the round-trip record of `owner`.
@@ -237,9 +238,9 @@ fn record_of(document: &CadDocument, ext: &Ext, owner: Handle) -> Option<Handle>
 /// State `wanted` as the groups of `owner`'s record that `owns` names: a group the record has is replaced (or removed when
 /// `wanted` lacks it), a group it lacks is appended. The record is created when `create` is set and there are groups to
 /// state; a record left empty by the removal goes with its dictionary when nothing else is in it.
-fn state(document: &mut CadDocument, ext: &mut Ext, owner: Handle, owns: &dyn Fn(&str) -> bool, wanted: Vec<Group>, create: bool) {
+fn state(document: &mut CadDocument, ext: &mut Ext, owner: Handle, owns: &dyn Fn(&str) -> bool, wanted: Vec<Group>, create: bool, version: DxfVersion) {
     let existing = record_of(document, ext, owner);
-    let Some(record) = existing.or_else(|| (create && !wanted.is_empty()).then(|| ext.ensure_record(document, owner, KEY))) else {
+    let Some(record) = existing.or_else(|| (create && !wanted.is_empty()).then(|| ext.ensure_record(document, owner, KEY, version))) else {
         return;
     };
     let current = groups_of(document, record);
@@ -269,34 +270,215 @@ fn state(document: &mut CadDocument, ext: &mut Ext, owner: Handle, owns: &dyn Fn
     }
 }
 
-/// Remove an empty record and, when it was the only entry, the extension dictionary that held it.
+/// Remove an empty record from the extension dictionary that held it. The dictionary stays, also when empty, as in AutoCAD's own
+/// files of the versions that hold the values (`take_chain`).
 fn remove_empty(document: &mut CadDocument, ext: &mut Ext, owner: Handle, record: Handle) {
     let Some(dictionary) = ext.of(document, owner) else {
         return;
     };
-    let mut now_empty = false;
     if let Some(ObjectType::Dictionary(entries)) = document.objects.get_mut(&dictionary) {
         entries.entries.retain(|(_, handle)| *handle != record);
         entries.hard_owner_entries.retain(|name| entries.entries.iter().any(|(entry, _)| entry == name));
-        now_empty = entries.entries.is_empty();
     }
     document.objects.remove(&record);
-    if now_empty {
-        document.objects.remove(&dictionary);
-        document.xdic_by_handle.remove(&owner);
-        ext.forget(owner);
-        match document.objects.get_mut(&owner) {
-            Some(ObjectType::ClassObject(object)) => object.xdictionary_handle = None,
-            Some(ObjectType::Layout(object)) => object.xdictionary_handle = None,
-            Some(ObjectType::Material(object)) => object.xdictionary_handle = None,
-            _ => {}
-        }
-    }
 }
 
 /// Whether writing the document as `version` is a conversion: the file it was read from, if any, is of another version.
 fn converts(document: &CadDocument, version: DxfVersion) -> bool {
     !document.is_source_version(version)
+}
+
+/// Whether the document was made in memory: it was read from no file.
+fn in_memory(document: &CadDocument) -> bool {
+    document.dwg_source_version.is_none() && document.dxf_source_version.is_none()
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What a reader takes out of the model. A record is the file's way of holding a value of an object its version has no field
+// for: once the reader has given the object the value, the record (and each dictionary of a dictionary it leaves empty; the
+// owner's extension dictionary stays) leaves the model, as `autocad_conversions` takes the extended-data records it applied. The document
+// keeps each change (`Consumed`) so that the ACadSharp view (which shows the file as ACadSharp reads it) and a writer (which
+// states the records again from the native values, keeping the objects the file had) can put them back (`reinstate`). Groups
+// the reader did not apply stay where they are.
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// One change a reader made when it took a record out of the model.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) enum Consumption {
+    /// The entry `name` -> `target` at `position` of `dictionary` was removed.
+    Entry { dictionary: Handle, position: usize, name: String, target: Handle, hard: bool },
+    /// The object (as the file had it) was removed, or replaced by the groups the reader did not apply.
+    Object(Handle, ObjectType),
+    /// The reactors the document map held for a removed object.
+    Reactors(Handle, Vec<Handle>),
+}
+
+/// The changes a reader made, in order.
+#[derive(Debug, Clone, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct Consumed {
+    changes: Vec<Consumption>,
+}
+
+impl Consumed {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+
+    /// The objects the reader removed or reduced (the records it applied).
+    fn taken(&self) -> std::collections::HashSet<Handle> {
+        self.changes
+            .iter()
+            .filter_map(|change| match change {
+                Consumption::Object(handle, _) => Some(*handle),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+fn object_owner(object: &ObjectType) -> Handle {
+    match object {
+        ObjectType::Dictionary(value) => value.owner,
+        ObjectType::XRecord(value) => value.owner,
+        _ => Handle::NULL,
+    }
+}
+
+fn take_object(document: &mut CadDocument, handle: Handle) {
+    if let Some(object) = document.objects.remove(&handle) {
+        document.consumed_records.changes.push(Consumption::Object(handle, object));
+        if let Some(reactors) = document.reactors_by_handle.remove(&handle) {
+            document.consumed_records.changes.push(Consumption::Reactors(handle, reactors));
+        }
+    }
+}
+
+/// Take the record `record` out of the model, with each dictionary of a dictionary it leaves empty (`ACAD_2007HEADERVARS_RT`,
+/// `AcDbBlockTableRecordData`). The extension dictionary of the owner stays, also when empty: AutoCAD's files keep an extension
+/// dictionary that held only round-trip records in the older ones (the Model layout #22's #194, the blocks #A91 and #A96's #A92
+/// and #A97: present and empty in sample_AC1021.dwg to sample_AC1032.dwg, holding only the records in sample_AC1014.dwg and
+/// sample_AC1015.dwg), and the root dictionary stays.
+fn take_chain(document: &mut CadDocument, record: Handle) {
+    let root = document.header.named_objects_dict_handle;
+    let mut child = record;
+    loop {
+        let Some(parent) = document.objects.get(&child).map(object_owner) else { return };
+        if let Some(ObjectType::Dictionary(dictionary)) = document.objects.get_mut(&parent) {
+            if let Some(position) = dictionary.entries.iter().position(|(_, target)| *target == child) {
+                let (name, target) = dictionary.entries.remove(position);
+                let hard = dictionary.is_entry_hard_owner(&name);
+                dictionary.hard_owner_entries.retain(|entry| !entry.eq_ignore_ascii_case(&name));
+                document.consumed_records.changes.push(Consumption::Entry { dictionary: parent, position, name, target, hard });
+            }
+        }
+        take_object(document, child);
+        let Some(ObjectType::Dictionary(dictionary)) = document.objects.get(&parent) else { return };
+        if !dictionary.entries.is_empty() || parent == root {
+            return;
+        }
+        if !matches!(document.objects.get(&dictionary.owner), Some(ObjectType::Dictionary(_))) {
+            return;
+        }
+        // A dictionary of a dictionary: it goes from its parent too.
+        child = parent;
+    }
+}
+
+/// Take the groups of `record` that `applied` names out of the model: the whole record when nothing else is in it.
+fn take_groups(document: &mut CadDocument, record: Handle, applied: &[String]) {
+    if applied.is_empty() {
+        return;
+    }
+    let groups = groups_of(document, record);
+    let kept: Vec<Group> = groups.iter().filter(|group| !applied.contains(&group.name)).cloned().collect();
+    if kept.len() == groups.len() {
+        return;
+    }
+    if kept.is_empty() {
+        take_chain(document, record);
+        return;
+    }
+    let Some(ObjectType::XRecord(xrecord)) = document.objects.get_mut(&record) else { return };
+    let original = ObjectType::XRecord(xrecord.clone());
+    xrecord.entries = join(&kept);
+    xrecord.raw_dwg_data = None;
+    xrecord.raw_dwg_version = None;
+    xrecord.source_values.clear();
+    xrecord.synchronize_object_references();
+    document.consumed_records.changes.push(Consumption::Object(record, original));
+}
+
+/// Put back what the reader took out of the model: the objects as the file had them and their dictionary entries. An object
+/// whose dictionary is gone (its owner was deleted with it) stays out; an entry whose name the dictionary has by now stays out.
+pub(crate) fn reinstate(document: &mut CadDocument) {
+    let changes = std::mem::take(&mut document.consumed_records.changes);
+    let mut skipped: std::collections::HashSet<Handle> = std::collections::HashSet::new();
+    for change in changes.into_iter().rev() {
+        match change {
+            Consumption::Object(handle, object) => {
+                let owner = object_owner(&object);
+                let kept = document.objects.contains_key(&handle) || (!skipped.contains(&owner) && document.objects.contains_key(&owner));
+                if kept {
+                    document.objects.insert(handle, object);
+                } else {
+                    skipped.insert(handle);
+                }
+            }
+            Consumption::Reactors(handle, reactors) => {
+                if !skipped.contains(&handle) {
+                    document.reactors_by_handle.entry(handle).or_insert(reactors);
+                }
+            }
+            Consumption::Entry { dictionary, position, name, target, hard } => {
+                if skipped.contains(&target) {
+                    continue;
+                }
+                if let Some(ObjectType::Dictionary(entries)) = document.objects.get_mut(&dictionary) {
+                    if entries.get(&name).is_none() {
+                        let at = position.min(entries.entries.len());
+                        entries.entries.insert(at, (name.clone(), target));
+                        if hard {
+                            entries.set_entry_hard_owner(&name, true);
+                            order_hard_owner_entries(entries);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The document with what its reader took out of the model put back (the document itself when the reader took nothing).
+pub(crate) fn reinstated(document: &CadDocument) -> std::borrow::Cow<'_, CadDocument> {
+    if document.consumed_records.is_empty() {
+        return std::borrow::Cow::Borrowed(document);
+    }
+    let mut owned = document.clone();
+    reinstate(&mut owned);
+    std::borrow::Cow::Owned(owned)
+}
+
+/// The hard-owner names of a dictionary in the order of its entries.
+fn order_hard_owner_entries(dictionary: &mut crate::objects::Dictionary) {
+    let position = |name: &String| dictionary.entries.iter().position(|(entry, _)| entry.eq_ignore_ascii_case(name)).unwrap_or(usize::MAX);
+    let mut names = std::mem::take(&mut dictionary.hard_owner_entries);
+    names.sort_by_key(|name| position(name));
+    dictionary.hard_owner_entries = names;
+}
+
+/// Add the entry `key` -> `handle` where AutoCAD lists it: its dictionaries are sorted by name, compared in lower case
+/// (sample_AC1015.dwg: `ACAD_XREC_ROUNDTRIP` before `ADVMATERIAL`, `ADSK_XREC_VTR_ANNOSCALE_DATA` before
+/// `ADSK_XREC_VTRANIMATIONINFO`, `ACAD_2007HEADERVARS_RT` first in the root dictionary, `DIMLTEX1`, `DIMLTEX2`, `DIMLTYPE`).
+fn add_sorted(dictionary: &mut crate::objects::Dictionary, key: &str, handle: Handle, hard: bool) {
+    let lower = key.to_lowercase();
+    let at = dictionary.entries.iter().position(|(name, _)| name.to_lowercase() > lower).unwrap_or(dictionary.entries.len());
+    dictionary.entries.insert(at, (key.to_string(), handle));
+    if hard {
+        dictionary.set_entry_hard_owner(key, true);
+        order_hard_owner_entries(dictionary);
+    }
 }
 
 /// Whether the ACadSharp view of a document read from a file of its own version shows the defaults of the fields a record of
@@ -349,22 +531,27 @@ fn view_style_groups(base: &crate::objects::ModelDocViewStyle) -> Vec<Group> {
     ]
 }
 
-fn restore_view_style(base: &mut crate::objects::ModelDocViewStyle, groups: &[Group]) {
+/// Restore the view style's name and flags; the names of the groups applied.
+fn restore_view_style(base: &mut crate::objects::ModelDocViewStyle, groups: &[Group]) -> Vec<String> {
+    let mut applied = Vec::new();
     for group in groups {
         match group.name.as_str() {
             DISPLAY_NAME if group.entries.len() == 1 => {
                 if let Some(XRecordValue::String(name)) = at(group, 0, 1) {
                     base.display_name = name.clone();
+                    applied.push(group.name.clone());
                 }
             }
             FLAGS if group.entries.len() == 1 => {
                 if let Some(flags) = at(group, 0, 90).and_then(as_i32) {
                     base.flags = flags;
+                    applied.push(group.name.clone());
                 }
             }
             _ => {}
         }
     }
+    applied
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -415,7 +602,8 @@ fn material_values(group: &Group) -> Option<[&XRecordValue; 12]> {
     Some(values)
 }
 
-fn restore_material(material: &mut crate::objects::Material, groups: &[Group]) {
+fn restore_material(material: &mut crate::objects::Material, groups: &[Group]) -> Vec<String> {
+    let mut applied = Vec::new();
     for group in groups.iter().filter(|group| group.name == MATERIAL) {
         let Some(values) = material_values(group) else {
             continue;
@@ -434,7 +622,9 @@ fn restore_material(material: &mut crate::objects::Material, groups: &[Group]) {
         material.illumination_model = model;
         material.channel_flags = flags;
         material.mode = mode;
+        applied.push(group.name.clone());
     }
+    applied
 }
 
 /// What the readers leave in the fields a `MATERIAL` group restores, for the ACadSharp view.
@@ -477,19 +667,22 @@ fn layout_groups(layout: &crate::objects::Layout) -> Vec<Group> {
     ]
 }
 
-fn restore_layout(layout: &mut crate::objects::Layout, groups: &[Group]) {
+fn restore_layout(layout: &mut crate::objects::Layout, groups: &[Group]) -> Vec<String> {
     let value = |group: &Group| match group.entries.as_slice() {
         [entry] if entry.code == 70 => as_i32(&entry.value).and_then(|v| i16::try_from(v).ok()),
         _ => None,
     };
+    let mut applied = Vec::new();
     for group in groups {
         match (group.name.as_str(), value(group)) {
             (SHADE_PLOT, Some(v)) => layout.shade_plot_mode = v,
             (SHADE_PLOT_RESOLUTION, Some(v)) => layout.shade_plot_resolution = v,
             (SHADE_PLOT_DPI, Some(v)) => layout.shade_plot_dpi = v,
-            _ => {}
+            _ => continue,
         }
+        applied.push(group.name.clone());
     }
+    applied
 }
 
 /// What the readers leave in the fields the shade plot groups restore, for the ACadSharp view: `(mode, resolution, dpi)`.
@@ -586,8 +779,10 @@ impl Display {
         groups
     }
 
-    /// Take the groups named `<prefix><name>` of the shape AutoCAD writes.
-    fn restore(&mut self, groups: &[Group], prefix: &str) {
+    /// Take the groups named `<prefix><name>` of the shape AutoCAD writes; the names of the groups applied.
+    fn restore(&mut self, groups: &[Group], prefix: &str) -> Vec<String> {
+        let short = |entry: &XRecordEntry| as_i32(&entry.value).and_then(|v| i16::try_from(v).ok());
+        let mut applied = Vec::new();
         for group in groups {
             let Some(name) = group.name.strip_prefix(prefix) else {
                 continue;
@@ -596,28 +791,45 @@ impl Display {
                 continue;
             };
             match (name, entry.code) {
-                (VISUAL_STYLE, 340) => {
-                    if let Some(handle) = entry.value.as_handle() {
-                        self.visual_style = handle;
-                    }
-                }
-                (GRID_DISPLAY, 70) => self.grid = as_i32(&entry.value).and_then(|v| i16::try_from(v).ok()).unwrap_or(self.grid),
-                (GRID_MAJOR, 70) => self.major = as_i32(&entry.value).and_then(|v| i16::try_from(v).ok()).unwrap_or(self.major),
-                (DEFAULT_LIGHTING, 280) => self.lighting = as_i32(&entry.value).map_or(self.lighting, |v| v != 0),
-                (DEFAULT_LIGHTING_TYPE, 70) => {
-                    self.lighting_type = as_i32(&entry.value).and_then(|v| i16::try_from(v).ok()).unwrap_or(self.lighting_type)
-                }
-                (BRIGHTNESS, 141) => self.brightness = as_f64(&entry.value).unwrap_or(self.brightness),
-                (CONTRAST, 142) => self.contrast = as_f64(&entry.value).unwrap_or(self.contrast),
-                _ => {}
+                (VISUAL_STYLE, 340) => match entry.value.as_handle() {
+                    Some(handle) => self.visual_style = handle,
+                    None => continue,
+                },
+                (GRID_DISPLAY, 70) => match short(entry) {
+                    Some(value) => self.grid = value,
+                    None => continue,
+                },
+                (GRID_MAJOR, 70) => match short(entry) {
+                    Some(value) => self.major = value,
+                    None => continue,
+                },
+                (DEFAULT_LIGHTING, 280) => match as_i32(&entry.value) {
+                    Some(value) => self.lighting = value != 0,
+                    None => continue,
+                },
+                (DEFAULT_LIGHTING_TYPE, 70) => match short(entry) {
+                    Some(value) => self.lighting_type = value,
+                    None => continue,
+                },
+                (BRIGHTNESS, 141) => match as_f64(&entry.value) {
+                    Some(value) => self.brightness = value,
+                    None => continue,
+                },
+                (CONTRAST, 142) => match as_f64(&entry.value) {
+                    Some(value) => self.contrast = value,
+                    None => continue,
+                },
+                _ => continue,
             }
+            applied.push(group.name.clone());
         }
+        applied
     }
 }
 
-fn restore_vport_display(vport: &mut crate::tables::VPort, groups: &[Group], prefix: &str) {
+fn restore_vport_display(vport: &mut crate::tables::VPort, groups: &[Group], prefix: &str) -> Vec<String> {
     let mut display = Display::of_vport(vport);
-    display.restore(groups, prefix);
+    let applied = display.restore(groups, prefix);
     vport.visual_style_handle = display.visual_style;
     vport.grid_flags = crate::entities::GridFlags::from_bits(display.grid);
     vport.grid_major = display.major;
@@ -625,12 +837,14 @@ fn restore_vport_display(vport: &mut crate::tables::VPort, groups: &[Group], pre
     vport.default_lighting_type = display.lighting_type;
     vport.brightness = display.brightness;
     vport.contrast = display.contrast;
+    applied
 }
 
-fn restore_viewport(viewport: &mut crate::entities::Viewport, groups: &[Group], version: DxfVersion) {
+fn restore_viewport(viewport: &mut crate::entities::Viewport, groups: &[Group], version: DxfVersion) -> Vec<String> {
+    let mut applied = Vec::new();
     if !display_holds(version) {
         let mut display = Display::of_viewport(viewport);
-        display.restore(groups, "");
+        applied = display.restore(groups, "");
         viewport.visual_style_handle = display.visual_style;
         viewport.grid_flags = crate::entities::GridFlags::from_bits(display.grid);
         viewport.grid_major = display.major;
@@ -644,10 +858,12 @@ fn restore_viewport(viewport: &mut crate::entities::Viewport, groups: &[Group], 
             if let [entry] = group.entries.as_slice() {
                 if let (70, Some(mode)) = (entry.code, as_i32(&entry.value).and_then(|v| i16::try_from(v).ok())) {
                     viewport.shade_plot_mode = mode;
+                    applied.push(group.name.clone());
                 }
             }
         }
     }
+    applied
 }
 
 /// The VPORT group prefix of AutoCAD: the table's control object holds one set per entry, named by its extents.
@@ -732,14 +948,28 @@ fn solid_groups(solid: &crate::entities::Solid3D) -> Vec<Group> {
     ]
 }
 
-fn restore_solid(solid: &mut crate::entities::Solid3D, groups: &[Group]) {
+/// Restore the solid's history handle; the names of the groups applied (the two that follow it, `ACAD_SOLID_HIST1 90 0` and
+/// `ACAD_SOLID_HIST2 90 <the solid's handle>`, go with it when they state what AutoCAD writes).
+fn restore_solid(solid: &mut crate::entities::Solid3D, groups: &[Group]) -> Vec<String> {
+    let mut applied = Vec::new();
     for group in groups.iter().filter(|group| group.name == SOLID_HISTORY) {
         if let [entry] = group.entries.as_slice() {
             if let (360, Some(handle)) = (entry.code, entry.value.as_handle()) {
                 solid.history_handle = Some(handle);
+                applied.push(group.name.clone());
             }
         }
     }
+    if !applied.is_empty() {
+        let own = solid.common.handle.value() as i32;
+        for group in groups {
+            let stated = |value: i32| matches!(group.entries.as_slice(), [entry] if entry.code == 90 && as_i32(&entry.value) == Some(value));
+            if (group.name == SOLID_HISTORY_1 && stated(0)) || (group.name == SOLID_HISTORY_2 && stated(own)) {
+                applied.push(group.name.clone());
+            }
+        }
+    }
+    applied
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -803,10 +1033,7 @@ fn ensure_dictionary(document: &mut CadDocument, parent: Handle, key: &str, hard
     child.reactors = vec![parent];
     document.objects.insert(handle, ObjectType::Dictionary(child));
     if let Some(ObjectType::Dictionary(dictionary)) = document.objects.get_mut(&parent) {
-        dictionary.add_entry(key, handle);
-        if hard {
-            dictionary.set_entry_hard_owner(key, true);
-        }
+        add_sorted(dictionary, key, handle, hard);
     }
     handle
 }
@@ -838,10 +1065,7 @@ fn set_record(document: &mut CadDocument, dictionary: Handle, key: &str, entries
             xrecord.synchronize_object_references();
             document.objects.insert(handle, ObjectType::XRecord(xrecord));
             if let Some(ObjectType::Dictionary(parent)) = document.objects.get_mut(&dictionary) {
-                parent.add_entry(key, handle);
-                if hard {
-                    parent.set_entry_hard_owner(key, true);
-                }
+                add_sorted(parent, key, handle, hard);
             }
         }
         (Some(record), None) => {
@@ -916,12 +1140,14 @@ fn state_header_vars(document: &mut CadDocument, version: DxfVersion, wanted: Op
     }
 }
 
-fn restore_header_vars(document: &mut CadDocument) {
+/// Restore the dimension linetypes of the header; the records applied.
+fn restore_header_vars(document: &mut CadDocument) -> Vec<Handle> {
     let root = document.header.named_objects_dict_handle;
     let Some(dictionary) = dictionary_at(document, root).and_then(|dictionary| entry_ci(dictionary, HEADER_VARS)) else {
-        return;
+        return Vec::new();
     };
     let mut found: [Option<(Handle, String)>; 3] = [None, None, None];
+    let mut applied = Vec::new();
     for (slot, key) in found.iter_mut().zip(DIM_LINETYPE) {
         let Some(record) = dictionary_at(document, dictionary).and_then(|dictionary| entry_ci(dictionary, key)) else {
             continue;
@@ -930,6 +1156,7 @@ fn restore_header_vars(document: &mut CadDocument) {
             if let (340, Some(handle)) = (entry.code, entry.value.as_handle()) {
                 if let Some(name) = line_type_name(document, handle) {
                     *slot = Some((handle, name));
+                    applied.push(record);
                 }
             }
         }
@@ -947,6 +1174,7 @@ fn restore_header_vars(document: &mut CadDocument) {
         header.dim_linetype2_handle = handle;
         header.dim_linetype2_name = name;
     }
+    applied
 }
 
 /// The values of the `Edit` record AutoCAD writes for a block that scales uniformly.
@@ -983,12 +1211,16 @@ fn state_block_data(document: &mut CadDocument, ext: &mut Ext, block: Handle, ve
     }
 }
 
-fn restore_block_data(document: &mut CadDocument, blocks: &[Handle]) {
-    for owner in blocks {
+/// Restore the scale-uniformly flag of the blocks `(block, Edit record)`; the records applied.
+fn restore_block_data(document: &mut CadDocument, blocks: &[(Handle, Handle)]) -> Vec<Handle> {
+    let mut applied = Vec::new();
+    for (owner, edit) in blocks {
         if let Some(block) = document.block_records.iter_mut().find(|block| block.handle == *owner) {
             block.scale_uniformly = true;
+            applied.push(*edit);
         }
     }
+    applied
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1141,7 +1373,7 @@ fn state_multiline(document: &mut CadDocument, ext: &mut Ext, multiline: &Multil
         }
     }
     // AutoCAD numbers the objects of the chain in this order (sample_AC1014.dwg to sample_AC1027.dwg: the dictionary, the round-trip
-    // record, then the record of the MTEXT) and lists the entries by name.
+    // record, then the record of the MTEXT) and lists the entries by name (`add_sorted`).
     state(
         document,
         ext,
@@ -1149,17 +1381,9 @@ fn state_multiline(document: &mut CadDocument, ext: &mut Ext, multiline: &Multil
         &|name| name == MATT_HEIGHT,
         vec![Group::new(MATT_HEIGHT, vec![XRecordEntry::double(140, multiline.height)])],
         true,
+        version,
     );
     set_record(document, extension, MLATT, Some(multiline.entries.clone()), true, version);
-    if let Some(ObjectType::Dictionary(dictionary)) = document.objects.get_mut(&extension).filter(|_| !existed) {
-        let position = |dictionary: &crate::objects::Dictionary, name: &str| dictionary.entries.iter().position(|(entry, _)| entry == name);
-        if let (Some(mlatt), Some(round_trip)) = (position(dictionary, MLATT), position(dictionary, KEY)) {
-            if mlatt > round_trip {
-                let entry = dictionary.entries.remove(mlatt);
-                dictionary.entries.insert(round_trip, entry);
-            }
-        }
-    }
 }
 
 /// Drop the record of an attribute whose MTEXT the version holds itself (or that has none any more).
@@ -1168,24 +1392,32 @@ fn drop_multiline(document: &mut CadDocument, ext: &mut Ext, owner: Handle, vers
         return;
     };
     set_record(document, extension, MLATT, None, true, version);
-    state(document, ext, owner, &|name| name == MATT_HEIGHT, Vec::new(), false);
+    state(document, ext, owner, &|name| name == MATT_HEIGHT, Vec::new(), false, version);
 }
 
-fn restore_multilines(document: &mut CadDocument, found: &std::collections::HashMap<Handle, Vec<XRecordEntry>>) {
+/// Restore the embedded MTEXT of the attributes `owner -> (ACAD_MLATT record, its entries)`; the attributes applied, with the
+/// record and the height of the MTEXT.
+fn restore_multilines(
+    document: &mut CadDocument,
+    found: &std::collections::HashMap<Handle, (Handle, Vec<XRecordEntry>)>,
+) -> std::collections::HashMap<Handle, (Handle, f64)> {
+    let mut applied = std::collections::HashMap::new();
     if found.is_empty() {
-        return;
+        return applied;
     }
-    let apply = |attribute_flag: &mut crate::entities::MTextFlag,
-                 multiline: &mut bool,
-                 embedded: &mut Option<Box<crate::entities::MText>>,
-                 tag: &str,
-                 entries: &[XRecordEntry],
-                 rotation: f64,
-                 style: &str,
-                 normal: crate::types::Vector3| {
+    let mut apply = |owner: Handle,
+                     attribute_flag: &mut crate::entities::MTextFlag,
+                     multiline: &mut bool,
+                     embedded: &mut Option<Box<crate::entities::MText>>,
+                     tag: &str,
+                     rotation: f64,
+                     style: &str,
+                     normal: crate::types::Vector3| {
+        let Some((record, entries)) = found.get(&owner) else { return };
         // The tag the record states is the attribute's own (a record of another tag was not made for this attribute).
         if let Some((flag, record_tag, text)) = mlatt_text(entries, rotation, style, normal) {
             if record_tag == tag && embedded.is_none() {
+                applied.insert(owner, (*record, text.height));
                 *attribute_flag = flag;
                 *multiline = true;
                 *embedded = Some(Box::new(text));
@@ -1195,24 +1427,25 @@ fn restore_multilines(document: &mut CadDocument, found: &std::collections::Hash
     for entity in document.entities_mut_keep_raw() {
         match entity {
             crate::entities::EntityType::AttributeDefinition(attribute) => {
-                if let Some(entries) = found.get(&attribute.common.handle) {
+                if found.contains_key(&attribute.common.handle) {
                     let (rotation, style, normal) = (attribute.rotation, attribute.text_style.clone(), attribute.normal);
                     let tag = attribute.tag.clone();
-                    apply(&mut attribute.mtext_flag, &mut attribute.is_multiline, &mut attribute.embedded_mtext, &tag, entries, rotation, &style, normal);
+                    apply(attribute.common.handle, &mut attribute.mtext_flag, &mut attribute.is_multiline, &mut attribute.embedded_mtext, &tag, rotation, &style, normal);
                 }
             }
             crate::entities::EntityType::Insert(insert) => {
                 for attribute in &mut insert.attributes {
-                    if let Some(entries) = found.get(&attribute.common.handle) {
+                    if found.contains_key(&attribute.common.handle) {
                         let (rotation, style, normal) = (attribute.rotation, attribute.text_style.clone(), attribute.normal);
                         let tag = attribute.tag.clone();
-                        apply(&mut attribute.mtext_flag, &mut attribute.is_multiline, &mut attribute.embedded_mtext, &tag, entries, rotation, &style, normal);
+                        apply(attribute.common.handle, &mut attribute.mtext_flag, &mut attribute.is_multiline, &mut attribute.embedded_mtext, &tag, rotation, &style, normal);
                     }
                 }
             }
             _ => {}
         }
     }
+    applied
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1224,8 +1457,10 @@ fn restore_multilines(document: &mut CadDocument, found: &std::collections::Hash
 /// (owner -> its entries).
 struct Scan {
     records: Vec<(Handle, Handle)>,
-    blocks: Vec<Handle>,
-    multilines: std::collections::HashMap<Handle, Vec<XRecordEntry>>,
+    /// `(block, its Edit record)`.
+    blocks: Vec<(Handle, Handle)>,
+    /// `owner -> (its ACAD_MLATT record, the record's entries)`.
+    multilines: std::collections::HashMap<Handle, (Handle, Vec<XRecordEntry>)>,
 }
 
 fn scan(document: &CadDocument, want_blocks: bool, want_multilines: bool) -> Scan {
@@ -1238,13 +1473,13 @@ fn scan(document: &CadDocument, want_blocks: bool, want_multilines: bool) -> Sca
         if want_blocks {
             if let Some(edit) = entry_ci(dictionary, BLOCK_DATA).and_then(|data| dictionary_at(document, data)).and_then(|data| data.get(BLOCK_EDIT)) {
                 if record_entries(document, edit).is_some_and(|entries| entries == block_edit_entries().as_slice()) {
-                    found.blocks.push(dictionary.owner);
+                    found.blocks.push((dictionary.owner, edit));
                 }
             }
         }
         if want_multilines {
-            if let Some(entries) = dictionary.get(MLATT).and_then(|record| record_entries(document, record)) {
-                found.multilines.insert(dictionary.owner, entries.to_vec());
+            if let Some((record, entries)) = dictionary.get(MLATT).and_then(|record| Some((record, record_entries(document, record)?))) {
+                found.multilines.insert(dictionary.owner, (record, entries.to_vec()));
             }
         }
     }
@@ -1252,19 +1487,27 @@ fn scan(document: &CadDocument, want_blocks: bool, want_multilines: bool) -> Sca
     found
 }
 
-/// Restore the native values from the records a reader found (the records stay in the document). A file holds the groups
-/// only where its version needs them; a version that holds the values itself is left alone.
+/// Restore the native values from the records a reader found and take what it applied out of the model (`take_groups`,
+/// `take_chain`). A file holds the groups only where its version needs them; a version that holds the values itself is left
+/// alone.
 pub(crate) fn restore_document(document: &mut CadDocument) {
     let version = document.version;
     if version >= DxfVersion::AC1032 {
         return;
     }
     if !header_vars_holds(version) {
-        restore_header_vars(document);
+        for record in restore_header_vars(document) {
+            take_chain(document, record);
+        }
     }
     let found = scan(document, !block_data_holds(version), !mlatt_holds(version));
-    restore_block_data(document, &found.blocks);
-    restore_multilines(document, &found.multilines);
+    for record in restore_block_data(document, &found.blocks) {
+        take_chain(document, record);
+    }
+    let multilines = restore_multilines(document, &found.multilines);
+    for (record, _) in multilines.values() {
+        take_chain(document, *record);
+    }
     let found = found.records;
     if found.is_empty() {
         return;
@@ -1272,67 +1515,91 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
     let vport_control = document.vports.handle();
     for (owner, record) in found {
         let groups = groups_of(document, record);
-        if owner == vport_control && !display_holds(version) {
-            for vport in document.vports.iter_mut() {
-                let prefix = vport_prefix(vport);
-                restore_vport_display(vport, &groups, &prefix);
-            }
-            continue;
-        }
-        match document.objects.get_mut(&owner) {
-            Some(object) if view_style_base(object).is_some() => {
-                if !view_style_holds(version) {
-                    if let Some(base) = view_style_base_mut(object) {
-                        restore_view_style(base, &groups);
-                    }
-                }
-                continue;
-            }
-            Some(ObjectType::Material(material)) => {
-                if !material_holds(version) {
-                    restore_material(material, &groups);
-                }
-                continue;
-            }
-            Some(ObjectType::Layout(layout)) => {
-                if !layout_holds(version) {
-                    restore_layout(layout, &groups);
-                }
-                continue;
-            }
-            Some(_) => continue,
-            None => {}
-        }
-        if let Some(view) = document.views.iter_mut().find(|view| view.handle == owner) {
-            if !display_holds(version) {
-                restore_view(view, &groups);
-            }
-            continue;
-        }
-        match document.get_entity_mut_keep_raw(owner) {
-            Some(crate::entities::EntityType::Viewport(viewport)) => restore_viewport(viewport, &groups, version),
-            Some(crate::entities::EntityType::Solid3D(solid)) if !solid_history_holds(version) => restore_solid(solid, &groups),
-            _ => {}
-        }
+        let applied = restore_record(document, owner, &groups, version, vport_control, &multilines);
+        take_groups(document, record, &applied);
     }
 }
 
-fn restore_view(view: &mut crate::tables::View, groups: &[Group]) {
+/// Restore the values the groups of the round-trip record of `owner` state; the names of the groups applied.
+fn restore_record(
+    document: &mut CadDocument,
+    owner: Handle,
+    groups: &[Group],
+    version: DxfVersion,
+    vport_control: Handle,
+    multilines: &std::collections::HashMap<Handle, (Handle, f64)>,
+) -> Vec<String> {
+    if owner == vport_control {
+        if display_holds(version) {
+            return Vec::new();
+        }
+        let mut applied = Vec::new();
+        for vport in document.vports.iter_mut() {
+            let prefix = vport_prefix(vport);
+            applied.extend(restore_vport_display(vport, groups, &prefix));
+        }
+        return applied;
+    }
+    // The height of a multi-line attribute's MTEXT, which its ACAD_MLATT record states too.
+    if let Some((_, height)) = multilines.get(&owner) {
+        return groups
+            .iter()
+            .filter(|group| group.name == MATT_HEIGHT && matches!(group.entries.as_slice(), [entry] if entry.code == 140 && as_f64(&entry.value) == Some(*height)))
+            .map(|group| group.name.clone())
+            .collect();
+    }
+    match document.objects.get_mut(&owner) {
+        Some(object) if view_style_base(object).is_some() => {
+            return match view_style_base_mut(object).filter(|_| !view_style_holds(version)) {
+                Some(base) => restore_view_style(base, groups),
+                None => Vec::new(),
+            };
+        }
+        Some(ObjectType::Material(material)) => {
+            return if material_holds(version) { Vec::new() } else { restore_material(material, groups) };
+        }
+        Some(ObjectType::Layout(layout)) => {
+            return if layout_holds(version) { Vec::new() } else { restore_layout(layout, groups) };
+        }
+        Some(_) => return Vec::new(),
+        None => {}
+    }
+    if let Some(view) = document.views.iter_mut().find(|view| view.handle == owner) {
+        return if display_holds(version) { Vec::new() } else { restore_view(view, groups) };
+    }
+    // Look before taking the entity: only a viewport or a solid changes.
+    let wanted = match document.get_entity(owner) {
+        Some(crate::entities::EntityType::Viewport(_)) => true,
+        Some(crate::entities::EntityType::Solid3D(_)) => !solid_history_holds(version),
+        _ => false,
+    };
+    if !wanted {
+        return Vec::new();
+    }
+    match document.get_entity_mut_keep_raw(owner) {
+        Some(crate::entities::EntityType::Viewport(viewport)) => restore_viewport(viewport, groups, version),
+        Some(crate::entities::EntityType::Solid3D(solid)) => restore_solid(solid, groups),
+        _ => Vec::new(),
+    }
+}
+
+fn restore_view(view: &mut crate::tables::View, groups: &[Group]) -> Vec<String> {
+    let mut applied = Vec::new();
     for group in groups {
         match (group.name.as_str(), group.entries.as_slice()) {
-            (CAMERA_PLOTTABLE, [entry]) if entry.code == 70 => {
-                if let Some(value) = as_i32(&entry.value) {
-                    view.camera_plottable = value != 0;
-                }
-            }
-            (VISUAL_STYLE, [entry]) if entry.code == 340 => {
-                if let Some(handle) = entry.value.as_handle() {
-                    view.visual_style_handle = handle;
-                }
-            }
-            _ => {}
+            (CAMERA_PLOTTABLE, [entry]) if entry.code == 70 => match as_i32(&entry.value) {
+                Some(value) => view.camera_plottable = value != 0,
+                None => continue,
+            },
+            (VISUAL_STYLE, [entry]) if entry.code == 340 => match entry.value.as_handle() {
+                Some(handle) => view.visual_style_handle = handle,
+                None => continue,
+            },
+            _ => continue,
         }
+        applied.push(group.name.clone());
     }
+    applied
 }
 
 /// Whether a kind states its groups in a file of `version`: a DWG needs them where the version lacks the field, a DXF where
@@ -1385,6 +1652,11 @@ struct Job {
 /// State the groups of every kind the output version needs, from the native values, and drop the groups the version holds
 /// natively. `dxf` selects the DXF rules.
 pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>, version: DxfVersion, dxf: bool) {
+    // The records the reader took out of the model are the starting point: the objects of the file, refreshed below.
+    let taken = document.consumed_records.taken();
+    if !document.consumed_records.is_empty() {
+        reinstate(document.to_mut());
+    }
     // A table record added in memory has no handle yet, and a record cannot be owned by it: the writers give the handles later.
     if document.has_null_table_entries() {
         document.to_mut().assign_table_entry_handles();
@@ -1393,6 +1665,10 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     let leaves = |holds: Predicate, dxf_states: Predicate| dxf && !holds(version) && !dxf_states(version);
     let mut ext = Ext::new(document);
     let converting = converts(document, version);
+    // A drawing converted from a file of another version gets every group of an object, as AutoCAD's down-saves state them; a
+    // drawing made in memory gets the groups of an object only where a value differs from what a reader of a file without the
+    // record gives (the value would be lost otherwise).
+    let converted = converting && !in_memory(document);
     // The drawing is a DWG written again at its own version (a DXF source keeps its fields in the objects themselves).
     let written_again_dwg = !converting && document.dwg_source_version == Some(version);
     let have: std::collections::HashSet<Handle> = records(document).into_iter().map(|(owner, _)| owner).collect();
@@ -1412,7 +1688,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             ObjectType::Material(material) => {
                 let defaults = crate::objects::Material::new();
                 let wanted = if needs(material_holds, always)
-                    && (converting || has_record(handle) || material_group(material) != material_group(&defaults))
+                    && (converted || has_record(handle) || material_group(material) != material_group(&defaults))
                 {
                     vec![material_group(material)]
                 } else {
@@ -1422,7 +1698,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             }
             ObjectType::Layout(layout) => {
                 let differs = (layout.shade_plot_mode, layout.shade_plot_resolution, layout.shade_plot_dpi) != LAYOUT_DEFAULT;
-                let wanted = if needs(layout_holds, layout_dxf) && (converting || has_record(handle) || differs) {
+                let wanted = if needs(layout_holds, layout_dxf) && (converted || has_record(handle) || differs) {
                     layout_groups(layout)
                 } else {
                     Vec::new()
@@ -1436,7 +1712,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             }
             object => {
                 let Some(base) = view_style_base(object) else { continue };
-                let wanted = if needs(view_style_holds, always) && (converting || has_record(handle) || !base.display_name.is_empty() || base.flags != 0) {
+                let wanted = if needs(view_style_holds, always) && (converted || has_record(handle) || !base.display_name.is_empty() || base.flags != 0) {
                     view_style_groups(base)
                 } else {
                     Vec::new()
@@ -1451,7 +1727,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         let defaults = crate::tables::View::new(view.name.clone());
         let differs = view.camera_plottable != defaults.camera_plottable || view.visual_style_handle != defaults.visual_style_handle;
         let mut wanted = Vec::new();
-        if needs(display_holds, never) && (converting || has_record(view.handle) || differs) {
+        if needs(display_holds, never) && (converted || has_record(view.handle) || differs) {
             wanted.push(Group::new(CAMERA_PLOTTABLE, vec![XRecordEntry::int16(70, view.camera_plottable as i16)]));
             if !view.visual_style_handle.is_null() {
                 wanted.push(Group::new(VISUAL_STYLE, vec![XRecordEntry::handle(340, view.visual_style_handle)]));
@@ -1465,7 +1741,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             let prefix = vport_prefix(vport);
             let display = Display::of_vport(vport);
             let defaults = Display::of_vport(&crate::tables::VPort::new(vport.name.clone()));
-            let wanted = if needs(display_holds, never) && (converting || has_record(control) || display != defaults) {
+            let wanted = if needs(display_holds, never) && (converted || has_record(control) || display != defaults) {
                 display.groups(&prefix)
             } else {
                 Vec::new()
@@ -1478,21 +1754,22 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         let handle = entity.common().handle;
         match entity {
             crate::entities::EntityType::Viewport(viewport) => {
-                let display = Display::of_viewport(viewport);
-                let defaults = Display::of_viewport(&crate::entities::Viewport::new());
-                let wanted = if needs(display_holds, never) && (converting || has_record(handle) || display != defaults) {
-                    display.groups("")
-                } else {
-                    Vec::new()
-                };
-                jobs.push(Job { owner: handle, owns: Owns::Exact(&DISPLAY), wanted, fresh: None, leave: leaves(display_holds, never) });
-                let wanted = if needs(shade_plot_holds, shade_plot_dxf) && (converting || has_record(handle) || viewport.shade_plot_mode != 0) {
+                // AutoCAD's record states the shade plot mode first, then the display settings (sample_AC1014.dwg, sample_AC1015.dwg).
+                let wanted = if needs(shade_plot_holds, shade_plot_dxf) && (converted || has_record(handle) || viewport.shade_plot_mode != 0) {
                     vec![Group::new(SHADE_PLOT, vec![XRecordEntry::int16(70, viewport.shade_plot_mode)])]
                 } else {
                     Vec::new()
                 };
                 let fresh = vec![Group::new(SHADE_PLOT, vec![XRecordEntry::int16(70, 0)])];
                 jobs.push(Job { owner: handle, owns: Owns::Exact(&[SHADE_PLOT]), wanted, fresh: Some(fresh), leave: leaves(shade_plot_holds, shade_plot_dxf) });
+                let display = Display::of_viewport(viewport);
+                let defaults = Display::of_viewport(&crate::entities::Viewport::new());
+                let wanted = if needs(display_holds, never) && (converted || has_record(handle) || display != defaults) {
+                    display.groups("")
+                } else {
+                    Vec::new()
+                };
+                jobs.push(Job { owner: handle, owns: Owns::Exact(&DISPLAY), wanted, fresh: None, leave: leaves(display_holds, never) });
             }
             crate::entities::EntityType::Solid3D(solid) => {
                 let wanted = if needs(solid_history_holds, never) { solid_groups(solid) } else { Vec::new() };
@@ -1516,10 +1793,8 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     };
     // The scale-uniformly flag of the blocks: a document written again at the version it was read from states the chain only for the
     // blocks that had one (a file of that version without the chain holds the flag some other way, or not at all).
-    let block_jobs: Vec<(Handle, bool)> = if leaves(block_data_holds, never) {
-        // AutoCAD's DXF holds no such chain: the chains a drawing read from a DWG has stay as they are.
-        Vec::new()
-    } else if needs(block_data_holds, never) {
+    // AutoCAD's DXF of R2000 and R2004 holds the chain too (sample_AC1015_ascii.dxf, sample_AC1018_ascii.dxf: the 4 blocks).
+    let block_jobs: Vec<(Handle, bool)> = if needs(block_data_holds, dxf_before_r2007) {
         document
             .block_records
             .iter()
@@ -1534,7 +1809,8 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             .map(|block| (block.handle, false))
             .collect()
     };
-    // The multi-line attributes: the record of those that have an embedded MTEXT, the drop of the records of the others.
+    // The multi-line attributes: the record of those that have an embedded MTEXT, the drop of the records the reader applied for the
+    // others (a record the reader did not apply is not this writer's to drop).
     let wanted_multilines: Vec<Multiline> = if needs(mlatt_holds, always) {
         multilines(document)
             .into_iter()
@@ -1554,7 +1830,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             let record = dictionary.get(MLATT)?;
             let entries = record_entries(document, record)?;
             let ours = entries.len() == MLATT_CODES.len() && entries.iter().zip(MLATT_CODES).all(|(entry, code)| entry.code == code);
-            (ours && !stated.contains(&dictionary.owner)).then_some(dictionary.owner)
+            (ours && taken.contains(&record) && !stated.contains(&dictionary.owner)).then_some(dictionary.owner)
         })
         .collect();
     if jobs.is_empty() && header_vars.is_none() && block_jobs.is_empty() && wanted_multilines.is_empty() && dropped_multilines.is_empty() {
@@ -1587,7 +1863,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
                         && job.fresh.as_ref().is_some_and(|fresh| fresh.iter().find(|default| default.name == group.name).map_or(true, |default| default.entries != group.entries)))
             });
         }
-        state(owned, &mut ext, job.owner, &|name| owns.names(name), wanted, true);
+        state(owned, &mut ext, job.owner, &|name| owns.names(name), wanted, true, version);
     }
     if let Some(wanted) = header_vars {
         state_header_vars(owned, version, wanted);

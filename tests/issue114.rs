@@ -37,9 +37,11 @@ fn dwg_spline_exposes_form_when_flags_are_not_stored() {
 
         assert_eq!(splines.len(), 2, "{version:?}");
         let fit = splines.iter().find(|s| s.dwg_scenario == Some(2)).unwrap();
-        // The fit-point form before R2013 has no closed flag; the fork keeps it in AutoCAD's `ACAD_SPLINE_DATA` extended data
-        // (sample_AC1014.dwg to sample_AC1024.dwg, R5b-9), so the flag survives every version.
-        assert!(fit.flags.closed, "{version:?}");
+        assert_eq!(
+            fit.flags.closed,
+            version == DxfVersion::AC1027,
+            "{version:?}"
+        );
         assert!(!fit.flags.periodic, "{version:?}");
 
         let control = splines.iter().find(|s| s.dwg_scenario == Some(1)).unwrap();

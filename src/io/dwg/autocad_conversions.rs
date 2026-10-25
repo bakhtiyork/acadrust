@@ -15,7 +15,7 @@
 //! | `ACAD 1000 DBColXD 1070 <index> 1071 <colour> 1000 <book>$<name>` | DBCOLOR | before R2018 | the colour of the object |
 //! | `ACAD 1000 DesignCenter Data { 1070 1 1070 <units> }` | BLOCK_RECORD | before R2007 | the insertion units (`autocad_roundtrip` of the reader) |
 //! | `CONTENTBLOCKDESCRIPTION 1071 0 1000 <text>`, `CONTENTBLOCKICON 1071 0 1004 <127 bytes> ..` | BLOCK_RECORD | before R2000 | `description`, `preview_data` |
-//! | `ACAD_SPLINE_DATA 1070 100 1070 <a> 1070 101 1070 <b> 1070 102 1070 <knot parameterization>` | SPLINE | before R2013 | the closed and periodic flags of a fit-point spline, `knot_parameterization` |
+//! | `ACAD_SPLINE_DATA 1070 100 1070 0 1070 101 1070 0 1070 102 1070 <knot parameterization>` | SPLINE | before R2013 | `knot_parameterization` of an open fit-point spline |
 //!
 //! A DXF holds them where AutoCAD's own DXF does (R5b-7: the table above for R2000 and R2004; the stamp from R2000 to R2013,
 //! `DBColXD` from R2004 to R2013, the dimension style records not in R12, whose DXF has extended data on entities only).
@@ -368,27 +368,22 @@ fn revision_record(revision: &crate::entities::solid3d::AcisRevision) -> Option<
 // ── VISUALSTYLE, DBCOLOR ─────────────────────────────────────────────────────────────────────────────────────────
 
 /// The record AutoCAD keeps for a spline before R2013: three properties, each a tag and a value (sample_AC1014.dwg to
-/// sample_AC1024.dwg, the fit-point spline #434: `100 0 101 0 102 2`). The third is the knot parameterization; the first two are the
-/// closed and the periodic flag (a fit-point spline of an older file has neither: the fit-point form of the record has no place
-/// for them. UNVERIFIED: the sample states the open spline only).
-fn spline_data(data: &ExtendedData) -> Option<(bool, bool, i16)> {
+/// sample_AC1024.dwg, the open fit-point spline #434 of sample_AC1032.dwg: `100 0 101 0 102 2`). The third is the knot
+/// parameterization. The meaning of the first two is not known (the samples state `0` for an open, non-periodic spline only), so
+/// only that form is read or written: a record with other values is left as the file has it, and a closed or periodic spline gets
+/// no record (its closed and periodic flags are lost below R2013, as the fit-point form of the older record holds neither).
+fn spline_data(data: &ExtendedData) -> Option<i16> {
     match values(data, SPLINE_DATA)? {
-        [X::Integer16(100), X::Integer16(closed @ (0 | 1)), X::Integer16(101), X::Integer16(periodic @ (0 | 1)), X::Integer16(102), X::Integer16(knots)] => {
-            Some((*closed == 1, *periodic == 1, *knots))
-        }
+        [X::Integer16(100), X::Integer16(0), X::Integer16(101), X::Integer16(0), X::Integer16(102), X::Integer16(knots)] => Some(*knots),
         _ => None,
     }
 }
 
-fn spline_record(spline: &crate::entities::Spline) -> Vec<X> {
-    vec![
-        X::Integer16(100),
-        X::Integer16(spline.flags.closed as i16),
-        X::Integer16(101),
-        X::Integer16(spline.flags.periodic as i16),
-        X::Integer16(102),
-        X::Integer16(spline.knot_parameterization as i16),
-    ]
+/// The record of an open, non-periodic fit-point spline (the form the samples show); none for another spline.
+fn spline_record(spline: &crate::entities::Spline) -> Option<Vec<X>> {
+    (!spline.flags.closed && !spline.flags.periodic).then(|| {
+        vec![X::Integer16(100), X::Integer16(0), X::Integer16(101), X::Integer16(0), X::Integer16(102), X::Integer16(spline.knot_parameterization as i16)]
+    })
 }
 
 fn saved_by_version_block() -> Vec<X> {
@@ -512,18 +507,11 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
                     }
                 }
                 EntityType::Spline(spline) => {
-                    if let Some((closed, periodic, knots)) = spline_data(&spline.common.extended_data) {
+                    if let Some(knots) = spline_data(&spline.common.extended_data) {
                         spline.knot_parameterization = i32::from(knots);
-                        // A fit-point spline has no closed or periodic flag in a record before R2013; the flags 1 of the
-                        // R2013 record state the fit-point method.
-                        spline.flags.closed = closed;
-                        spline.flags.periodic = periodic;
+                        // The flags 1 of the R2013 record state the fit-point method of an open spline (sample_AC1032.dwg #434: 9).
                         spline.dwg_flags1 |= 1 | 8;
-                        if closed {
-                            spline.dwg_flags1 |= 4;
-                        } else {
-                            spline.dwg_flags1 &= !4;
-                        }
+                        spline.dwg_flags1 &= !4;
                     }
                     let handle = spline.common.handle;
                     if let Some(entry) = take_record(&mut spline.common.extended_data, SPLINE_DATA, spline_app, stash.get(&handle).map_or(&[], Vec::as_slice)) {
@@ -774,12 +762,9 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     let written_again = document.dwg_source_version.or(document.dxf_source_version) == Some(version);
     for entity in document.entities() {
         match entity {
-            // AutoCAD's DXF files hold no ACAD_SPLINE_DATA (sample_AC1015_ascii.dxf to sample_AC1027_ascii.dxf).
-            // R2013 holds the parameterization in the record of the spline itself: AutoCAD's record of a control-point spline (kept as the
-            // file had it) goes, as it does from AutoCAD's own R2013 file (sample_AC1027.dwg has none).
-            EntityType::Spline(spline) if holds_spline_data(version) && spline_data(&spline.common.extended_data).is_some() => {
-                splines.push((spline.common.handle, None, taken_position(document, spline.common.handle, SPLINE_DATA)));
-            }
+            // AutoCAD's DXF files hold no ACAD_SPLINE_DATA (sample_AC1015_ascii.dxf to sample_AC1027_ascii.dxf). R2013 holds the
+            // parameterization in the record of the spline itself: a record the reader applied is out of the model and is not stated;
+            // AutoCAD's record of a control-point spline (which the model has no fit data for) stays as the file had it.
             EntityType::Spline(spline) if !holds_spline_data(version) && !dxf && !spline.fit_points.is_empty() => {
                 let data = &spline.common.extended_data;
                 let ours = spline_data(data).is_some();
@@ -788,7 +773,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
                     // A fit-point spline of a conversion (or of a document made in memory), a spline whose file stated the record,
                     // and a record the model holds are stated from the native values; a drawing written again at the version it
                     // was read from states the record only where its file had one.
-                    let wanted = ((!spline.fit_points.is_empty() && !written_again) || at.is_some() || ours).then(|| spline_record(spline));
+                    let wanted = ((!spline.fit_points.is_empty() && !written_again) || at.is_some() || ours).then(|| spline_record(spline)).flatten();
                     if values(data, SPLINE_DATA) != wanted.as_deref() && (wanted.is_some() || ours) {
                         splines.push((spline.common.handle, wanted, at));
                     }

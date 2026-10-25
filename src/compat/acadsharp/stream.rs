@@ -98,6 +98,9 @@ pub(super) fn write_view(
     read_view: bool,
     writer: &mut impl Write,
 ) -> serde_json::Result<()> {
+    // ACadSharp reads the round-trip records as objects: the view shows the ones the reader took out of the model.
+    let reinstated = crate::io::dwg::autocad_records::reinstated(doc);
+    let doc = reinstated.as_ref();
     let sources = Sources::new(doc, reader);
     let mut records: Vec<_> = (0..sources.len())
         .map(|index| sources.metadata(doc, reader, index))
