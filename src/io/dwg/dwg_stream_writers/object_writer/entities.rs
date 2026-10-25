@@ -1384,7 +1384,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Tag, field length, flags
-        self.writer.write_variable_text(att.source.as_deref().map_or(&att.tag, |source| crate::io::dxf::source_tag(source, &att.tag)));
+        self.writer.write_variable_text(att.source.as_deref().map_or(&att.tag, |source| crate::io::dxf::source_tag(source, &att.tag, self.version.r2018_plus(self.dxf_version))));
         self.writer.write_bit_short(att.field_length);
         let flag_byte = att.flags.to_bits();
         self.writer.write_byte(flag_byte as u8);
@@ -1783,7 +1783,10 @@ impl<'a> DwgObjectWriter<'a> {
             self.writer.write_bit(e.dwg_unknown_bit2);
             self.writer.write_bit(e.dwg_unknown_bit3);
             self.writer.write_bit_short(e.dwg_unknown_short1);
-            self.writer.write_bit_short(e.byblock_color);
+            // The record states the colour the leader uses (DXF group 77; the reader of R13/R14 takes the override colour from it): a
+            // leader read from another version holds the colour as its override colour and has no `byblock_color` (0).
+            let colour = if e.byblock_color != 0 { Some(e.byblock_color) } else { e.override_color.index().map(|index| index as i16) };
+            self.writer.write_bit_short(colour.unwrap_or(e.byblock_color));
             self.writer.write_bit(e.dwg_unknown_bit4);
             self.writer.write_bit(e.dwg_unknown_bit5);
         } else {
@@ -4826,7 +4829,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Tag, field length, flags
-        self.writer.write_variable_text(e.source.as_deref().map_or(&e.tag, |source| crate::io::dxf::source_tag(source, &e.tag)));
+        self.writer.write_variable_text(e.source.as_deref().map_or(&e.tag, |source| crate::io::dxf::source_tag(source, &e.tag, self.version.r2018_plus(self.dxf_version))));
         self.writer.write_bit_short(e.field_length);
         let flag_byte = e.flags.to_bits();
         self.writer.write_byte(flag_byte as u8);
@@ -4935,7 +4938,7 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // Tag, field length, flags
-        self.writer.write_variable_text(e.source.as_deref().map_or(&e.tag, |source| crate::io::dxf::source_tag(source, &e.tag)));
+        self.writer.write_variable_text(e.source.as_deref().map_or(&e.tag, |source| crate::io::dxf::source_tag(source, &e.tag, self.version.r2018_plus(self.dxf_version))));
         self.writer.write_bit_short(e.field_length);
         let flag_byte = e.flags.to_bits();
         self.writer.write_byte(flag_byte as u8);

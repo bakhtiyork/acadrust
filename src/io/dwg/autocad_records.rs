@@ -348,11 +348,29 @@ pub(crate) struct Consumed {
     /// the R2010 TABLESTYLE record states the data types; AutoCAD's sample_AC1024.dwg to sample_AC1032.dwg keep the style #87's
     /// extension dictionary empty).
     table_style_changes: Vec<Consumption>,
+    /// The MTEXT whose original text the reader restored from `ACAD_MTEXT_RT` (`restore_mtext`) with the original and the text the file
+    /// had: the file spelled the paragraph breaks `\P` (or stacked a fraction another way) and the model holds the original. The view
+    /// shows the file's text for such an MTEXT while its text is unedited (`mtext_file_value`); the writers state the file's text and
+    /// the record again (`state_mtext`).
+    mtext: Vec<(Handle, String, String)>,
+    /// The table records whose original name the reader restored from `ACAD_XREC_ROUNDTRIP {EXTNAMES}` (R14), with the name the file
+    /// states: the view shows the file's name (`unrestore_names`), the writers state the group again (`state_extnames`).
+    names: Vec<(Handle, String)>,
 }
 
 impl Consumed {
     pub(crate) fn is_empty(&self) -> bool {
-        self.changes.is_empty() && self.style_changes.is_empty() && self.layer_changes.is_empty() && self.table_style_changes.is_empty()
+        self.changes.is_empty()
+            && self.style_changes.is_empty()
+            && self.layer_changes.is_empty()
+            && self.table_style_changes.is_empty()
+            && self.mtext.is_empty()
+            && self.names.is_empty()
+    }
+
+    /// Record that the name of the table record `owner` was restored from the file's `name` (the DWG builder).
+    pub(crate) fn note_restored_name(&mut self, owner: Handle, name: String) {
+        self.names.push((owner, name));
     }
 
     /// The handles of the objects the reader removed from `document` (the records it applied, and the dictionaries they left empty),
@@ -581,6 +599,7 @@ pub(crate) fn reinstated(document: &CadDocument) -> std::borrow::Cow<'_, CadDocu
     }
     let mut owned = document.clone();
     reinstate(&mut owned);
+    unrestore_names(&mut owned);
     std::borrow::Cow::Owned(owned)
 }
 
@@ -1585,10 +1604,12 @@ struct Scan {
     blocks: Vec<(Handle, Handle)>,
     /// `owner -> (its ACAD_MLATT record, the record's entries)`.
     multilines: std::collections::HashMap<Handle, (Handle, Vec<XRecordEntry>)>,
+    /// `owner -> (its ACAD_MTEXT_RT record, the record's entries)`.
+    mtexts: std::collections::HashMap<Handle, (Handle, Vec<XRecordEntry>)>,
 }
 
-fn scan(document: &CadDocument, want_blocks: bool, want_multilines: bool) -> Scan {
-    let mut found = Scan { records: Vec::new(), blocks: Vec::new(), multilines: std::collections::HashMap::new() };
+fn scan(document: &CadDocument, want_blocks: bool, want_multilines: bool, want_mtexts: bool) -> Scan {
+    let mut found = Scan { records: Vec::new(), blocks: Vec::new(), multilines: std::collections::HashMap::new(), mtexts: std::collections::HashMap::new() };
     for object in document.objects.values() {
         let ObjectType::Dictionary(dictionary) = object else { continue };
         if let Some(record) = dictionary.get(KEY).filter(|record| matches!(document.objects.get(record), Some(ObjectType::XRecord(_)))) {
@@ -1604,6 +1625,11 @@ fn scan(document: &CadDocument, want_blocks: bool, want_multilines: bool) -> Sca
         if want_multilines {
             if let Some((record, entries)) = dictionary.get(MLATT).and_then(|record| Some((record, record_entries(document, record)?))) {
                 found.multilines.insert(dictionary.owner, (record, entries.to_vec()));
+            }
+        }
+        if want_mtexts {
+            if let Some((record, entries)) = dictionary.get(MTEXT_RT).and_then(|record| Some((record, record_entries(document, record)?))) {
+                found.mtexts.insert(dictionary.owner, (record, entries.to_vec()));
             }
         }
     }
@@ -1625,7 +1651,7 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
             take_chain(document, record);
         }
     }
-    let found = scan(document, !block_data_holds(version), !mlatt_holds(version));
+    let found = scan(document, !block_data_holds(version), !mlatt_holds(version), !mtext_rt_holds(version));
     for record in restore_block_data(document, &found.blocks) {
         take_chain(document, record);
     }
@@ -1633,11 +1659,15 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
     for (record, _) in multilines.values() {
         take_chain(document, *record);
     }
+    for record in restore_mtext(document, &found.mtexts) {
+        take_chain(document, record);
+    }
     let found = found.records;
     if found.is_empty() {
         return;
     }
     let vport_control = document.vports.handle();
+    let tables = table_record_handles(document);
     for (owner, record) in found {
         let groups = groups_of(document, record);
         let applied = restore_record(document, owner, &groups, version, vport_control, &multilines);
@@ -1646,6 +1676,12 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
         if document.layers.iter().any(|layer| layer.handle == owner) {
             let moved = document.consumed_records.changes.split_off(before);
             document.consumed_records.layer_changes.extend(moved);
+        }
+        // The group `EXTNAMES` of a table record whose name is the drawing's (the DWG builder restored it before the references were
+        // made; a DXF that carries the group has the names as they are): out of the model, put back for the view and the writers.
+        // A DXF holds the group as the file had it (`extnames_applied`).
+        if tables.contains(&owner) && extnames_applied(document, owner, &groups) {
+            take_groups(document, record, &[EXTNAMES.to_string()]);
         }
     }
 }
@@ -1866,11 +1902,429 @@ fn restore_view(view: &mut crate::tables::View, groups: &[Group]) -> Vec<String>
     applied
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Names of the table records (R14): R14 states the name of a symbol table record in upper case, a character it does not allow as `_`
+// (`1.5in Square - Medium Blue` is `1_5IN_SQUARE_-_MEDIUM_BLUE`, `0 @ 1` is `0___1`, `Layer1` is `LAYER1`), and keeps the name the
+// drawing had in `ACAD_XREC_ROUNDTRIP {EXTNAMES 1 <name in R14> 2 <name>}`, the first group of the record, of every record whose name
+// changed (sample_AC1014.dwg: 20 layers, 12 applications, 10 blocks, 5 dimension styles, 4 text styles, 3 line types, the view and the
+// VPORT; the other 66 table records of the sample have a name R14 states as it is). The anonymous blocks (`my-dynamic-block`, `*U18`)
+// and the text styles of a shape file (`unnamed0`) keep their names and have no record. The record exists for the extension dictionary
+// of dictionaries too (the layouts, the visual styles), where the keys keep their case in the sample for names R14 accepts: not
+// reproduced, those records stay in the model. A name with a character no sample shows (anything beside letters, digits, `_`, `-`,
+// `$`, `*`, a space, `.` and `@`) is neither changed nor recorded.
+//
+// The model holds the names of the drawing: the reader restores them before the entities name their layers, styles and blocks
+// (`dwg_document_builder`), the writer states the upper-case names (`r14_name`) and the groups from the model's names.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const EXTNAMES: &str = "EXTNAMES";
+
+/// Whether a file of `version` states the names of its table records in upper case.
+pub(crate) fn extnames_needed(version: DxfVersion) -> bool {
+    version == DxfVersion::AC1014
+}
+
+/// The application AutoCAD adds when it saves a drawing with attributes: its own file of R14 states the name as it is, mixed case, with
+/// no `EXTNAMES` group (sample_AC1014.dwg: the application #125A `AcDbAttr`, the one mixed-case application of 44).
+pub(crate) fn app_stated_as_is(name: &str) -> bool {
+    name == "AcDbAttr"
+}
+
+/// The name R14 states for `name` (upper case, characters outside the symbol alphabet as `_`); `None` when it is the same text or
+/// when `name` has a character no sample shows.
+pub(crate) fn r14_name(name: &str) -> Option<String> {
+    let mut out = String::with_capacity(name.len());
+    for character in name.chars() {
+        match character {
+            'a'..='z' => out.push(character.to_ascii_uppercase()),
+            'A'..='Z' | '0'..='9' | '_' | '-' | '$' | '*' => out.push(character),
+            ' ' | '.' | '@' => out.push('_'),
+            _ => return None,
+        }
+    }
+    (out != name).then_some(out)
+}
+
+/// The pairs `(name in R14, name)` of the `EXTNAMES` group of a record.
+pub(crate) fn extnames_pairs(entries: &[XRecordEntry]) -> Vec<(String, String)> {
+    let groups = split(entries);
+    let Some(group) = groups.iter().find(|group| group.name == EXTNAMES) else { return Vec::new() };
+    let mut pairs = Vec::new();
+    for pair in group.entries.chunks(2) {
+        if let [first, second] = pair {
+            if let (1, Some(upper), 2, Some(name)) = (first.code, first.value.as_string(), second.code, second.value.as_string()) {
+                pairs.push((upper.to_string(), name.to_string()));
+            }
+        }
+    }
+    pairs
+}
+
+/// Put the names of the file back for the ACadSharp view (which reads R14's upper-case names): the table records the reader restored,
+/// and the header names that refer to them. An edited name stays as it is.
+fn unrestore_names(document: &mut CadDocument) {
+    let names = std::mem::take(&mut document.consumed_records.names);
+    for (owner, file) in &names {
+        macro_rules! back {
+            ($table:expr) => {
+                let found = $table.iter().find(|record| record.handle == *owner).map(|record| record.name.clone());
+                if let Some(current) = found {
+                    if r14_name(&current).as_deref() == Some(file.as_str()) {
+                        let _ = $table.rename(&current, file.clone());
+                        rename_header_references(&mut document.header, &current, file);
+                        continue;
+                    }
+                }
+            };
+        }
+        back!(document.layers);
+        back!(document.line_types);
+        back!(document.text_styles);
+        back!(document.dim_styles);
+        back!(document.app_ids);
+        back!(document.views);
+        back!(document.ucss);
+        back!(document.vports);
+        let found = document.block_records.iter().find(|record| record.handle == *owner).map(|record| record.name.clone());
+        if let Some(current) = found {
+            if r14_name(&current).as_deref() == Some(file.as_str()) {
+                let marker = document.block_records.get(&current).map(|record| (record.block_entity_handle, record.block_end_handle));
+                let _ = document.block_records.rename(&current, file.clone());
+                rename_header_references(&mut document.header, &current, file);
+                if let Some((block, _)) = marker {
+                    if let Some(crate::entities::EntityType::Block(block)) = document.get_entity_mut(block) {
+                        if block.name == current {
+                            block.name = file.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    document.consumed_records.names = names;
+}
+
+fn rename_header_references(header: &mut crate::document::HeaderVariables, old: &str, new: &str) {
+    for name in [
+        &mut header.current_layer_name,
+        &mut header.current_text_style_name,
+        &mut header.current_dimstyle_name,
+        &mut header.current_linetype_name,
+        &mut header.dim_text_style_name,
+    ] {
+        if name.eq_ignore_ascii_case(old) {
+            *name = new.to_string();
+        }
+    }
+}
+
+/// Whether the `EXTNAMES` group of `groups` is applied to the table record `owner`: its pairs name the record (the name the file states
+/// and the name of the drawing) and the record already has the name of the drawing.
+fn extnames_applied(document: &CadDocument, owner: Handle, groups: &[Group]) -> bool {
+    let Some(group) = groups.iter().find(|group| group.name == EXTNAMES) else { return false };
+    let [first, second] = group.entries.as_slice() else { return false };
+    let (1, Some(upper), 2, Some(name)) = (first.code, first.value.as_string(), second.code, second.value.as_string()) else { return false };
+    if r14_name(name).as_deref() != Some(upper) {
+        return false;
+    }
+    macro_rules! has {
+        ($table:expr) => {
+            if $table.iter().any(|record| record.handle == owner && record.name == name) {
+                return true;
+            }
+        };
+    }
+    has!(document.layers);
+    has!(document.line_types);
+    has!(document.text_styles);
+    has!(document.dim_styles);
+    has!(document.app_ids);
+    has!(document.block_records);
+    has!(document.views);
+    has!(document.ucss);
+    has!(document.vports);
+    false
+}
+
+/// The handles of the table records of the document.
+fn table_record_handles(document: &CadDocument) -> std::collections::HashSet<Handle> {
+    let mut found = std::collections::HashSet::new();
+    found.extend(document.layers.iter().map(|record| record.handle));
+    found.extend(document.line_types.iter().map(|record| record.handle));
+    found.extend(document.text_styles.iter().map(|record| record.handle));
+    found.extend(document.dim_styles.iter().map(|record| record.handle));
+    found.extend(document.app_ids.iter().map(|record| record.handle));
+    found.extend(document.block_records.iter().map(|record| record.handle));
+    found.extend(document.views.iter().map(|record| record.handle));
+    found.extend(document.ucss.iter().map(|record| record.handle));
+    found.extend(document.vports.iter().map(|record| record.handle));
+    found.remove(&Handle::NULL);
+    found
+}
+
+/// The names the writer states in upper case: `(owner, name in R14, name)` of every table record whose name R14 changes.
+/// Whether the record is a down-saved dynamic block definition the file stated anonymous (the bare "*U", flag 1) while its public
+/// name is kept in the extended data (`AcDbDynamicBlockTrueName`), which the reader restores as the record's name. The writer states
+/// such a record as it was (anonymous, under the bare "*U"), so its name is not a name the file states and `EXTNAMES` does not cover it.
+pub(crate) fn is_dynamic_definition_stated_anonymous(document: &CadDocument, record: &crate::tables::BlockRecord) -> bool {
+    record.source_flags & 1 != 0
+        && !record.flags.anonymous
+        && !record.name.starts_with('*')
+        && ["AcDbDynamicBlockTrueName", "ACDBDYNAMICBLOCKTRUENAME"].iter().any(|application| {
+            document.object_xdata.get(&record.handle).is_some_and(|data| data.get_record(application).is_some())
+                || document.app_ids.get(application).is_some_and(|app| {
+                    document.eed_by_handle.get(&record.handle).is_some_and(|records| records.iter().any(|(handle, _)| *handle == app.handle.value()))
+                })
+        })
+}
+
+fn extnames_wanted(document: &CadDocument) -> Vec<(Handle, String, String)> {
+    let mut found: Vec<(Handle, String, String)> = Vec::new();
+    let mut add = |handle: Handle, name: &str, exempt: bool| {
+        if !exempt && !handle.is_null() {
+            if let Some(upper) = r14_name(name) {
+                found.push((handle, upper, name.to_string()));
+            }
+        }
+    };
+    for record in document.layers.iter() {
+        add(record.handle, &record.name, false);
+    }
+    for record in document.line_types.iter() {
+        add(record.handle, &record.name, false);
+    }
+    for record in document.text_styles.iter() {
+        add(record.handle, &record.name, record.is_shape_file);
+    }
+    for record in document.dim_styles.iter() {
+        add(record.handle, &record.name, false);
+    }
+    // The applications the writer leaves out (an unused default) have no record to name.
+    let skipped = crate::io::dwg::dwg_stream_writers::object_writer::DwgObjectWriter::skipped_app_ids_of(document);
+    for record in document.app_ids.iter() {
+        add(record.handle, &record.name, skipped.contains(&record.name.to_ascii_uppercase()) || app_stated_as_is(&record.name));
+    }
+    for record in document.block_records.iter() {
+        add(record.handle, &record.name, record.flags.anonymous || is_dynamic_definition_stated_anonymous(document, record));
+    }
+    for record in document.views.iter() {
+        add(record.handle, &record.name, false);
+    }
+    for record in document.ucss.iter() {
+        add(record.handle, &record.name, false);
+    }
+    for record in document.vports.iter() {
+        add(record.handle, &record.name, false);
+    }
+    found
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// MTEXT text (R14 and R2000): the MTEXT of R2004 and later holds a paragraph break as a line feed and the one of R14 and R2000 as `\P`
+// (sample_AC1018.dwg `this is a Mtext<LF>with multiple lines in it`, sample_AC1015.dwg `this is a Mtext\Pwith multiple lines in it`; their
+// DXF twins `^J` and `\P`). AutoCAD's down-save writes the converted text and keeps the original in the MTEXT's extension
+// dictionary: `ACAD_MTEXT_RT`, a record of `40 <checksum of the converted text>` and the original text in chunks of 250 characters
+// (group 1; sample_AC1015.dwg: the MTEXT #3EC, #3F5, #3F6, #779 have it, the checksum is the sum of every UTF-16 unit times its
+// 1-based position, as the table cell checksum; 5 of the 36 MTEXT of sample_AC1014.dwg). AutoCAD reads the original back when the
+// checksum still matches the text. A record exists for every MTEXT whose text changed in the conversion; two other conversions are not
+// reproduced: the stacked fraction `{\H1x;\S1#4;}` becomes `\S1/4;` (one sample), and R2004 keeps a record `ACAD_MTEXT_2008_RT` for a
+// text with a character the code page lacks (`\U+2205`), whose text is the escaped form again and tells nothing the text lacks.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const MTEXT_RT: &str = "ACAD_MTEXT_RT";
+const MTEXT_RT_CHUNK: usize = 250;
+
+pub(crate) fn mtext_rt_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1018
+}
+
+/// The text a file before R2004 states for `original` (the paragraph breaks as `\P`); `None` when it states the original itself.
+fn mtext_file_text(original: &str) -> Option<String> {
+    original.contains('\n').then(|| original.replace('\n', "\\P"))
+}
+
+fn mtext_checksum(text: &str) -> f64 {
+    crate::entities::table::cell_text_checksum(text)
+}
+
+fn mtext_rt_entries(original: &str, file: &str) -> Vec<XRecordEntry> {
+    let mut entries = vec![XRecordEntry::double(40, mtext_checksum(file))];
+    let characters: Vec<char> = original.chars().collect();
+    for chunk in characters.chunks(MTEXT_RT_CHUNK) {
+        entries.push(XRecordEntry::string(1, chunk.iter().collect::<String>()));
+    }
+    entries
+}
+
+/// The original text a record of the shape AutoCAD writes states, with the checksum.
+fn mtext_rt_original(entries: &[XRecordEntry]) -> Option<(f64, String)> {
+    let (first, chunks) = entries.split_first()?;
+    let checksum = (first.code == 40).then(|| as_f64(&first.value)).flatten()?;
+    let mut original = String::new();
+    for chunk in chunks {
+        if chunk.code != 1 {
+            return None;
+        }
+        original.push_str(chunk.value.as_string()?);
+    }
+    (!chunks.is_empty()).then_some((checksum, original))
+}
+
+/// Restore the original text of the MTEXT whose `ACAD_MTEXT_RT` record states it for the text the file holds (the checksum matches the
+/// text: the line feeds the file spelled `\P`, a stacked fraction `{\H1x;\S1#4;}` the file spelled `\S1/4;`; sample_AC1015.dwg and its
+/// R2004 twin sample_AC1018.dwg, whose MTEXT #662 holds the original); the records applied.
+fn restore_mtext(document: &mut CadDocument, found: &std::collections::HashMap<Handle, (Handle, Vec<XRecordEntry>)>) -> Vec<Handle> {
+    let mut applied = Vec::new();
+    let mut restored = Vec::new();
+    for (owner, (record, entries)) in found {
+        let Some((checksum, original)) = mtext_rt_original(entries) else { continue };
+        let Some(crate::entities::EntityType::MText(text)) = document.get_entity(*owner) else { continue };
+        if mtext_checksum(&text.value) == checksum {
+            restored.push((*owner, original, text.value.clone()));
+            applied.push(*record);
+        }
+    }
+    restored.sort_by_key(|(owner, _, _)| owner.value());
+    for (owner, original, file) in restored {
+        if let Some(crate::entities::EntityType::MText(text)) = document.get_entity_mut_keep_raw(owner) {
+            text.value = original.clone();
+        }
+        document.consumed_records.mtext.push((owner, original, file));
+    }
+    applied
+}
+
+/// State the record of an MTEXT before R2004 (`Some(file text, record entries)`) or drop the one that no longer fits (`None`).
+fn state_mtext(document: &mut CadDocument, ext: &mut Ext, owner: Handle, wanted: Option<(String, Vec<XRecordEntry>)>, version: DxfVersion) {
+    match wanted {
+        Some((file, entries)) => {
+            if let Some(crate::entities::EntityType::MText(text)) = document.get_entity_mut(owner) {
+                text.value = file;
+            }
+            let extension = ext.ensure(document, owner);
+            set_record(document, extension, MTEXT_RT, Some(entries), true, version);
+        }
+        None => {
+            if let Some(extension) = ext.of(document, owner) {
+                set_record(document, extension, MTEXT_RT, None, true, version);
+            }
+        }
+    }
+}
+
+/// The text ACadSharp reads for an MTEXT of a file read before R2004 whose original the reader restored: the file's spelling, while the
+/// text is the original (an edit shows as it is).
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn mtext_file_value<'a>(document: &CadDocument, owner: Handle, value: &'a str) -> std::borrow::Cow<'a, str> {
+    match document.consumed_records.mtext.iter().find(|(handle, _, _)| *handle == owner) {
+        Some((_, original, file)) if original == value => std::borrow::Cow::Owned(file.clone()),
+        Some(_) => mtext_file_text(value).map_or(std::borrow::Cow::Borrowed(value), std::borrow::Cow::Owned),
+        None => std::borrow::Cow::Borrowed(value),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Hatch gradient (R14 and R2000): the HATCH entity of those versions has no gradient; the hatch is a solid fill with the two colours as
+// the nearest indexes in `GradientColor1ACI` / `GradientColor2ACI` and the gradient itself in `ACAD_XREC_ROUNDTRIP {Gradient1}`
+// (sample_AC1014.dwg and sample_AC1015.dwg: the hatches #371 and #376, the two whose gradient is switched on; the DXF of R2000 has the
+// record too). The record is one binary chunk (group 1004):
+//
+//   u32 123 + the index of the gradient type in AutoCAD's order (LINEAR 0, CYLINDER, INVCYLINDER, SPHERICAL 3, ..)   u32 2   u32 1
+//   32 zero bytes   u32 2 (colours)   u32 0   u32 0
+//   colour 1: u32 24, u32 1, u32 colour word (0xC2 red green blue), 12 zero bytes      f64 1.0
+//   colour 2: u32 24, u32 1, u32 colour word, 12 zero bytes
+//   u32 length of the gradient name and its terminator, the name, 0
+//
+// (the two samples, LINEAR and SPHERICAL with the colours 0x0000FF and 0xFFFF00, are 123 and 126 bytes and are reproduced byte for
+// byte). The 32 zero bytes are the angle, the shift and the tint among others: the samples hold only the defaults, so the writer states
+// the record for a gradient of two true colours whose angle, shift and tint are 0 and no other (any other gradient is the
+// ACI colours of the entity data only, UNVERIFIED how AutoCAD states them). A DXF-sourced record in the corpus states the type index
+// without a name (`dwg_reader::recover_roundtrip_gradients` reads both).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const GRADIENT: &str = "Gradient1";
+const GRADIENT_TYPES: [&str; 9] = [
+    "LINEAR",
+    "CYLINDER",
+    "INVCYLINDER",
+    "SPHERICAL",
+    "HEMISPHERICAL",
+    "CURVED",
+    "INVSPHERICAL",
+    "INVHEMISPHERICAL",
+    "INVCURVED",
+];
+
+pub(crate) fn gradient_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1018
+}
+
+fn gradient_dxf(version: DxfVersion) -> bool {
+    version <= DxfVersion::AC1015
+}
+
+/// The chunk AutoCAD states for a gradient of two true colours with the default angle, shift and tint; `None` for any other gradient.
+fn gradient_blob(gradient: &crate::entities::hatch::HatchGradientPattern) -> Option<Vec<u8>> {
+    use crate::types::Color;
+    let [first, second] = gradient.colors.as_slice() else { return None };
+    let (Color::Rgb { r: r1, g: g1, b: b1 }, Color::Rgb { r: r2, g: g2, b: b2 }) = (first.color, second.color) else { return None };
+    if !gradient.enabled
+        || gradient.is_single_color
+        || gradient.angle != 0.0
+        || gradient.shift != 0.0
+        || gradient.color_tint != 0.0
+        || first.value != 0.0
+        || second.value != 1.0
+        || !gradient.name.is_ascii()
+    {
+        return None;
+    }
+    let kind = GRADIENT_TYPES.iter().position(|name| *name == gradient.name)? as u32;
+    let word = |r: u8, g: u8, b: u8| 0xC200_0000u32 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+    let mut out: Vec<u8> = Vec::with_capacity(123);
+    for value in [123 + kind, 2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0] {
+        out.extend(value.to_le_bytes());
+    }
+    for (index, colour) in [word(r1, g1, b1), word(r2, g2, b2)].into_iter().enumerate() {
+        for value in [24u32, 1, colour, 0, 0, 0] {
+            out.extend(value.to_le_bytes());
+        }
+        if index == 0 {
+            out.extend(1.0f64.to_le_bytes());
+        }
+    }
+    out.extend((gradient.name.len() as u32 + 1).to_le_bytes());
+    out.extend(gradient.name.as_bytes());
+    out.push(0);
+    Some(out)
+}
+
+fn gradient_group(gradient: &crate::entities::hatch::HatchGradientPattern) -> Option<Group> {
+    gradient_blob(gradient).map(|blob| Group::new(GRADIENT, vec![XRecordEntry::new(1004, XRecordValue::Chunk(blob))]))
+}
+
+/// Take the `Gradient1` group out of the round-trip record of a hatch whose gradient the reader rebuilt from it
+/// (`dwg_reader::recover_roundtrip_gradients`), when the group is exactly the one the writer states for that gradient: the record is
+/// the file's way of holding the gradient, not CAD data. The view and the writers put it back (`reinstate`).
+pub(crate) fn consume_gradient(document: &mut CadDocument, hatch: Handle) {
+    let Some(crate::entities::EntityType::Hatch(entity)) = document.get_entity(hatch) else { return };
+    let Some(wanted) = gradient_group(&entity.gradient_color) else { return };
+    let Some(dictionary) = document.extension_dictionary_handle(hatch) else { return };
+    let Some(record) = dictionary_at(document, dictionary).and_then(|dictionary| entry_ci(dictionary, KEY)) else { return };
+    if groups_of(document, record).iter().any(|group| *group == wanted) {
+        take_groups(document, record, &[GRADIENT.to_string()]);
+    }
+}
+
 /// Whether a kind states its groups in a file of `version`: a DWG needs them where the version lacks the field, a DXF where
 /// AutoCAD's own DXF of the version holds them.
 type Predicate = fn(DxfVersion) -> bool;
 
 fn layout_dxf(version: DxfVersion) -> bool {
+    version <= DxfVersion::AC1015
+}
+
+fn dxf_r2000(version: DxfVersion) -> bool {
     version <= DxfVersion::AC1015
 }
 
@@ -1913,6 +2367,36 @@ struct Job {
     leave: bool,
 }
 
+/// A DXF states none of the layer records (`layer_changes`), and AutoCAD's DXF of R2000 has no extension dictionary on the layers
+/// that held only such a record in the DWG (sample_AC1015_ascii.dxf: only `0`, `Layer2` and the two `@ 1` layers have one; the first
+/// two hold none in sample_AC1015.dwg either, the layers `Layer_true_color`, `Layer_color_book` and `color_125_33_79` have one with
+/// the record there and none in the DXF): the dictionary a consumed record left empty goes with the record. A dictionary the file
+/// held empty, or with another entry, stays.
+fn drop_emptied_layer_dictionaries(document: &mut CadDocument) {
+    let changes = std::mem::take(&mut document.consumed_records.layer_changes);
+    let mut dictionaries: Vec<Handle> = changes
+        .iter()
+        .filter_map(|change| match change {
+            Consumption::Entry { dictionary, .. } => Some(*dictionary),
+            _ => None,
+        })
+        .collect();
+    dictionaries.sort();
+    dictionaries.dedup();
+    for dictionary in dictionaries {
+        let Some(ObjectType::Dictionary(entries)) = document.objects.get(&dictionary) else { continue };
+        let owner = entries.owner;
+        if !entries.entries.is_empty() || !document.layers.iter().any(|layer| layer.handle == owner) {
+            continue;
+        }
+        document.objects.remove(&dictionary);
+        document.reactors_by_handle.remove(&dictionary);
+        if document.xdic_by_handle.get(&owner) == Some(&dictionary) {
+            document.xdic_by_handle.remove(&owner);
+        }
+    }
+}
+
 /// State the groups of every kind the output version needs, from the native values, and drop the groups the version holds
 /// natively. `dxf` selects the DXF rules.
 pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>, version: DxfVersion, dxf: bool) {
@@ -1922,7 +2406,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         document.to_mut().consumed_records.style_changes.clear();
     }
     if dxf && !document.consumed_records.layer_changes.is_empty() {
-        document.to_mut().consumed_records.layer_changes.clear();
+        drop_emptied_layer_dictionaries(document.to_mut());
     }
     if !dxf && version >= DxfVersion::AC1024 && !document.consumed_records.table_style_changes.is_empty() {
         document.to_mut().consumed_records.table_style_changes.clear();
@@ -2063,6 +2547,11 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
                 };
                 jobs.push(Job { owner: handle, owns: Owns::Exact(&DISPLAY), wanted, fresh: None, leave: leaves(display_holds, never) });
             }
+            crate::entities::EntityType::Hatch(hatch) => {
+                // The gradient of a hatch before R2004 (R14 and R2000 DWG, R2000 DXF).
+                let wanted: Vec<Group> = if needs(gradient_holds, gradient_dxf) { gradient_group(&hatch.gradient_color).into_iter().collect() } else { Vec::new() };
+                jobs.push(Job { owner: handle, owns: Owns::Exact(&[GRADIENT]), wanted, fresh: Some(Vec::new()), leave: leaves(gradient_holds, gradient_dxf) });
+            }
             crate::entities::EntityType::Solid3D(solid) => {
                 let wanted = if needs(solid_history_holds, never) { solid_groups(solid) } else { Vec::new() };
                 jobs.push(Job { owner: handle, owns: Owns::Exact(&[SOLID_HISTORY, SOLID_HISTORY_1, SOLID_HISTORY_2]), wanted, fresh: Some(Vec::new()), leave: leaves(solid_history_holds, never) });
@@ -2125,10 +2614,82 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             (ours && taken.contains(&record) && !stated.contains(&dictionary.owner)).then_some(dictionary.owner)
         })
         .collect();
-    if jobs.is_empty() && header_vars.is_none() && block_jobs.is_empty() && wanted_multilines.is_empty() && dropped_multilines.is_empty() {
+    // The names of the table records before R2000 (R14 DWG): upper case, the name of the drawing in `EXTNAMES`. A record of another
+    // version states none (the group a reader took out of a file of R14 is dropped).
+    let table_owners: std::collections::HashSet<Handle> = table_record_handles(document);
+    let names_wanted: Vec<(Handle, String, String)> = if !dxf && extnames_needed(version) { extnames_wanted(document) } else { Vec::new() };
+    let names_stated: std::collections::HashSet<Handle> = names_wanted.iter().map(|(owner, ..)| *owner).collect();
+    let names_stale: Vec<Handle> = records(document)
+        .into_iter()
+        .filter(|(owner, record)| {
+            !dxf && table_owners.contains(owner) && !names_stated.contains(owner) && groups_of(document, *record).iter().any(|group| group.name == EXTNAMES)
+        })
+        .map(|(owner, _)| owner)
+        .collect();
+    // The MTEXT before R2004: the paragraph breaks as `\\P` and the original in `ACAD_MTEXT_RT` (R2000 DXF too: its twin holds the record).
+    let mtext_jobs: Vec<(Handle, Option<(String, Vec<XRecordEntry>)>)> = if needs(mtext_rt_holds, dxf_r2000) {
+        document
+            .entities()
+            .filter_map(|entity| {
+                let crate::entities::EntityType::MText(text) = entity else { return None };
+                let owner = text.common.handle;
+                let restored = document.consumed_records.mtext.iter().find(|(handle, original, _)| *handle == owner && *original == text.value);
+                let wanted = match restored {
+                    Some((_, original, file)) => Some((file.clone(), mtext_rt_entries(original, file))),
+                    None => mtext_file_text(&text.value).map(|file| {
+                        let entries = mtext_rt_entries(&text.value, &file);
+                        (file, entries)
+                    }),
+                };
+                // A record the reader did not apply (another shape or text: the unicode and the stacking conversions) is the file's own: kept.
+                let ours = document.consumed_records.mtext.iter().any(|(handle, _, _)| *handle == owner)
+                    && ext
+                        .of(document, owner)
+                        .and_then(|extension| dictionary_at(document, extension))
+                        .and_then(|dictionary| dictionary.get(MTEXT_RT))
+                        .and_then(|record| record_entries(document, record))
+                        .is_some_and(|entries| mtext_rt_original(entries).is_some());
+                (wanted.is_some() || ours).then_some((owner, wanted))
+            })
+            .collect()
+    } else if mtext_rt_holds(version) {
+        // A version that holds the text itself: the record the reader applied (it is put back above) goes, as AutoCAD's up-save drops it.
+        document
+            .consumed_records
+            .mtext
+            .iter()
+            .filter(|(owner, ..)| {
+                ext.of(document, *owner)
+                    .and_then(|extension| dictionary_at(document, extension))
+                    .and_then(|dictionary| dictionary.get(MTEXT_RT))
+                    .and_then(|record| record_entries(document, record))
+                    .is_some_and(|entries| mtext_rt_original(entries).is_some())
+            })
+            .map(|(owner, ..)| (*owner, None))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if jobs.is_empty()
+        && header_vars.is_none()
+        && block_jobs.is_empty()
+        && wanted_multilines.is_empty()
+        && dropped_multilines.is_empty()
+        && mtext_jobs.is_empty()
+        && names_wanted.is_empty()
+        && names_stale.is_empty()
+    {
         return;
     }
     let owned = document.to_mut();
+    // First, so that the group heads the record as it does in AutoCAD's files.
+    for (owner, upper, name) in names_wanted {
+        let group = Group::new(EXTNAMES, vec![XRecordEntry::string(1, upper), XRecordEntry::string(2, name)]);
+        state(owned, &mut ext, owner, &|group| group == EXTNAMES, vec![group], true, version);
+    }
+    for owner in names_stale {
+        state(owned, &mut ext, owner, &|group| group == EXTNAMES, Vec::new(), false, version);
+    }
     for job in jobs {
         let mut wanted = job.wanted;
         let mut owns = job.owns;
@@ -2168,6 +2729,9 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     }
     for owner in dropped_multilines {
         drop_multiline(owned, &mut ext, owner, version);
+    }
+    for (owner, wanted) in mtext_jobs {
+        state_mtext(owned, &mut ext, owner, wanted, version);
     }
 }
 

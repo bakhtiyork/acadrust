@@ -3639,6 +3639,7 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
     }
 
     // Phase 2 — apply (mutable).
+    let mut consumable: Vec<Handle> = Vec::new();
     for (handle, c1, c2, name, exact_colors) in recovered {
         if let Some(EntityType::Hatch(h)) = document.get_entity_mut(handle) {
             // Preserve the source gradient without cloning its colors/name.
@@ -3670,7 +3671,13 @@ pub(crate) fn recover_roundtrip_gradients(document: &mut crate::document::CadDoc
             ];
             h.gradient_color.name = name;
             h.gradient_recovery_source = Some(Box::new(source));
+            consumable.push(handle);
         }
+    }
+    // The record the gradient was rebuilt from is the file's way of holding it: out of the model when it is exactly the one the
+    // writer states for the gradient (the view and the writers put it back).
+    for handle in consumable {
+        crate::io::dwg::autocad_records::consume_gradient(document, handle);
     }
 }
 

@@ -281,15 +281,19 @@ fn handle_seed_does_not_grow_with_round_trips() {
         let first = write_and_read(&document, version);
         let second = write_and_read(&first, version);
         let third = write_and_read(&second, version);
+        // R14 states its names in upper case and keeps the names of the drawing in a round-trip record (and its extension
+        // dictionary) of each of the 10 table records whose name differs (3 line types, Standard text and dimension style, 2
+        // applications, 2 block records, *Active): 20 objects take the handles from the seed. (R5b-11, AutoCAD's own R14 file.)
+        let seed = if version == DxfVersion::AC1014 { 5020 } else { 5000 };
         assert_eq!(
             first.header.source_handle_seed,
-            Some(5000),
+            Some(seed),
             "{version:?}: the file states the seed it was given"
         );
         for (label, read) in [("second", &second), ("third", &third)] {
             assert_eq!(
                 read.header.source_handle_seed,
-                Some(5000),
+                Some(seed),
                 "{version:?}: seed stated by the {label} file"
             );
         }
@@ -513,7 +517,12 @@ fn synthesized_block_markers_state_the_full_name() {
         stated.sort();
         assert!(stated.len() >= 3, "{version:?}: {stated:?}");
         for (record, marker) in &stated {
-            assert_eq!(record, marker, "{version:?}: the marker states the record's name");
+            // R14 states the names in upper case (sample_AC1014.dwg: `*PAPER_SPACE0`); the model has the name of the drawing (R5b-11).
+            if version == DxfVersion::AC1014 {
+                assert!(record.eq_ignore_ascii_case(marker), "{version:?}: the marker states the record's name: {record} {marker}");
+            } else {
+                assert_eq!(record, marker, "{version:?}: the marker states the record's name");
+            }
         }
     }
 }
