@@ -18,6 +18,8 @@
 //! | dimension linetypes | the root dictionary | dictionary `ACAD_2007HEADERVARS_RT`: XRECORDs `DIMLTYPE`, `DIMLTEX1`, `DIMLTEX2` | R2007 |
 //! | uniform scale | block record | dictionary `AcDbBlockTableRecordData` (R14: upper case) of the extension dictionary: XRECORD `Edit` | R2007 |
 //! | multi-line attribute | ATTDEF, ATTRIB | `ACAD_MLATT` (the embedded MTEXT) and `{ACAD_MATT_HEIGHT}` | R2018 |
+//! | layer colour | LAYER | `{COLORACI, COLORTRUE, COLORNAME}` (the true colour, the colour-book identity) | R2004 |
+//! | layer plot flag, line weight | LAYER | `{PLOTBIT}` (a layer that does not plot), `{LINEWEIGHT}` (a layer with a line weight) | R2000 |
 //!
 //! (The spline's `ACAD_SPLINE_DATA` is extended data: `autocad_conversions`. The R14 key of a table style's cell style map and the
 //! TABLECONTENT / TABLEGEOMETRY objects of a table: `objects::table_style`, `entities::table`.)
@@ -211,6 +213,7 @@ impl Ext {
         let mut record = crate::objects::XRecord::named(key);
         record.handle = handle;
         record.owner = dictionary;
+        record.reactors = vec![dictionary];
         record.cloning_flags = chain_flags(version).1;
         document.objects.insert(handle, ObjectType::XRecord(record));
         if let Some(ObjectType::Dictionary(entries)) = document.objects.get_mut(&dictionary) {
@@ -223,6 +226,18 @@ impl Ext {
         handle
     }
 
+}
+
+/// A record the writer made in an extension dictionary, stated as AutoCAD's own files state one: the dictionary is its reactor
+/// (every XRECORD of a dictionary in sample_AC1015.dwg to sample_AC1032.dwg lists its dictionary) and it keeps the cloning flags of
+/// the version (`chain_flags`).
+pub(crate) fn state_new_record(document: &mut CadDocument, record: Handle, version: DxfVersion) {
+    if let Some(ObjectType::XRecord(xrecord)) = document.objects.get_mut(&record) {
+        if xrecord.reactors.is_empty() && !xrecord.owner.is_null() {
+            xrecord.reactors = vec![xrecord.owner];
+        }
+        xrecord.cloning_flags = chain_flags(version).1;
+    }
 }
 
 /// The handle of the round-trip record of `owner`.
@@ -312,6 +327,9 @@ pub(crate) enum Consumption {
     Object(Handle, ObjectType),
     /// The reactors the document map held for a removed object.
     Reactors(Handle, Vec<Handle>),
+    /// The extension dictionary `dictionary` of `owner` was removed with its last record: the link was in the document map
+    /// (`in_map`) and in the owner's own field (`in_field`).
+    XDictionary { owner: Handle, dictionary: Handle, in_map: bool, in_field: bool },
 }
 
 /// The changes a reader made, in order.
@@ -319,17 +337,44 @@ pub(crate) enum Consumption {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct Consumed {
     changes: Vec<Consumption>,
+    /// The changes of the visual-style records (`consume_visual_styles`): a writer of R2013 or later does not put them back (those
+    /// versions state the properties in the style and AutoCAD's files of them have no extension dictionary on a style).
+    style_changes: Vec<Consumption>,
+    /// The changes of the layer records (colour, plot flag, line weight): a DXF writer does not put them back (a DXF layer states all
+    /// three itself, and AutoCAD's DXF of R2000 has no such record).
+    layer_changes: Vec<Consumption>,
 }
 
 impl Consumed {
     pub(crate) fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes.is_empty() && self.style_changes.is_empty() && self.layer_changes.is_empty()
+    }
+
+    /// The handles of the objects the reader removed from `document` (the records it applied, and the dictionaries they left empty),
+    /// sorted: the native dump states them, so that a check of the handle seed can see the handles the model no longer holds.
+    #[cfg(feature = "acadsharp-compat")]
+    pub(crate) fn removed_handles(&self, document: &CadDocument) -> Vec<Handle> {
+        let mut removed: Vec<Handle> = self
+            .changes
+            .iter()
+            .chain(self.style_changes.iter())
+            .chain(self.layer_changes.iter())
+            .filter_map(|change| match change {
+                Consumption::Object(handle, _) if !document.objects.contains_key(handle) => Some(*handle),
+                _ => None,
+            })
+            .collect();
+        removed.sort();
+        removed.dedup();
+        removed
     }
 
     /// The objects the reader removed or reduced (the records it applied).
     fn taken(&self) -> std::collections::HashSet<Handle> {
         self.changes
             .iter()
+            .chain(self.style_changes.iter())
+            .chain(self.layer_changes.iter())
             .filter_map(|change| match change {
                 Consumption::Object(handle, _) => Some(*handle),
                 _ => None,
@@ -410,10 +455,58 @@ fn take_groups(document: &mut CadDocument, record: Handle, applied: &[String]) {
     document.consumed_records.changes.push(Consumption::Object(record, original));
 }
 
+/// Take out of the model the round-trip record of every visual style the reader restored from it, with the extension dictionary the
+/// record leaves empty. AutoCAD's files from R14 to R2010 keep the properties after the 24th (R2010: the 28th) of a style, and the
+/// flags of its property ids, in `ACAD_XREC_ROUNDTRIP` of the style's extension dictionary (24 styles in each of sample_AC1014.dwg,
+/// sample_AC1015.dwg, sample_AC1018.dwg and sample_AC1024.dwg), and the files of R2013 and R2018 have neither record nor extension
+/// dictionary on a style. The reader (`restore_visual_style_roundtrip`) has given the style its 58 properties; the record goes only
+/// when it is exactly the one the writer states for them, so that nothing is lost (a record of another producer, or with a flag the
+/// writer would not state, stays in the model).
+pub(crate) fn consume_visual_styles(document: &mut CadDocument) {
+    let r2010 = document.version == DxfVersion::AC1024;
+    let flags = std::collections::HashMap::new();
+    let mut found: Vec<(Handle, Handle, Handle)> = Vec::new();
+    for (owner, object) in &document.objects {
+        let ObjectType::VisualStyle(style) = object else { continue };
+        if style.properties.len() < 58 {
+            continue;
+        }
+        let Some(dictionary) = style.xdictionary_handle.or_else(|| document.xdic_by_handle.get(owner).copied()) else { continue };
+        let Some(ObjectType::Dictionary(entries)) = document.objects.get(&dictionary) else { continue };
+        let [(key, record)] = entries.entries.as_slice() else { continue };
+        if !key.eq_ignore_ascii_case(KEY) {
+            continue;
+        }
+        let Some(ObjectType::XRecord(xrecord)) = document.objects.get(record) else { continue };
+        if xrecord.entries == crate::objects::visual_style_record_group(&style.properties, r2010, &flags) {
+            found.push((*owner, dictionary, *record));
+        }
+    }
+    found.sort();
+    for (owner, dictionary, record) in found {
+        let before = document.consumed_records.changes.len();
+        take_chain(document, record);
+        let in_map = document.xdic_by_handle.get(&owner) == Some(&dictionary);
+        if in_map {
+            document.xdic_by_handle.remove(&owner);
+        }
+        let in_field = matches!(document.objects.get_mut(&owner), Some(ObjectType::VisualStyle(style)) if style.xdictionary_handle == Some(dictionary));
+        if let (true, Some(ObjectType::VisualStyle(style))) = (in_field, document.objects.get_mut(&owner)) {
+            style.xdictionary_handle = None;
+        }
+        document.consumed_records.changes.push(Consumption::XDictionary { owner, dictionary, in_map, in_field });
+        take_object(document, dictionary);
+        let moved = document.consumed_records.changes.split_off(before);
+        document.consumed_records.style_changes.extend(moved);
+    }
+}
+
 /// Put back what the reader took out of the model: the objects as the file had them and their dictionary entries. An object
 /// whose dictionary is gone (its owner was deleted with it) stays out; an entry whose name the dictionary has by now stays out.
 pub(crate) fn reinstate(document: &mut CadDocument) {
-    let changes = std::mem::take(&mut document.consumed_records.changes);
+    let mut changes = std::mem::take(&mut document.consumed_records.layer_changes);
+    changes.extend(std::mem::take(&mut document.consumed_records.style_changes));
+    changes.extend(std::mem::take(&mut document.consumed_records.changes));
     let mut skipped: std::collections::HashSet<Handle> = std::collections::HashSet::new();
     for change in changes.into_iter().rev() {
         match change {
@@ -429,6 +522,17 @@ pub(crate) fn reinstate(document: &mut CadDocument) {
             Consumption::Reactors(handle, reactors) => {
                 if !skipped.contains(&handle) {
                     document.reactors_by_handle.entry(handle).or_insert(reactors);
+                }
+            }
+            Consumption::XDictionary { owner, dictionary, in_map, in_field } => {
+                if skipped.contains(&dictionary) {
+                    continue;
+                }
+                if in_map {
+                    document.xdic_by_handle.entry(owner).or_insert(dictionary);
+                }
+                if let (true, Some(ObjectType::VisualStyle(style))) = (in_field, document.objects.get_mut(&owner)) {
+                    style.xdictionary_handle.get_or_insert(dictionary);
                 }
             }
             Consumption::Entry { dictionary, position, name, target, hard } => {
@@ -1495,6 +1599,7 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
     if version >= DxfVersion::AC1032 {
         return;
     }
+    consume_visual_styles(document);
     if !header_vars_holds(version) {
         for record in restore_header_vars(document) {
             take_chain(document, record);
@@ -1516,7 +1621,12 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
     for (owner, record) in found {
         let groups = groups_of(document, record);
         let applied = restore_record(document, owner, &groups, version, vport_control, &multilines);
+        let before = document.consumed_records.changes.len();
         take_groups(document, record, &applied);
+        if document.layers.iter().any(|layer| layer.handle == owner) {
+            let moved = document.consumed_records.changes.split_off(before);
+            document.consumed_records.layer_changes.extend(moved);
+        }
     }
 }
 
@@ -1547,6 +1657,13 @@ fn restore_record(
             .filter(|group| group.name == MATT_HEIGHT && matches!(group.entries.as_slice(), [entry] if entry.code == 140 && as_f64(&entry.value) == Some(*height)))
             .map(|group| group.name.clone())
             .collect();
+    }
+    if let Some(layer) = document.layers.iter_mut().find(|layer| layer.handle == owner) {
+        let mut applied = if layer_color_holds(version) { Vec::new() } else { restore_layer_color(layer, groups) };
+        if !layer_plot_holds(version) {
+            applied.extend(restore_layer_plot(layer, groups));
+        }
+        return applied;
     }
     match document.objects.get_mut(&owner) {
         Some(object) if view_style_base(object).is_some() => {
@@ -1580,6 +1697,133 @@ fn restore_record(
         Some(crate::entities::EntityType::Viewport(viewport)) => restore_viewport(viewport, groups, version),
         Some(crate::entities::EntityType::Solid3D(solid)) => restore_solid(solid, groups),
         _ => Vec::new(),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Layer colour (R14 and R2000 DWG): a layer of those versions states an ACI index; the true colour and the colour-book identity of a
+// layer go to `ACAD_XREC_ROUNDTRIP {COLORACI, COLORTRUE, COLORNAME}` (sample_AC1014.dwg and sample_AC1015.dwg: the layers
+// LAYER_TRUE_COLOR, LAYER_COLOR_BOOK and COLOR_125_33_79; `70` the index the record states, `90` the R2004 colour word `0xC2`
+// red green blue, `1` the identity `<book>$<name>` of a colour-book colour). AutoCAD's DXF of R2000 holds the colour in group 420.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const LAYER_ACI: &str = "COLORACI";
+const LAYER_TRUE: &str = "COLORTRUE";
+const LAYER_BOOK: &str = "COLORNAME";
+
+pub(crate) fn layer_color_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1018
+}
+
+/// The groups that keep the colour of a layer whose colour is not an index: none for an index, ByLayer or ByBlock.
+fn layer_color_groups(layer: &crate::tables::Layer) -> Vec<Group> {
+    let crate::types::Color::Rgb { r, g, b } = layer.color else {
+        return Vec::new();
+    };
+    let word = (0xC2u32 << 24) | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
+    let mut groups = vec![
+        Group::new(LAYER_ACI, vec![XRecordEntry::int16(70, layer.color.approximate_index())]),
+        Group::new(LAYER_TRUE, vec![XRecordEntry::int32(90, word as i32)]),
+    ];
+    if let (Some(book), Some(name)) = (&layer.book_name, &layer.color_name) {
+        groups.push(Group::new(LAYER_BOOK, vec![XRecordEntry::string(1, format!("{book}${name}"))]));
+    }
+    groups
+}
+
+/// Restore the colour of a layer from its groups. The record is the layer's own when the index it states is the one the layer
+/// holds; the groups applied are named.
+fn restore_layer_color(layer: &mut crate::tables::Layer, groups: &[Group]) -> Vec<String> {
+    let find = |name: &str| groups.iter().find(|group| group.name == name);
+    let index = find(LAYER_ACI).and_then(|group| match group.entries.as_slice() {
+        [entry] if entry.code == 70 => as_i32(&entry.value),
+        _ => None,
+    });
+    let word = find(LAYER_TRUE).and_then(|group| match group.entries.as_slice() {
+        [entry] if entry.code == 90 => as_i32(&entry.value),
+        _ => None,
+    });
+    let (Some(index), Some(word)) = (index, word) else {
+        return Vec::new();
+    };
+    let word = word as u32;
+    if word >> 24 != 0xC2 || !(1..=255).contains(&index) || layer.color != crate::types::Color::Index(index as u8) {
+        return Vec::new();
+    }
+    let identity = find(LAYER_BOOK).and_then(|group| match group.entries.as_slice() {
+        [entry] if entry.code == 1 => entry.value.as_string().and_then(|text| text.split_once('$')).map(|(book, name)| (book.to_string(), name.to_string())),
+        _ => None,
+    });
+    layer.color = crate::types::Color::Rgb { r: (word >> 16) as u8, g: (word >> 8) as u8, b: word as u8 };
+    let mut applied = vec![LAYER_ACI.to_string(), LAYER_TRUE.to_string()];
+    if let Some((book, name)) = identity {
+        layer.book_name = Some(book);
+        layer.color_name = Some(name);
+        applied.push(LAYER_BOOK.to_string());
+    }
+    applied
+}
+
+const LAYER_PLOT: &str = "PLOTBIT";
+const LAYER_WEIGHT: &str = "LINEWEIGHT";
+
+/// R14 has no plot flag and no line weight in a layer record (R2000 has both): AutoCAD's R14 file keeps `{PLOTBIT 280 0}` of a
+/// layer that does not plot and `{LINEWEIGHT 280 <DWG index>}` of a layer with a line weight (sample_AC1014.dwg: LAYER_NOPLOT and
+/// DEFPOINTS 0; LAYER_LW_035 9 and LAYER_LW_050 11; the other 15 layers have neither and plot with the default weight).
+pub(crate) fn layer_plot_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1015
+}
+
+fn layer_plot_groups(layer: &crate::tables::Layer) -> Vec<Group> {
+    let mut groups = Vec::new();
+    if !layer.is_plottable {
+        groups.push(Group::new(LAYER_PLOT, vec![XRecordEntry::new(280, XRecordValue::Byte(0))]));
+    }
+    if matches!(layer.line_weight, crate::types::LineWeight::Value(_)) {
+        groups.push(Group::new(LAYER_WEIGHT, vec![XRecordEntry::new(280, XRecordValue::Byte(layer.line_weight.to_dwg_index()))]));
+    }
+    groups
+}
+
+/// Restore the plot flag and the line weight of a layer from its groups; the groups applied.
+fn restore_layer_plot(layer: &mut crate::tables::Layer, groups: &[Group]) -> Vec<String> {
+    let mut applied = Vec::new();
+    for group in groups {
+        let [entry] = group.entries.as_slice() else { continue };
+        if entry.code != 280 {
+            continue;
+        }
+        match (group.name.as_str(), as_i32(&entry.value)) {
+            (LAYER_PLOT, Some(0)) => layer.is_plottable = false,
+            (LAYER_WEIGHT, Some(index)) if (0..24).contains(&index) => layer.line_weight = crate::types::LineWeight::from_dwg_index(index as u8),
+            _ => continue,
+        }
+        applied.push(group.name.clone());
+    }
+    applied
+}
+
+/// What ACadSharp reads of the plot flag and line weight of a layer of a file of its own version that lacks them (R14): the
+/// defaults, whatever the record applied.
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn unrestored_layer_plot(document: &CadDocument) -> Option<(bool, crate::types::LineWeight)> {
+    masked(document, layer_plot_holds).then_some((true, crate::types::LineWeight::Default))
+}
+
+/// The colour ACadSharp reads for a layer of a file of its own version before R2004 whose record the reader applied: the index
+/// the record states.
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn unrestored_layer_color(document: &CadDocument, layer: &crate::tables::Layer) -> Option<crate::types::Color> {
+    if !masked(document, layer_color_holds) || !matches!(layer.color, crate::types::Color::Rgb { .. }) {
+        return None;
+    }
+    let dictionary = document.extension_dictionary_handle(layer.handle)?;
+    let record = dictionary_at(document, dictionary)?.get(KEY)?;
+    let groups = groups_of(document, record);
+    let group = groups.iter().find(|group| group.name == LAYER_ACI)?;
+    match group.entries.as_slice() {
+        [entry] if entry.code == 70 => as_i32(&entry.value).map(|index| crate::types::Color::Index(index as u8)),
+        _ => None,
     }
 }
 
@@ -1652,7 +1896,14 @@ struct Job {
 /// State the groups of every kind the output version needs, from the native values, and drop the groups the version holds
 /// natively. `dxf` selects the DXF rules.
 pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>, version: DxfVersion, dxf: bool) {
-    // The records the reader took out of the model are the starting point: the objects of the file, refreshed below.
+    // The records the reader took out of the model are the starting point: the objects of the file, refreshed below. R2013 and later
+    // hold the properties of a visual style in the style: its record and extension dictionary stay out.
+    if version >= DxfVersion::AC1027 && !document.consumed_records.style_changes.is_empty() {
+        document.to_mut().consumed_records.style_changes.clear();
+    }
+    if dxf && !document.consumed_records.layer_changes.is_empty() {
+        document.to_mut().consumed_records.layer_changes.clear();
+    }
     let taken = document.consumed_records.taken();
     if !document.consumed_records.is_empty() {
         reinstate(document.to_mut());
@@ -1723,6 +1974,16 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         }
     }
     // Tables.
+    for layer in document.layers.iter() {
+        let groups = layer_color_groups(layer);
+        let wanted = if needs(layer_color_holds, never) && (converted || has_record(layer.handle) || !groups.is_empty()) { groups } else { Vec::new() };
+        jobs.push(Job { owner: layer.handle, owns: Owns::Exact(&[LAYER_ACI, LAYER_TRUE, LAYER_BOOK]), wanted, fresh: Some(Vec::new()), leave: leaves(layer_color_holds, never) });
+    }
+    for layer in document.layers.iter() {
+        let groups = layer_plot_groups(layer);
+        let wanted = if needs(layer_plot_holds, never) && (converted || has_record(layer.handle) || !groups.is_empty()) { groups } else { Vec::new() };
+        jobs.push(Job { owner: layer.handle, owns: Owns::Exact(&[LAYER_PLOT, LAYER_WEIGHT]), wanted, fresh: Some(Vec::new()), leave: leaves(layer_plot_holds, never) });
+    }
     for view in document.views.iter() {
         let defaults = crate::tables::View::new(view.name.clone());
         let differs = view.camera_plottable != defaults.camera_plottable || view.visual_style_handle != defaults.visual_style_handle;

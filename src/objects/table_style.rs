@@ -1166,6 +1166,14 @@ pub(crate) fn plan_table_style_carriers_for(
                 let mut object = crate::objects::XRecord::named(ROUNDTRIP_RECORD_KEY);
                 object.handle = record;
                 object.owner = dictionary;
+                // as every XRECORD of AutoCAD's extension dictionaries (sample_AC1014.dwg to sample_AC1032.dwg): the dictionary is
+                // its reactor, and from R2000 it keeps existing objects when cloned
+                object.reactors = vec![dictionary];
+                object.cloning_flags = if version >= DxfVersion::AC1015 {
+                    crate::objects::DictionaryCloningFlags::KeepExisting
+                } else {
+                    crate::objects::DictionaryCloningFlags::NotApplicable
+                };
                 plan.objects.insert(record, ObjectType::XRecord(object));
                 if let Some(ObjectType::Dictionary(entries)) = working!(dictionary) {
                     if let Some((_, target)) = entries
@@ -1493,6 +1501,31 @@ mod tests {
                 "{version:?}: the writer states the carriers without copying the document"
             );
             assert!(String::from_utf8_lossy(&written).contains("CELLSTYLEMAP"));
+        }
+    }
+
+    /// The round-trip record the writer makes for a table style (the legacy rows' data types, before R2007) is stated as AutoCAD's
+    /// records are: the dictionary is its reactor, and R2000 and later keep existing objects when cloned.
+    #[test]
+    fn a_table_style_record_made_by_the_writer_has_its_dictionary_as_reactor_and_the_cloning_flags_of_the_version() {
+        use crate::objects::{DictionaryCloningFlags, ObjectType};
+        use crate::types::DxfVersion;
+        for (version, flags) in [(DxfVersion::AC1014, DictionaryCloningFlags::NotApplicable), (DxfVersion::AC1015, DictionaryCloningFlags::KeepExisting)] {
+            let doc = document_with_modern_styles(version);
+            let plan = plan_table_style_carriers(&doc, version).expect("styles with modern cell styles");
+            let records: Vec<_> = plan
+                .objects
+                .values()
+                .filter_map(|object| match object {
+                    ObjectType::XRecord(record) if record.name == ROUNDTRIP_RECORD_KEY => Some(record),
+                    _ => None,
+                })
+                .collect();
+            assert!(!records.is_empty(), "{version:?}");
+            for record in records {
+                assert_eq!(record.reactors, vec![record.owner], "{version:?}");
+                assert_eq!(record.cloning_flags, flags, "{version:?}");
+            }
         }
     }
 

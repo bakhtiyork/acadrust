@@ -2110,7 +2110,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if let Some(tc) = layer.color.to_true_color_value().filter(|_| !self.r12) {
             self.writer.write_i32(420, tc)?;
         }
-        if self.dxf_version >= DxfVersion::AC1018 {
+        // The colour-book identity goes with the true colour (R5b-10: the DWG reader restores the identity of a layer of R14 and R2000
+        // from AutoCAD's `COLORNAME` record, and a DXF of those versions kept the true colour but lost the identity).
+        if !self.r12 {
             if let Some(name) = crate::io::dxf::join_color_book_name(
                 layer.book_name.as_deref(),
                 layer.color_name.as_deref(),

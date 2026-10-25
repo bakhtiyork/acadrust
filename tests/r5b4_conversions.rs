@@ -97,6 +97,8 @@ fn a_visual_style_keeps_its_round_trip_record_at_every_version_before_r2013() {
     }
     let source = source_at(document, DxfVersion::AC1032);
     let record_of = |document: &CadDocument| {
+        // the record as the file held it: a reader takes the record it applied out of the model (R5b-10)
+        let document = &document.with_round_trip_records();
         let style = document.objects.values().find_map(|o| match o {
             ObjectType::VisualStyle(style) => Some(style.clone()),
             _ => None,

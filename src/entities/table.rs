@@ -2716,6 +2716,10 @@ pub(crate) fn store_table_roundtrip(document: &mut crate::document::CadDocument,
             record.entries.extend(entries);
             record.entries_complete = true;
             record.cloning_flags = flags;
+            if record.reactors.is_empty() {
+                // as every XRECORD of AutoCAD's extension dictionaries: the dictionary is its reactor
+                record.reactors = vec![record.owner];
+            }
             record.synchronize_object_references();
         }
     }

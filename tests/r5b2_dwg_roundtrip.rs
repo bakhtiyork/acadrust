@@ -544,6 +544,8 @@ fn style_properties(document: &CadDocument) -> Vec<(i16, String)> {
 }
 
 fn roundtrip_record_entries(document: &CadDocument) -> Vec<String> {
+    // the record as the file held it: a reader takes the record it applied out of the model (R5b-10)
+    let document = &document.with_round_trip_records();
     for object in document.objects.values() {
         if let ObjectType::VisualStyle(style) = object {
             if let Some(dictionary) = style.xdictionary_handle {
@@ -588,7 +590,7 @@ fn an_r2010_visual_style_keeps_its_later_properties_through_other_versions() {
     // The file of R2004 AutoCAD writes from it carries the later properties in the round-trip record.
     let r2004 = write_and_read(&full, DxfVersion::AC1018);
     // What an R2010 file holds: the first 28 properties and the record without the property flags group.
-    let mut r2010 = r2004.clone();
+    let mut r2010 = r2004.with_round_trip_records();
     r2010.version = DxfVersion::AC1024;
     let style_handle = r2010.objects.iter().find_map(|(h, o)| matches!(o, ObjectType::VisualStyle(_)).then_some(*h)).unwrap();
     if let Some(ObjectType::VisualStyle(style)) = r2010.objects.get_mut(&style_handle) {
