@@ -917,6 +917,12 @@ fn project_source_values(
             value[key] = json!("ByBlock");
         }
         value["CurrentMLineStyleName"] = json!("Standard");
+    } else if crate::io::dwg::autocad_records::masked(doc, crate::io::dwg::autocad_records::header_vars_holds) {
+        // A DXF before R2007 states the dimension linetypes only in AutoCAD's round-trip records, which ACadSharp reads as
+        // objects: the native header holds them, the view shows what ACadSharp reads.
+        for key in ["DimensionLineType", "DimensionTex1", "DimensionTex2"] {
+            value[key] = json!("ByBlock");
+        }
     }
     // Color.TrueColor is the little-endian packed RGB integer in ACadSharp.
     // Keep this local to header projection; native Color is unchanged.

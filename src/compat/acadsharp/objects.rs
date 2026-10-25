@@ -613,6 +613,10 @@ fn dump_layout(
         .dwg_source_version
         .or_else(|| (reader == "dwg").then_some(doc.version));
     let raw_plot_code = |code| raw_code_present(&value.raw_plot_settings_codes, code);
+    // A drawing before R2004 states the shade plot values only in AutoCAD's round-trip record, which ACadSharp reads as an
+    // object: the native model holds them, the view shows what ACadSharp reads.
+    let (shade_plot_mode_read, shade_plot_resolution_read, shade_plot_dpi_read) =
+        crate::io::dwg::autocad_records::unrestored_shade_plot(doc, value);
     let min_limits = if is_new && value.min_limits == (0.0, 0.0) {
         (-20.0, -7.5)
     } else {
@@ -720,16 +724,16 @@ fn dump_layout(
     let shade_plot_resolution = if is_new || (dxf_source && !raw_plot_code(77)) {
         0
     } else {
-        value.shade_plot_resolution as i64
+        shade_plot_resolution_read as i64
     };
-    let shade_plot_dpi = if value.shade_plot_dpi <= 0
+    let shade_plot_dpi = if shade_plot_dpi_read <= 0
         && (is_new
             || (dxf_source && !raw_plot_code(78))
             || dwg_source.is_some_and(|version| version < DxfVersion::AC1018))
     {
         300
     } else {
-        value.shade_plot_dpi as i64
+        shade_plot_dpi_read as i64
     };
     let is_model = value.name.eq_ignore_ascii_case("Model");
     let paper_viewport = associated_viewports.and_then(|viewports| viewports.first().copied());
@@ -795,7 +799,7 @@ fn dump_layout(
         // PlotSettings member is tried, so a DXF never assigns the shade plot mode.
         (
             "ShadePlotMode",
-            int(if dxf_source { 0 } else { value.shade_plot_mode as i64 }),
+            int(if dxf_source { 0 } else { shade_plot_mode_read as i64 }),
         ),
         ("ShadePlotResolutionMode", int(shade_plot_resolution)),
         ("StandardScale", number(value.plot_scale_factor)),
@@ -1397,6 +1401,10 @@ fn dump_material(
     handle_value: Handle,
     value: &Material,
 ) -> Value {
+    // A drawing before R2007 states the values of some fields only in AutoCAD's round-trip record, which ACadSharp
+    // reads as an object: the native model holds them, the view shows what ACadSharp reads.
+    let unrestored = crate::io::dwg::autocad_records::unrestored_material(doc, value);
+    let value = unrestored.as_ref().unwrap_or(value);
     let dxf = value.dxf_source.as_deref();
     let absent = |code| dxf.is_some_and(|source| !source.contains(code));
     let advanced = |code| dxf.is_some_and(|source| source.contains_advanced(code));

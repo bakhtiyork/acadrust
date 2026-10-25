@@ -1578,6 +1578,12 @@ pub struct CadDocument {
     #[doc(hidden)]
     pub(crate) consumed_xdata: HashMap<Handle, Vec<(usize, crate::xdata::ExtendedDataRecord)>>,
 
+    /// The round-trip record objects (`ACAD_XREC_ROUNDTRIP` and the chains of `io::dwg::autocad_records`) a reader took out of the
+    /// model when it restored the native values they state: the changes it made, which the ACadSharp view and the writers undo
+    /// (`autocad_records::reinstate`). Not serialized.
+    #[doc(hidden)]
+    pub(crate) consumed_records: crate::io::dwg::autocad_records::Consumed,
+
     /// Structured XDATA for objects and symbol-table records, keyed by handle.
     /// Entity XDATA lives in `EntityCommon::extended_data`.
     pub object_xdata: HashMap<Handle, crate::xdata::ExtendedData>,
@@ -1833,6 +1839,7 @@ impl CadDocument {
             dgn_ls_components: HashMap::new(),
             eed_by_handle: HashMap::new(),
             consumed_xdata: HashMap::new(),
+            consumed_records: Default::default(),
             object_xdata: HashMap::new(),
             xdic_by_handle: HashMap::new(),
             reactors_by_handle: HashMap::new(),
@@ -4403,6 +4410,13 @@ impl CadDocument {
         raw.len() != before
     }
 
+    /// The document with the round-trip records its reader applied and took out of the model put back as the file held them (the
+    /// objects a writer starts from and the ACadSharp view shows).
+    #[doc(hidden)]
+    pub fn with_round_trip_records(&self) -> CadDocument {
+        crate::io::dwg::autocad_records::reinstated(self).into_owned()
+    }
+
     pub fn extension_dictionary_handle(&self, owner: Handle) -> Option<Handle> {
         // A record without a handle owns nothing; the search below would
         // otherwise return the root dictionary, whose owner is NULL too.
@@ -4419,6 +4433,7 @@ impl CadDocument {
         }
         if let Some(handle) = match self.objects.get(&owner) {
             Some(ObjectType::Dictionary(value)) => value.xdictionary_handle,
+            Some(ObjectType::ClassObject(value)) => value.xdictionary_handle,
             Some(ObjectType::Layout(value)) => value.xdictionary_handle,
             Some(ObjectType::XRecord(value)) => value.xdictionary_handle,
             Some(ObjectType::PlotSettings(value)) => value.xdictionary_handle,

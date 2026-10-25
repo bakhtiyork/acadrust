@@ -703,6 +703,7 @@ impl DxfReader {
         );
         document.source_path = self.source_path.take();
         crate::objects::restore_visual_style_roundtrip(&mut document);
+        crate::io::dwg::autocad_records::restore_document(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
         crate::entities::table::restore_table_roundtrip(&mut document);
         crate::entities::table::restore_dwg_table_roundtrip(&mut document);

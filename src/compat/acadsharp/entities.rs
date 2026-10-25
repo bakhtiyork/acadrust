@@ -89,7 +89,9 @@ fn spline_flags1(doc: &CadDocument, value: &Spline) -> i64 {
     };
     // ACadSharp's SplineFlags1 enum has an underlying ushort; the native
     // reader stores the bit-long in i32, so project the low 16 bits only.
-    let mut flags = i64::from(value.dwg_flags1 as u16);
+    // Before R2013 the record has no flags 1: the native model holds the fit-point method bits that AutoCAD's
+    // `ACAD_SPLINE_DATA` record implies.
+    let mut flags = if doc.version < DxfVersion::AC1027 { 0 } else { i64::from(value.dwg_flags1 as u16) };
     // Before R2013 the scenario itself is the only creation-method marker;
     // ACadSharp adds MethodFitPoints when it reads scenario 2.
     if scenario == 2 && doc.version < DxfVersion::AC1027 {
@@ -2461,7 +2463,9 @@ fn attribute_definition_props(
                     .as_deref()
                     .and_then(|s| s.attribute_type)
                     .unwrap_or_else(|| {
-                        if value.mtext_flag.to_value() == 0 {
+                        // A drawing before R2018 states the embedded MTEXT of an attribute only in AutoCAD's round-trip
+                        // record, which ACadSharp reads as an object: the view shows a single-line attribute.
+                        if value.mtext_flag.to_value() == 0 || crate::io::dwg::autocad_records::mlatt_masked(doc) {
                             1
                         } else {
                             value.mtext_flag.to_value()
@@ -2498,6 +2502,7 @@ fn attribute_definition_props(
             value
                 .embedded_mtext
                 .as_ref()
+                .filter(|_| !crate::io::dwg::autocad_records::mlatt_masked(doc))
                 .map(|m| handle(m.common.handle))
                 .unwrap_or(Value::Null),
         ),
@@ -2548,7 +2553,9 @@ fn attribute_entity_props(
                     .as_deref()
                     .and_then(|s| s.attribute_type)
                     .unwrap_or_else(|| {
-                        if value.mtext_flag.to_value() == 0 {
+                        // A drawing before R2018 states the embedded MTEXT of an attribute only in AutoCAD's round-trip
+                        // record, which ACadSharp reads as an object: the view shows a single-line attribute.
+                        if value.mtext_flag.to_value() == 0 || crate::io::dwg::autocad_records::mlatt_masked(doc) {
                             1
                         } else {
                             value.mtext_flag.to_value()
@@ -2585,6 +2592,7 @@ fn attribute_entity_props(
             value
                 .embedded_mtext
                 .as_ref()
+                .filter(|_| !crate::io::dwg::autocad_records::mlatt_masked(doc))
                 .map(|m| handle(m.common.handle))
                 .unwrap_or(Value::Null),
         ),
@@ -3070,6 +3078,10 @@ fn hatch_edge(edge: &crate::entities::BoundaryEdge, dwg: bool) -> Value {
 
 fn collect_viewport(doc: &CadDocument, value: &crate::entities::Viewport, out: &mut Vec<Value>) {
     use crate::objects::ObjectType;
+    // A drawing before R2007 states the display settings (before R2004: the shade plot mode) only in AutoCAD's round-trip
+    // record, which ACadSharp reads as an object: the native model holds them, the view shows what ACadSharp reads.
+    let unrestored = crate::io::dwg::autocad_records::unrestored_viewport(doc, value);
+    let value = unrestored.as_ref().unwrap_or(value);
     let block = doc
         .block_records
         .iter()

@@ -200,6 +200,10 @@ impl<'a> DxfWriter<'a> {
         crate::io::dwg::autocad_roundtrip::prepare_for_dxf(&mut prepared, output_version);
         crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, output_version);
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, output_version, true);
+        crate::io::dwg::autocad_records::prepare_for_write(&mut prepared, output_version, true);
+        if crate::entities::table::tables_need_roundtrip(&prepared, output_version) {
+            crate::entities::table::store_table_roundtrip(prepared.to_mut(), output_version);
+        }
         // The modern cell styles of a table style have no place in the DXF TABLESTYLE record: they travel
         // in a CELLSTYLEMAP object of its extension dictionary (an R2010+ DWG keeps them in the record). The
         // output states those objects besides the document's own; the document is not copied for them.

@@ -84,12 +84,18 @@ fn builtin_material_channel_flags_are_written_only_where_the_source_version_stat
         assert!(first(record, absent).is_none(), "group {absent} is not in an R2004 DWG material");
     }
 
-    // A value that was changed is written whatever the source version.
+    // A value that was changed is not in the material of a DXF below R2007 (AutoCAD's own DXF of R2000 and R2004 states none: the
+    // round-trip record `ACAD_XREC_ROUNDTRIP {MATERIAL ..}` of the material carries it, R5b-9), and is written for R2007 and later.
     let mut changed = material;
     changed.channel_flags = 5;
     old.objects.insert(changed.handle, ObjectType::Material(changed));
     let text = write(&old);
+    assert!(first(records(&text, "MATERIAL")[0], 94).is_none());
+    assert!(text.contains("102\r\nMATERIAL\r\n"), "the round-trip record states the material's values");
+    old.version = DxfVersion::AC1021;
+    let text = write(&old);
     assert_eq!(first(records(&text, "MATERIAL")[0], 94).as_deref(), Some("5"));
+    old.version = DxfVersion::AC1018;
 
     // A document built in memory keeps writing the BricsCAD form with its channel flags.
     let mut memory = CadDocument::new();
@@ -99,6 +105,10 @@ fn builtin_material_channel_flags_are_written_only_where_the_source_version_stat
         m
     }));
     assert_eq!(first(records(&write(&memory), "MATERIAL")[0], 94).as_deref(), Some("127"));
+    // ... from R2007 on: AutoCAD's DXF of R2000 and R2004 states the channel flags of no material, the built-in ones included
+    // (sample_AC1015_ascii.dxf, sample_AC1018_ascii.dxf; the round-trip record carries them).
+    memory.version = DxfVersion::AC1015;
+    assert!(first(records(&write(&memory), "MATERIAL")[0], 94).is_none());
 }
 
 #[test]

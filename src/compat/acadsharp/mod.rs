@@ -226,6 +226,9 @@ pub fn write_reader_document(
 }
 
 fn dump_document_view(doc: &CadDocument, file: &str, reader: &str, read_view: bool) -> Value {
+    // ACadSharp reads the round-trip records as objects: the view shows the ones the reader took out of the model.
+    let reinstated = crate::io::dwg::autocad_records::reinstated(doc);
+    let doc = reinstated.as_ref();
     let mut objects = Vec::new();
     tables::collect(doc, &mut objects);
     entities::collect(doc, reader, &mut objects);

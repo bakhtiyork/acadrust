@@ -78,6 +78,7 @@ impl DwgWriter {
         crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, target);
         prepare_book_colors(&mut prepared)?;
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, target, false);
+        crate::io::dwg::autocad_records::prepare_for_write(&mut prepared, target, false);
         let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();
@@ -134,6 +135,8 @@ impl DwgWriter {
                 prepare_legacy_document(&mut owned);
                 crate::objects::store_table_style_roundtrip(&mut owned);
                 crate::objects::store_visual_style_roundtrip(&mut owned);
+                let version = owned.version;
+                crate::entities::table::store_table_roundtrip(&mut owned, version);
             }
             &owned
         } else {
@@ -188,6 +191,7 @@ impl DwgWriter {
         crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, target);
         prepare_book_colors(&mut prepared)?;
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, target, false);
+        crate::io::dwg::autocad_records::prepare_for_write(&mut prepared, target, false);
         write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
     }
 

@@ -199,6 +199,7 @@ impl<'a> SemanticInventoryV1<'a> {
             dgn_ls_components: _,
             eed_by_handle,
             consumed_xdata: _,
+            consumed_records: _,
             object_xdata,
             xdic_by_handle,
             reactors_by_handle,

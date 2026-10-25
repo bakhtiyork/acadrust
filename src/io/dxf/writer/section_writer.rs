@@ -1102,9 +1102,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         self.write_header_variable("$DIMTFAC", |w| w.write_double(40, hdr.dim_tolerance_scale))?;
         let dim_text_style = style_name(&hdr.dim_text_style_name, hdr.dim_text_style_handle);
         self.write_header_variable("$DIMTXSTY", |w| w.write_string(7, &dim_text_style))?;
-        self.write_header_variable("$DIMLTYPE", |w| w.write_string(6, &hdr.dim_linetype_name))?;
-        self.write_header_variable("$DIMLTEX1", |w| w.write_string(6, &hdr.dim_linetype1_name))?;
-        self.write_header_variable("$DIMLTEX2", |w| w.write_string(6, &hdr.dim_linetype2_name))?;
+        // R2007 variables: AutoCAD's DXF of R2000 and R2004 has none (sample_AC1015_ascii.dxf: the dictionary `ACAD_2007HEADERVARS_RT`
+        // carries the linetypes, `autocad_records`).
+        if self.dxf_version >= DxfVersion::AC1021 {
+            self.write_header_variable("$DIMLTYPE", |w| w.write_string(6, &hdr.dim_linetype_name))?;
+            self.write_header_variable("$DIMLTEX1", |w| w.write_string(6, &hdr.dim_linetype1_name))?;
+            self.write_header_variable("$DIMLTEX2", |w| w.write_string(6, &hdr.dim_linetype2_name))?;
+        }
         if self.dxf_version >= DxfVersion::AC1021 {
             self.write_header_variable("$DIMFXL", |w| {
                 w.write_double(40, hdr.dim_fixed_ext_line_length)
@@ -8736,11 +8740,15 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
             self.writer.write_i16(73, layout.plot_rotation)?;
             self.writer.write_i16(74, layout.plot_type)?;
             self.writer.write_i16(75, layout.plot_scale_type)?;
-            self.writer.write_i16(76, layout.shade_plot_mode)?;
-            self.writer.write_i16(77, layout.shade_plot_resolution)?;
-            // 0 is the unset value of a layout read from a DWG that has no such field (valid DPI is 100 and up).
-            if layout.shade_plot_dpi != 0 {
-                self.writer.write_i16(78, layout.shade_plot_dpi)?;
+            // R2004 added the shade plot settings: AutoCAD's DXF of R2000 states none (sample_AC1015_ascii.dxf; the round-trip record
+            // `ACAD_XREC_ROUNDTRIP {SHADEPLOT ..}` of each layout carries them, `autocad_records`).
+            if self.dxf_version >= DxfVersion::AC1018 {
+                self.writer.write_i16(76, layout.shade_plot_mode)?;
+                self.writer.write_i16(77, layout.shade_plot_resolution)?;
+                // 0 is the unset value of a layout read from a DWG that has no such field (valid DPI is 100 and up).
+                if layout.shade_plot_dpi != 0 {
+                    self.writer.write_i16(78, layout.shade_plot_dpi)?;
+                }
             }
             if !layout.visual_style_handle.is_null() {
                 self.writer.write_handle(333, layout.visual_style_handle)?;
@@ -9991,8 +9999,13 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // fields of a DWG material: from an older DWG they hold the native default, which the file never stated,
         // so only a value that was changed is written.
         let r2007_fields = !self.dwg_source.is_some_and(|version| version < DxfVersion::AC1021);
+        // A DXF below R2007 states none of them in the material (AutoCAD's own DXF of R2000 and R2004 does not: the round-trip
+        // record `ACAD_XREC_ROUNDTRIP {MATERIAL ..}` carries them, `autocad_records`).
+        let body_has_them = self.dxf_version >= DxfVersion::AC1021;
         let stated_r2007 = |code: usize, differs: bool| {
-            if r2007_fields {
+            if !body_has_them {
+                false
+            } else if r2007_fields {
                 gate.writes(code, differs)
             } else {
                 differs
@@ -10040,8 +10053,9 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         if stated_r2007(93, obj.illumination_model != defaults.illumination_model) {
             self.writer.write_i32(93, obj.illumination_model)?;
         }
-        // Built-in materials always carry the channel flags; the others when the source or an edit has them.
-        if builtin && obj.dxf_source.is_none() && r2007_fields
+        // Built-in materials always carry the channel flags; the others when the source or an edit has them. Below R2007 none
+        // does (sample_AC1015_ascii.dxf and sample_AC1018_ascii.dxf: the record carries them for the built-in materials too).
+        if builtin && obj.dxf_source.is_none() && r2007_fields && body_has_them
             || stated_r2007(94, obj.channel_flags != defaults.channel_flags)
         {
             self.writer.write_i32(94, obj.channel_flags)?;

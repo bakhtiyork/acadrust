@@ -2588,6 +2588,139 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
     }
 }
 
+/// State the TABLECONTENT and TABLEGEOMETRY objects and the `ACAD_XREC_ROUNDTRIP` record that link them to the table for the tables of a
+/// document that have none, when it is written as a DWG or a DXF of R2004 or earlier: the entity record of those versions holds the
+/// legacy flat cells (text, a block, the style overrides), and AutoCAD keeps the typed cells, styles and geometry of the R2010 form in
+/// these objects (sample_AC1015.dwg and sample_AC1018.dwg, the DXF twins of R2000 and R2004; the reader `restore_dwg_table_roundtrip`
+/// completes the table from them). A table that has its objects (read from a file that held them) keeps them as they are, a table
+/// read from a file of R2004 or earlier is the flat form (it has no typed cells to keep), and a table of plain text and block cells
+/// needs none (`holds_more_than_flat_cells`). The content object is the table itself; the geometry object holds the geometry the
+/// cells cache; the record states the break ranges.
+/// Whether a table holds something its legacy flat cells cannot state: a typed or formatted value, a field, a cell with several
+/// items, custom data, a data link, a tooltip, a break range. A table of plain text and block cells (what the legacy record
+/// holds) has its cells back from the legacy record, and AutoCAD's objects would carry nothing the reader needs.
+fn holds_more_than_flat_cells(table: &Table) -> bool {
+    !table.break_ranges.is_empty()
+        || table.rows.iter().any(|row| {
+            !row.custom_data_items.is_empty()
+                || row.cells.iter().any(|cell| {
+                    cell.contents.len() > 1
+                        || !cell.custom_data_items.is_empty()
+                        || cell.has_linked_data
+                        || !cell.tooltip.is_empty()
+                        || cell.contents.iter().any(|content| {
+                            content.field_handle.is_some()
+                                || !content.value_format.is_empty()
+                                || !matches!(content.value.value_type, CellValueType::Unknown | CellValueType::String)
+                                || !content.value.format.is_empty()
+                                || !matches!(content.content_type, TableCellContentType::Value | TableCellContentType::Block | TableCellContentType::Unknown)
+                        })
+                })
+        })
+        || table.columns.iter().any(|column| !column.custom_data_items.is_empty())
+}
+
+pub(crate) fn tables_need_roundtrip(document: &crate::document::CadDocument, version: crate::types::DxfVersion) -> bool {
+    use crate::entities::EntityType;
+    // R2007 states the value of every cell in the entity; a version below it (and a source below it) has the text only.
+    version < crate::types::DxfVersion::AC1021
+        && document.dwg_source_version.or(document.dxf_source_version).is_none_or(|source| source >= crate::types::DxfVersion::AC1021)
+        && document.entities().any(|entity| {
+            matches!(entity, EntityType::Table(table) if table.dxf_legacy.0.is_none() && holds_more_than_flat_cells(table) && table_roundtrip(document, table.common.handle).is_none())
+        })
+}
+
+pub(crate) fn store_table_roundtrip(document: &mut crate::document::CadDocument, version: crate::types::DxfVersion) {
+    use crate::entities::EntityType;
+    use crate::objects::{DataObject, DataObjectData, ObjectType, TableGeometry, TableGeometryCell, XRecordEntry, XRecordValue};
+    if !tables_need_roundtrip(document, version) {
+        return;
+    }
+    let mut missing: Vec<Handle> = document
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::Table(table) if table.dxf_legacy.0.is_none() && holds_more_than_flat_cells(table) && table_roundtrip(document, table.common.handle).is_none() => {
+                Some(table.common.handle)
+            }
+            _ => None,
+        })
+        .collect();
+    missing.sort();
+    // The classes the objects are declared under.
+    for name in ["TABLECONTENT", "TABLEGEOMETRY"] {
+        if !document.classes.contains(name) {
+            if let Some(class) = crate::classes::default_classes().into_iter().find(|class| class.dxf_name == name) {
+                document.classes.add_or_update(class);
+            }
+        }
+    }
+    let flags = if version >= crate::types::DxfVersion::AC1015 {
+        crate::objects::DictionaryCloningFlags::KeepExisting
+    } else {
+        crate::objects::DictionaryCloningFlags::NotApplicable
+    };
+    for handle in missing {
+        let Some(EntityType::Table(table)) = document.get_entity(handle) else {
+            continue;
+        };
+        let table = (**table).clone();
+        // An extension dictionary of the table that already holds another round-trip record keeps it: the groups are appended.
+        let record = document.ensure_xrecord(handle, ROUNDTRIP_RECORD_KEY);
+        if let Some(ObjectType::XRecord(existing)) = document.objects.get(&record) {
+            if existing.entries.iter().any(|entry| entry.value.as_string() == Some(ROUNDTRIP_TABLE_MARKER)) {
+                continue;
+            }
+        }
+        let (content_handle, geometry_handle) = (document.allocate_handle(), document.allocate_handle());
+        // The content object: the table itself, as an object of the record.
+        let mut content = table.clone();
+        content.common = crate::entities::EntityCommon::default();
+        content.common.handle = content_handle;
+        content.common.owner_handle = record;
+        content.dxf_legacy = DxfLegacyView(None);
+        document.objects.insert(content_handle, ObjectType::TableContent(content));
+        // The geometry object: the geometry the cells cache.
+        let geometry = TableGeometry {
+            rows: table.rows.len() as i32,
+            columns: table.columns.len() as i32,
+            cells: table
+                .rows
+                .iter()
+                .flat_map(|row| row.cells.iter())
+                .map(|cell| TableGeometryCell {
+                    geometry_data_flag: cell.geometry_data_flag,
+                    width_with_gap: cell.geometry_width_with_gap,
+                    height_with_gap: cell.geometry_height_with_gap,
+                    table_geometry: cell.geometry_handle.unwrap_or(Handle::NULL),
+                    geometry: cell.geometries.clone(),
+                })
+                .collect(),
+        };
+        let mut geometry_object = DataObject::new(DataObjectData::TableGeometry(geometry));
+        geometry_object.handle = geometry_handle;
+        geometry_object.owner = record;
+        document.objects.insert(geometry_handle, ObjectType::DataObject(geometry_object));
+        if let Some(ObjectType::XRecord(record)) = document.objects.get_mut(&record) {
+            let mut entries = vec![
+                XRecordEntry::string(102, ROUNDTRIP_TABLE_MARKER),
+                XRecordEntry::handle(360, content_handle),
+                XRecordEntry::int16(70, 2),
+                XRecordEntry::int32(90, table.break_ranges.len() as i32),
+            ];
+            for range in &table.break_ranges {
+                entries.push(XRecordEntry::new(10, XRecordValue::Point3D(range.position.x, range.position.y, range.position.z)));
+                entries.push(XRecordEntry::int32(90, range.start_row));
+                entries.push(XRecordEntry::int32(90, range.end_row));
+            }
+            entries.push(XRecordEntry::handle(361, geometry_handle));
+            record.entries.extend(entries);
+            record.entries_complete = true;
+            record.cloning_flags = flags;
+            record.synchronize_object_references();
+        }
+    }
+}
+
 /// Whether the document was read from a DWG or a DXF of R2007 or earlier: its tables are the legacy flat form (their typed cells
 /// are in the TABLECONTENT objects AutoCAD keeps with them).
 fn legacy_source(document: &crate::document::CadDocument) -> bool {
