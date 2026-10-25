@@ -80,8 +80,10 @@ fn a_visual_style_of_r2018_keeps_its_late_properties_in_an_r2010_file() {
     let style = visual_style(&out);
     assert_eq!(style.properties.len(), 58, "restored from the record");
     assert_eq!(style.properties[40], VisualStyleProperty { value: VisualStylePropertyValue::Long(7), enabled: 0 });
-    // the record is in AutoCAD's R2010 form: values and flags from the 28th property on, no flags of the first 63 ids
-    let record = out
+    // the record is in AutoCAD's R2010 form: values and flags from the 28th property on, no flags of the first 63 ids; a reader
+    // takes the record it applied out of the model (R5b-10), the file held it
+    let held = out.with_round_trip_records();
+    let record = held
         .objects
         .values()
         .find_map(|object| match object {

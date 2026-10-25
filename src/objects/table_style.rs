@@ -843,8 +843,14 @@ pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadD
                 _ => None,
             });
         let mut row_types: [Option<(i32, i32, String)>; 3] = Default::default();
+        // The record and its group of the rows' data types (from the marker to the next group), as the file states them.
+        let mut pre2007: Option<(Handle, Vec<crate::objects::XRecordEntry>)> = None;
         if let Some(record_handle) = dictionary.get(ROUNDTRIP_RECORD_KEY) {
             if let Some(ObjectType::XRecord(record)) = document.objects.get(&record_handle) {
+                if let Some(start) = record.entries.iter().position(|entry| entry.code == 102 && entry.value.as_string() == Some(PRE2007_MARKER)) {
+                    let end = record.entries[start + 1..].iter().position(|entry| entry.code == 102).map_or(record.entries.len(), |offset| start + 1 + offset);
+                    pre2007 = Some((record_handle, record.entries[start..end].to_vec()));
+                }
                 let mut entries = record
                     .entries
                     .iter()
@@ -913,10 +919,48 @@ pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadD
                 row.format_string = format;
             }
         }
+        // The group leaves the model when it is exactly the one the writer states for the style (a style with modern cell styles,
+        // `plan_table_style_carriers_for`): the ACadSharp view and the writers put it back, and R2007 and later, which hold the data
+        // types in the style, drop it (`autocad_records::consume_table_style_group`).
+        let consumed = pre2007.filter(|(_, group)| !style.modern_overrides.is_empty() && *group == pre2007_group(legacy_row_types(style)));
         if has_map {
             remove_carrier(document, dictionary_handle, map_key);
         }
+        if let Some((record, _)) = consumed {
+            crate::io::dwg::autocad_records::consume_table_style_group(document, record, PRE2007_MARKER);
+        }
     }
+}
+
+/// The data type, unit type and format of the data, title and header rows of a style (the order of the round-trip group).
+fn legacy_row_types(style: &TableStyle) -> [(i32, i32, String); 3] {
+    [&style.data_row_style, &style.title_row_style, &style.header_row_style].map(|row| (row.data_type, row.unit_type, row.format_string.clone()))
+}
+
+/// The group `ACAD_ROUNDTRIP_PRE2007_TABLESTYLE` of the round-trip record that keeps the rows' data types before R2007, as AutoCAD's
+/// R14, R2000 and R2004 files state it (sample_AC1014.dwg to sample_AC1018.dwg, the style #87: `90 512, 91 0, 1 "", 92 .., 3 ""`).
+fn pre2007_group(row_types: [(i32, i32, String); 3]) -> Vec<crate::objects::XRecordEntry> {
+    use crate::objects::{XRecordEntry, XRecordValue};
+    let mut group = vec![XRecordEntry {
+        code: 102,
+        value: XRecordValue::String(PRE2007_MARKER.to_string()),
+    }];
+    for (index, (data_type, unit_type, format)) in row_types.into_iter().enumerate() {
+        let index = index as i32;
+        group.push(XRecordEntry {
+            code: 90 + 2 * index,
+            value: XRecordValue::Int32(data_type),
+        });
+        group.push(XRecordEntry {
+            code: 91 + 2 * index,
+            value: XRecordValue::Int32(unit_type),
+        });
+        group.push(XRecordEntry {
+            code: 1 + index,
+            value: XRecordValue::String(format),
+        });
+    }
+    group
 }
 
 /// The carriers of the modern cell styles of the table styles of a document, as objects an output states besides
@@ -991,7 +1035,7 @@ pub(crate) fn plan_table_style_carriers_for(
     dwg: bool,
 ) -> Option<TableStyleCarriers> {
     use crate::objects::{
-        CellStyleMap, DataObject, DataObjectData, ObjectType, XRecordEntry, XRecordValue,
+        CellStyleMap, DataObject, DataObjectData, ObjectType,
     };
     use crate::types::DxfVersion;
     let with_row_types = version < DxfVersion::AC1021;
@@ -1166,6 +1210,14 @@ pub(crate) fn plan_table_style_carriers_for(
                 let mut object = crate::objects::XRecord::named(ROUNDTRIP_RECORD_KEY);
                 object.handle = record;
                 object.owner = dictionary;
+                // as every XRECORD of AutoCAD's extension dictionaries (sample_AC1014.dwg to sample_AC1032.dwg): the dictionary is
+                // its reactor, and from R2000 it keeps existing objects when cloned
+                object.reactors = vec![dictionary];
+                object.cloning_flags = if version >= DxfVersion::AC1015 {
+                    crate::objects::DictionaryCloningFlags::KeepExisting
+                } else {
+                    crate::objects::DictionaryCloningFlags::NotApplicable
+                };
                 plan.objects.insert(record, ObjectType::XRecord(object));
                 if let Some(ObjectType::Dictionary(entries)) = working!(dictionary) {
                     if let Some((_, target)) = entries
@@ -1195,25 +1247,7 @@ pub(crate) fn plan_table_style_carriers_for(
                 .map_or(record.entries.len(), |offset| start + 1 + offset);
             record.entries.drain(start..end);
         }
-        let mut group = vec![XRecordEntry {
-            code: 102,
-            value: XRecordValue::String(PRE2007_MARKER.to_string()),
-        }];
-        for (index, (data_type, unit_type, format)) in row_types.into_iter().enumerate() {
-            let index = index as i32;
-            group.push(XRecordEntry {
-                code: 90 + 2 * index,
-                value: XRecordValue::Int32(data_type),
-            });
-            group.push(XRecordEntry {
-                code: 91 + 2 * index,
-                value: XRecordValue::Int32(unit_type),
-            });
-            group.push(XRecordEntry {
-                code: 1 + index,
-                value: XRecordValue::String(format),
-            });
-        }
+        let group = pre2007_group(row_types);
         let at = start.unwrap_or(record.entries.len());
         record.entries.splice(at..at, group);
     }
@@ -1493,6 +1527,31 @@ mod tests {
                 "{version:?}: the writer states the carriers without copying the document"
             );
             assert!(String::from_utf8_lossy(&written).contains("CELLSTYLEMAP"));
+        }
+    }
+
+    /// The round-trip record the writer makes for a table style (the legacy rows' data types, before R2007) is stated as AutoCAD's
+    /// records are: the dictionary is its reactor, and R2000 and later keep existing objects when cloned.
+    #[test]
+    fn a_table_style_record_made_by_the_writer_has_its_dictionary_as_reactor_and_the_cloning_flags_of_the_version() {
+        use crate::objects::{DictionaryCloningFlags, ObjectType};
+        use crate::types::DxfVersion;
+        for (version, flags) in [(DxfVersion::AC1014, DictionaryCloningFlags::NotApplicable), (DxfVersion::AC1015, DictionaryCloningFlags::KeepExisting)] {
+            let doc = document_with_modern_styles(version);
+            let plan = plan_table_style_carriers(&doc, version).expect("styles with modern cell styles");
+            let records: Vec<_> = plan
+                .objects
+                .values()
+                .filter_map(|object| match object {
+                    ObjectType::XRecord(record) if record.name == ROUNDTRIP_RECORD_KEY => Some(record),
+                    _ => None,
+                })
+                .collect();
+            assert!(!records.is_empty(), "{version:?}");
+            for record in records {
+                assert_eq!(record.reactors, vec![record.owner], "{version:?}");
+                assert_eq!(record.cloning_flags, flags, "{version:?}");
+            }
         }
     }
 

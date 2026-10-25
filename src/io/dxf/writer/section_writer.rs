@@ -2106,8 +2106,10 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         } else {
             self.writer.write_i16(62, -color_index)?;
         }
-        // Preserve the exact RGB value alongside the nearest ACI fallback (R2004 and later; R12 has the index).
-        if let Some(tc) = layer.color.to_true_color_value().filter(|_| !self.r12) {
+        // Preserve the exact RGB value alongside the nearest ACI fallback (R2004 and later). A DXF of R2000, and of R14, which mirrors
+        // it, states the index only, as AutoCAD's own does (sample_AC1015_ascii.dxf: Layer_true_color `62 150`, Layer_color_book
+        // `62 31`, no 420 or 430; sample_AC1018_ascii.dxf states both); R12 has the index.
+        if let Some(tc) = layer.color.to_true_color_value().filter(|_| self.dxf_version >= DxfVersion::AC1018) {
             self.writer.write_i32(420, tc)?;
         }
         if self.dxf_version >= DxfVersion::AC1018 {

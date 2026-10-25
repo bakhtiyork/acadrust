@@ -442,8 +442,95 @@ impl VisualStyle {
     }
 }
 
+/// The entries of the round-trip record AutoCAD's older versions keep for a visual style of `properties` (the properties after the
+/// 28th with their flags; before R2010 also the flag of each of the 63 property ids). `carried_flags` are the flags of the ids a
+/// record states beyond the style's own properties (an id without one is on).
+pub(crate) fn visual_style_record_group(
+    properties: &[VisualStyleProperty],
+    r2010: bool,
+    carried_flags: &std::collections::HashMap<usize, i16>,
+) -> Vec<crate::objects::XRecordEntry> {
+    use crate::objects::{XRecordEntry, XRecordValue};
+    let full = properties.len() >= 58;
+    let key = |text: String| XRecordEntry {
+        code: 102,
+        value: XRecordValue::String(text),
+    };
+    let mut group = Vec::new();
+    for (index, property) in properties.iter().enumerate().take(58).skip(28).filter(|_| full) {
+        let name = format!("RTVSPost2010Prop{index}");
+        match &property.value {
+            VisualStylePropertyValue::Color(color) => {
+                let (aci, rgb) = match color {
+                    Color::Rgb { .. } => (
+                        color.approximate_index() as i32,
+                        color.to_true_color_value().unwrap_or_default(),
+                    ),
+                    _ => (color.approximate_index() as i32, 0xFF00_0000_u32 as i32),
+                };
+                group.push(key(format!("{name}ColorIndex")));
+                group.push(XRecordEntry {
+                    code: 90,
+                    value: XRecordValue::Int32(aci),
+                });
+                group.push(key(format!("{name}ColorRGB")));
+                group.push(XRecordEntry {
+                    code: 90,
+                    value: XRecordValue::Int32(rgb),
+                });
+            }
+            value => {
+                group.push(key(name));
+                group.push(match value {
+                    VisualStylePropertyValue::Bool(v) => XRecordEntry {
+                        code: 280,
+                        value: XRecordValue::Byte(*v as u8),
+                    },
+                    VisualStylePropertyValue::Short(v) => XRecordEntry {
+                        code: 90,
+                        value: XRecordValue::Int32(*v as i32),
+                    },
+                    VisualStylePropertyValue::Long(v) => XRecordEntry {
+                        code: 90,
+                        value: XRecordValue::Int32(*v),
+                    },
+                    VisualStylePropertyValue::Double(v) => XRecordEntry {
+                        code: 140,
+                        value: XRecordValue::Double(*v),
+                    },
+                    VisualStylePropertyValue::Text(v) => XRecordEntry {
+                        code: 1,
+                        value: XRecordValue::String(v.clone()),
+                    },
+                    VisualStylePropertyValue::Color(_) => unreachable!(),
+                });
+            }
+        }
+        group.push(key(format!("RTVSPost2010PropOp{index}")));
+        group.push(XRecordEntry {
+            code: 70,
+            value: XRecordValue::Int16(property.enabled),
+        });
+    }
+    // One flag per property id; the ids after the 58 properties are on.
+    for index in (0..63).filter(|_| !r2010) {
+        group.push(key(format!("RTVSPropertyOp{index}")));
+        group.push(XRecordEntry {
+            code: 70,
+            value: XRecordValue::Int16(
+                properties
+                    .get(index)
+                    .map(|p| p.enabled)
+                    .or_else(|| carried_flags.get(&index).copied())
+                    .unwrap_or(1),
+            ),
+        });
+    }
+    group
+}
+
 pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDocument) {
-    use crate::objects::{ObjectType, XRecordEntry, XRecordValue};
+    use crate::objects::{ObjectType, XRecordValue};
     use crate::types::DxfVersion;
     // Every layout before R2013 keeps the properties after the 24th (R2010: the 28th) in the record, as AutoCAD's own R14, R2000
     // and R2004 files do (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg: 252 entries in each style's record). The R2010
@@ -467,17 +554,8 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
         .collect();
     // Objects are created in handle order so the output is deterministic.
     styles.sort_by_key(|style| style.0);
-    let key = |text: String| XRecordEntry {
-        code: 102,
-        value: XRecordValue::String(text),
-    };
     for (handle, properties) in styles {
         let full = properties.len() >= 58;
-        // A style of an R2010 file, restored from its record, is written with the record it came with.
-        if r2010 && full && record_states_properties(document, handle, &properties) {
-            continue;
-        }
-        let mut group = Vec::new();
         // The flags of the properties after the 28th, for the style that keeps them in its record.
         let carried_flags: std::collections::HashMap<usize, i16> = document
             .extension_dictionary_handle(handle)
@@ -502,80 +580,18 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
                     .collect()
             })
             .unwrap_or_default();
-        for (index, property) in properties.iter().enumerate().take(58).skip(28).filter(|_| full) {
-            let name = format!("RTVSPost2010Prop{index}");
-            match &property.value {
-                VisualStylePropertyValue::Color(color) => {
-                    let (aci, rgb) = match color {
-                        Color::Rgb { .. } => (
-                            color.approximate_index() as i32,
-                            color.to_true_color_value().unwrap_or_default(),
-                        ),
-                        _ => (color.approximate_index() as i32, 0xFF00_0000_u32 as i32),
-                    };
-                    group.push(key(format!("{name}ColorIndex")));
-                    group.push(XRecordEntry {
-                        code: 90,
-                        value: XRecordValue::Int32(aci),
-                    });
-                    group.push(key(format!("{name}ColorRGB")));
-                    group.push(XRecordEntry {
-                        code: 90,
-                        value: XRecordValue::Int32(rgb),
-                    });
-                }
-                value => {
-                    group.push(key(name));
-                    group.push(match value {
-                        VisualStylePropertyValue::Bool(v) => XRecordEntry {
-                            code: 280,
-                            value: XRecordValue::Byte(*v as u8),
-                        },
-                        VisualStylePropertyValue::Short(v) => XRecordEntry {
-                            code: 90,
-                            value: XRecordValue::Int32(*v as i32),
-                        },
-                        VisualStylePropertyValue::Long(v) => XRecordEntry {
-                            code: 90,
-                            value: XRecordValue::Int32(*v),
-                        },
-                        VisualStylePropertyValue::Double(v) => XRecordEntry {
-                            code: 140,
-                            value: XRecordValue::Double(*v),
-                        },
-                        VisualStylePropertyValue::Text(v) => XRecordEntry {
-                            code: 1,
-                            value: XRecordValue::String(v.clone()),
-                        },
-                        VisualStylePropertyValue::Color(_) => unreachable!(),
-                    });
-                }
-            }
-            group.push(key(format!("RTVSPost2010PropOp{index}")));
-            group.push(XRecordEntry {
-                code: 70,
-                value: XRecordValue::Int16(property.enabled),
-            });
-        }
-        // One flag per property id; the ids after the 58 properties are on.
-        for index in (0..63).filter(|_| !r2010) {
-            group.push(key(format!("RTVSPropertyOp{index}")));
-            group.push(XRecordEntry {
-                code: 70,
-                value: XRecordValue::Int16(
-                    properties
-                        .get(index)
-                        .map(|p| p.enabled)
-                        .or_else(|| carried_flags.get(&index).copied())
-                        .unwrap_or(1),
-                ),
-            });
-        }
+        let group = visual_style_record_group(&properties, r2010, &carried_flags);
         // A style that states nothing in the record (an R2010 style of 28 properties) does not get one.
         if group.is_empty() {
             continue;
         }
+        let existed = document.xrecord(handle, "ACAD_XREC_ROUNDTRIP").is_some();
         let record = document.ensure_xrecord(handle, "ACAD_XREC_ROUNDTRIP");
+        if !existed {
+            // A record the writer makes is stated as AutoCAD's own are: the dictionary as its reactor, the cloning flags of the version.
+            let version = document.version;
+            crate::io::dwg::autocad_records::state_new_record(document, record, version);
+        }
         let Some(ObjectType::XRecord(record)) = document.objects.get_mut(&record) else {
             continue;
         };
@@ -596,31 +612,6 @@ pub(crate) fn store_visual_style_roundtrip(document: &mut crate::document::CadDo
         kept.extend(group);
         record.entries = kept;
     }
-}
-
-/// Whether the round-trip record of a style states the properties from the 28th on exactly as the style holds them: the style of
-/// an R2010 file that was restored from it.
-fn record_states_properties(document: &crate::document::CadDocument, handle: crate::types::Handle, properties: &[VisualStyleProperty]) -> bool {
-    use crate::objects::ObjectType;
-    let Some(entries) = document
-        .extension_dictionary_handle(handle)
-        .and_then(|dictionary| match document.objects.get(&dictionary) {
-            Some(ObjectType::Dictionary(entries)) => entries.get("ACAD_XREC_ROUNDTRIP"),
-            _ => None,
-        })
-        .and_then(|record| match document.objects.get(&record) {
-            Some(ObjectType::XRecord(record)) => Some(record.entries.as_slice()),
-            _ => None,
-        })
-    else {
-        return false;
-    };
-    let Some(ObjectType::VisualStyle(style)) = document.objects.get(&handle) else {
-        return false;
-    };
-    let mut probe = style.clone();
-    probe.properties.truncate(28);
-    probe.restore_post_2010_properties(entries, true) && probe.properties == properties
 }
 
 pub(crate) fn restore_visual_style_roundtrip(document: &mut crate::document::CadDocument) {

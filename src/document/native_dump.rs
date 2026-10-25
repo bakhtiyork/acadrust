@@ -786,7 +786,7 @@ pub fn write_native_dump(doc: &CadDocument, out: &mut dyn Write) -> io::Result<(
         dgn_ls_components: _,
         eed_by_handle,
         consumed_xdata: _,
-        consumed_records: _,
+        consumed_records,
         object_xdata,
         xdic_by_handle,
         reactors_by_handle,
@@ -831,6 +831,13 @@ pub fn write_native_dump(doc: &CadDocument, out: &mut dyn Write) -> io::Result<(
     emit(out, "doc/preview", &tree(preview))?;
     emit(out, "doc/vx_control_entries", &tree(vx_control_entries))?;
     emit(out, "doc/header_references", &header_references(doc))?;
+    // The handles of the round-trip records a DWG reader applied and took out of the model (not their contents): the objects are
+    // gone from this dump, but their handles were in use, which the check of the handle seed needs. A note, not data: Tools/
+    // g4-native-compare.py does not compare it.
+    let consumed = consumed_records.removed_handles(doc);
+    if !consumed.is_empty() {
+        emit(out, "note/consumed_records", &Value::Array(consumed.iter().map(|h| Value::Number(h.value().into())).collect()))?;
+    }
     // BLOCK / ENDBLK markers: the DWG reader keeps them as entities, the DXF reader folds their common data into
     // the block record (`block_entity_common`, `block_end_common`). One record per block holds either.
     let mut marker_handles: std::collections::HashSet<Handle> = std::collections::HashSet::new();

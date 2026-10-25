@@ -185,7 +185,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                             {
                                 crate::types::Color::Index(7)
                             } else {
-                                v.color
+                                crate::io::dwg::autocad_records::unrestored_layer_color(doc, v).unwrap_or(v.color)
                             }
                         ))
                     ),
@@ -198,7 +198,10 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                             .map(|v| handle(v.handle))
                             .unwrap_or_else(|| json!(UNMAPPED))),
                     ),
-                    ("LineWeight", json!(v.line_weight.value())),
+                    (
+                        "LineWeight",
+                        json!(crate::io::dwg::autocad_records::unrestored_layer_plot(doc).map_or(v.line_weight, |(_, weight)| weight).value()),
+                    ),
                     (
                         "Material",
                         if super::registration::source_document(doc) {
@@ -210,7 +213,10 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ("Name", json!(v.name)),
                     (
                         "PlotFlag",
-                        json!(v.is_plottable && !v.name.eq_ignore_ascii_case("defpoints")),
+                        json!(
+                            crate::io::dwg::autocad_records::unrestored_layer_plot(doc).map_or(v.is_plottable, |(plottable, _)| plottable)
+                                && !v.name.eq_ignore_ascii_case("defpoints")
+                        ),
                     ),
                     (
                         "PlotStyleName",
