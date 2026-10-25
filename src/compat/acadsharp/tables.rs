@@ -470,6 +470,10 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
     }));
     for v in doc.views.iter() {
         records.push(Box::new(move || {
+            // A drawing before R2007 states the display settings only in AutoCAD's round-trip record, which ACadSharp
+            // reads as an object: the native model holds them, the view shows what ACadSharp reads.
+            let unrestored = crate::io::dwg::autocad_records::unrestored_view(doc, v);
+            let v = unrestored.as_ref().unwrap_or(v);
             let mut out = Vec::new();
             entry(
                 doc,
@@ -524,6 +528,8 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
     }));
     for v in doc.vports.iter() {
         records.push(Box::new(move || {
+            let unrestored = crate::io::dwg::autocad_records::unrestored_vport(doc, v);
+            let v = unrestored.as_ref().unwrap_or(v);
             let mut out = Vec::new();
             entry(
                 doc,

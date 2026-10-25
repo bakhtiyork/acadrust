@@ -15,6 +15,7 @@
 //! | `ACAD 1000 DBColXD 1070 <index> 1071 <colour> 1000 <book>$<name>` | DBCOLOR | before R2018 | the colour of the object |
 //! | `ACAD 1000 DesignCenter Data { 1070 1 1070 <units> }` | BLOCK_RECORD | before R2007 | the insertion units (`autocad_roundtrip` of the reader) |
 //! | `CONTENTBLOCKDESCRIPTION 1071 0 1000 <text>`, `CONTENTBLOCKICON 1071 0 1004 <127 bytes> ..` | BLOCK_RECORD | before R2000 | `description`, `preview_data` |
+//! | `ACAD_SPLINE_DATA 1070 100 1070 <a> 1070 101 1070 <b> 1070 102 1070 <knot parameterization>` | SPLINE | before R2013 | the closed and periodic flags of a fit-point spline, `knot_parameterization` |
 //!
 //! A DXF holds them where AutoCAD's own DXF does (R5b-7: the table above for R2000 and R2004; the stamp from R2000 to R2013,
 //! `DBColXD` from R2004 to R2013, the dimension style records not in R12, whose DXF has extended data on entities only).
@@ -44,6 +45,7 @@ const SAVED_BY_VERSION: &str = "AcDbSavedByObjectVersion";
 const BOOK_COLOR: &str = "DBColXD";
 const BLOCK_DESCRIPTION: &str = "CONTENTBLOCKDESCRIPTION";
 const BLOCK_ICON: &str = "CONTENTBLOCKICON";
+const SPLINE_DATA: &str = "ACAD_SPLINE_DATA";
 
 /// The first version that holds each value natively.
 fn holds_mleader_version(version: DxfVersion) -> bool {
@@ -63,6 +65,9 @@ fn states_saved_by_version(version: DxfVersion) -> bool {
 }
 fn holds_block_content(version: DxfVersion) -> bool {
     version >= DxfVersion::AC1015
+}
+fn holds_spline_data(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1027
 }
 
 /// The `DBColXD` block is in AutoCAD's DWG files from R14 to R2013 and in its DXF files from R2004 to R2013 (sample_AC1015_ascii.dxf
@@ -362,6 +367,30 @@ fn revision_record(revision: &crate::entities::solid3d::AcisRevision) -> Option<
 
 // ── VISUALSTYLE, DBCOLOR ─────────────────────────────────────────────────────────────────────────────────────────
 
+/// The record AutoCAD keeps for a spline before R2013: three properties, each a tag and a value (sample_AC1014.dwg to
+/// sample_AC1024.dwg, the fit-point spline #434: `100 0 101 0 102 2`). The third is the knot parameterization; the first two are the
+/// closed and the periodic flag (a fit-point spline of an older file has neither: the fit-point form of the record has no place
+/// for them. UNVERIFIED: the sample states the open spline only).
+fn spline_data(data: &ExtendedData) -> Option<(bool, bool, i16)> {
+    match values(data, SPLINE_DATA)? {
+        [X::Integer16(100), X::Integer16(closed @ (0 | 1)), X::Integer16(101), X::Integer16(periodic @ (0 | 1)), X::Integer16(102), X::Integer16(knots)] => {
+            Some((*closed == 1, *periodic == 1, *knots))
+        }
+        _ => None,
+    }
+}
+
+fn spline_record(spline: &crate::entities::Spline) -> Vec<X> {
+    vec![
+        X::Integer16(100),
+        X::Integer16(spline.flags.closed as i16),
+        X::Integer16(101),
+        X::Integer16(spline.flags.periodic as i16),
+        X::Integer16(102),
+        X::Integer16(spline.knot_parameterization as i16),
+    ]
+}
+
 fn saved_by_version_block() -> Vec<X> {
     vec![X::String(SAVED_BY_VERSION.into()), X::Integer16(0)]
 }
@@ -422,6 +451,9 @@ fn entity_needs_restore(entity: &EntityType, version: DxfVersion) -> bool {
         EntityType::Insert(insert) if !holds_attribute_lock(version) => {
             insert.attributes.iter().any(|attribute| attribute_locked(&attribute.common.extended_data))
         }
+        // Only a fit-point spline takes the record in: AutoCAD's own conversion of such a spline is a control-point spline, whose
+        // record states what the fit data was (the native model has no fit data for it): the record stays as the file had it.
+        EntityType::Spline(spline) if !holds_spline_data(version) => !spline.fit_points.is_empty() && spline_data(&spline.common.extended_data).is_some(),
         EntityType::Solid3D(solid) if !holds_modeler_revision(version) => revision_of(&solid.common.extended_data).is_some(),
         EntityType::Region(region) if !holds_modeler_revision(version) => revision_of(&region.common.extended_data).is_some(),
         EntityType::Body(body) if !holds_modeler_revision(version) => revision_of(&body.common.extended_data).is_some(),
@@ -435,10 +467,13 @@ fn entity_needs_restore(entity: &EntityType, version: DxfVersion) -> bool {
 pub(crate) fn restore_document(document: &mut CadDocument) {
     let version = document.version;
     let handle_of = |name: &str| app_handle(document, name);
-    let (mleader_app, attribute_app, guid_app) = (handle_of(MLEADER_VERSION), handle_of(ATTRIBUTE_LOCK), handle_of(CHANGE_GUID));
+    let (mleader_app, attribute_app, guid_app, spline_app) =
+        (handle_of(MLEADER_VERSION), handle_of(ATTRIBUTE_LOCK), handle_of(CHANGE_GUID), handle_of(SPLINE_DATA));
     // A drawing that registers none of the applications holds none of their records: no entity is looked at.
-    let registered = mleader_app.is_some() || attribute_app.is_some() || guid_app.is_some();
-    if registered && !(holds_mleader_version(version) && holds_attribute_lock(version) && holds_modeler_revision(version)) {
+    let registered = mleader_app.is_some() || attribute_app.is_some() || guid_app.is_some() || spline_app.is_some();
+    if registered
+        && !(holds_mleader_version(version) && holds_attribute_lock(version) && holds_modeler_revision(version) && holds_spline_data(version))
+    {
         // Look first and copy only the entities that change (the records are shared until then).
         let changing: Vec<usize> = document
             .entities
@@ -474,6 +509,25 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
                                 keep_taken(stash, handle, entry);
                             }
                         }
+                    }
+                }
+                EntityType::Spline(spline) => {
+                    if let Some((closed, periodic, knots)) = spline_data(&spline.common.extended_data) {
+                        spline.knot_parameterization = i32::from(knots);
+                        // A fit-point spline has no closed or periodic flag in a record before R2013; the flags 1 of the
+                        // R2013 record state the fit-point method.
+                        spline.flags.closed = closed;
+                        spline.flags.periodic = periodic;
+                        spline.dwg_flags1 |= 1 | 8;
+                        if closed {
+                            spline.dwg_flags1 |= 4;
+                        } else {
+                            spline.dwg_flags1 &= !4;
+                        }
+                    }
+                    let handle = spline.common.handle;
+                    if let Some(entry) = take_record(&mut spline.common.extended_data, SPLINE_DATA, spline_app, stash.get(&handle).map_or(&[], Vec::as_slice)) {
+                        keep_taken(stash, handle, entry);
                     }
                 }
                 // The identifier of the entity is the GUID of its revision, as the reader of a DWG that holds the revision states it.
@@ -716,8 +770,30 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     let mut leaders: Vec<(Handle, Option<Vec<X>>, Option<usize>)> = Vec::new();
     let mut attributes: Vec<(Handle, Option<usize>, Option<Vec<X>>, Option<usize>)> = Vec::new();
     let mut solids: Vec<(Handle, Option<Vec<X>>, Option<usize>)> = Vec::new();
+    let mut splines: Vec<(Handle, Option<Vec<X>>, Option<usize>)> = Vec::new();
+    let written_again = document.dwg_source_version.or(document.dxf_source_version) == Some(version);
     for entity in document.entities() {
         match entity {
+            // AutoCAD's DXF files hold no ACAD_SPLINE_DATA (sample_AC1015_ascii.dxf to sample_AC1027_ascii.dxf).
+            // R2013 holds the parameterization in the record of the spline itself: AutoCAD's record of a control-point spline (kept as the
+            // file had it) goes, as it does from AutoCAD's own R2013 file (sample_AC1027.dwg has none).
+            EntityType::Spline(spline) if holds_spline_data(version) && spline_data(&spline.common.extended_data).is_some() => {
+                splines.push((spline.common.handle, None, taken_position(document, spline.common.handle, SPLINE_DATA)));
+            }
+            EntityType::Spline(spline) if !holds_spline_data(version) && !dxf && !spline.fit_points.is_empty() => {
+                let data = &spline.common.extended_data;
+                let ours = spline_data(data).is_some();
+                if ours || values(data, SPLINE_DATA).is_none() {
+                    let at = taken_position(document, spline.common.handle, SPLINE_DATA);
+                    // A fit-point spline of a conversion (or of a document made in memory), a spline whose file stated the record,
+                    // and a record the model holds are stated from the native values; a drawing written again at the version it
+                    // was read from states the record only where its file had one.
+                    let wanted = ((!spline.fit_points.is_empty() && !written_again) || at.is_some() || ours).then(|| spline_record(spline));
+                    if values(data, SPLINE_DATA) != wanted.as_deref() && (wanted.is_some() || ours) {
+                        splines.push((spline.common.handle, wanted, at));
+                    }
+                }
+            }
             EntityType::MultiLeader(leader) if !holds_mleader_version(version) => {
                 let data = &leader.common.extended_data;
                 let ours = mleader_version(data).is_some();
@@ -876,6 +952,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     if leaders.is_empty()
         && attributes.is_empty()
         && solids.is_empty()
+        && splines.is_empty()
         && styles.is_empty()
         && visual.is_empty()
         && books.is_empty()
@@ -886,7 +963,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         return;
     }
     let document = document.to_mut();
-    for name in [MLEADER_VERSION, ATTRIBUTE_LOCK, DIM_FILL, CHANGE_GUID]
+    for name in [MLEADER_VERSION, ATTRIBUTE_LOCK, DIM_FILL, CHANGE_GUID, SPLINE_DATA]
         .into_iter()
         .chain(DIM_LINETYPES.map(|(name, _)| name))
     {
@@ -895,6 +972,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             MLEADER_VERSION => leaders.iter().any(|(_, wanted, _)| wanted.is_some()) || styles.iter().any(|(_, wanted, _)| wanted.is_some()),
             ATTRIBUTE_LOCK => attributes.iter().any(|(_, _, wanted, _)| wanted.is_some()),
             CHANGE_GUID => solids.iter().any(|(_, wanted, _)| wanted.is_some()),
+            SPLINE_DATA => splines.iter().any(|(_, wanted, _)| wanted.is_some()),
             other => dimension_styles.iter().any(|(_, records)| {
                 DIM_APPLICATIONS.iter().zip(&records.wanted).any(|(name, wanted)| *name == other && wanted.is_some())
             }),
@@ -921,6 +999,12 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
                 }
                 _ => {}
             }
+        }
+    }
+    for (handle, wanted, at) in splines {
+        let app = application(document, SPLINE_DATA);
+        if let Some(entity) = document.get_entity_mut(handle) {
+            set_record(&mut entity.common_mut().extended_data, SPLINE_DATA, app, wanted, at);
         }
     }
     for (handle, wanted, at) in solids {

@@ -764,6 +764,9 @@ impl Default for TableStyle {
 }
 
 const CELL_STYLE_MAP_KEY: &str = "ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP";
+/// The key an R14 DWG states the cell style map under: AutoCAD cuts the name to 26 characters (sample_AC1014.dwg, the
+/// style #87). A reader takes either spelling; the DWG writer states the short one at R14.
+const CELL_STYLE_MAP_KEY_R14: &str = "ACAD_ROUNDTRIP_2008_TABLES";
 const ROUNDTRIP_RECORD_KEY: &str = "ACAD_XREC_ROUNDTRIP";
 const PRE2007_MARKER: &str = "ACAD_ROUNDTRIP_PRE2007_TABLESTYLE";
 
@@ -829,8 +832,9 @@ pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadD
         let Some(ObjectType::Dictionary(dictionary)) = document.objects.get(&dictionary_handle) else {
             continue;
         };
+        let map_key = if dictionary.get(CELL_STYLE_MAP_KEY).is_some() { CELL_STYLE_MAP_KEY } else { CELL_STYLE_MAP_KEY_R14 };
         let cells = dictionary
-            .get(CELL_STYLE_MAP_KEY)
+            .get(map_key)
             .and_then(|map| match document.objects.get(&map) {
                 Some(ObjectType::DataObject(object)) => match &object.data {
                     DataObjectData::CellStyleMap(map) => Some(map.cells.clone()),
@@ -866,7 +870,7 @@ pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadD
             }
         }
         let has_map = cells.is_some();
-        let map_handle = dictionary_handle_entry(document, dictionary_handle, CELL_STYLE_MAP_KEY);
+        let map_handle = dictionary_handle_entry(document, dictionary_handle, map_key);
         let Some(ObjectType::TableStyle(style)) = document.objects.get_mut(&handle) else {
             continue;
         };
@@ -910,7 +914,7 @@ pub(crate) fn restore_table_style_roundtrip(document: &mut crate::document::CadD
             }
         }
         if has_map {
-            remove_carrier(document, dictionary_handle, CELL_STYLE_MAP_KEY);
+            remove_carrier(document, dictionary_handle, map_key);
         }
     }
 }
@@ -962,7 +966,7 @@ pub(crate) fn store_table_style_carriers(
     document: &mut crate::document::CadDocument,
     version: crate::types::DxfVersion,
 ) {
-    if let Some(carriers) = plan_table_style_carriers(document, version) {
+    if let Some(carriers) = plan_table_style_carriers_for(document, version, true) {
         carriers.apply(document);
     }
 }
@@ -975,6 +979,16 @@ pub(crate) fn store_table_style_carriers(
 pub(crate) fn plan_table_style_carriers(
     document: &crate::document::CadDocument,
     version: crate::types::DxfVersion,
+) -> Option<TableStyleCarriers> {
+    plan_table_style_carriers_for(document, version, false)
+}
+
+/// [`plan_table_style_carriers`] for a DWG (`dwg`) or a DXF: an R14 DWG states the cell style map under the key AutoCAD cuts to
+/// 26 characters.
+pub(crate) fn plan_table_style_carriers_for(
+    document: &crate::document::CadDocument,
+    version: crate::types::DxfVersion,
+    dwg: bool,
 ) -> Option<TableStyleCarriers> {
     use crate::objects::{
         CellStyleMap, DataObject, DataObjectData, ObjectType, XRecordEntry, XRecordValue,
@@ -1061,8 +1075,9 @@ pub(crate) fn plan_table_style_carriers(
         if let Some(used) = handles.used.as_mut() {
             used.insert(dictionary.value());
         }
+        let map_key = if dwg && version <= DxfVersion::AC1014 { CELL_STYLE_MAP_KEY_R14 } else { CELL_STYLE_MAP_KEY };
         let existing = match working!(dictionary) {
-            Some(ObjectType::Dictionary(entries)) => entries.get(CELL_STYLE_MAP_KEY),
+            Some(ObjectType::Dictionary(entries)) => entries.get(CELL_STYLE_MAP_KEY).or_else(|| entries.get(CELL_STYLE_MAP_KEY_R14)),
             _ => None,
         };
         let existing_map = match existing {
@@ -1121,8 +1136,8 @@ pub(crate) fn plan_table_style_carriers(
                 object.reactors = vec![dictionary];
                 plan.objects.insert(map, ObjectType::DataObject(object));
                 if let Some(ObjectType::Dictionary(entries)) = working!(dictionary) {
-                    entries.entries.retain(|(name, _)| name != CELL_STYLE_MAP_KEY);
-                    entries.add_entry(CELL_STYLE_MAP_KEY, map);
+                    entries.entries.retain(|(name, _)| name != CELL_STYLE_MAP_KEY && name != CELL_STYLE_MAP_KEY_R14);
+                    entries.add_entry(map_key, map);
                 }
             }
         }
@@ -1479,6 +1494,58 @@ mod tests {
             );
             assert!(String::from_utf8_lossy(&written).contains("CELLSTYLEMAP"));
         }
+    }
+
+    /// The names of the entries of the extension dictionary of the table style `name`.
+    fn extension_keys(doc: &crate::document::CadDocument, name: &str) -> Vec<String> {
+        use crate::objects::ObjectType;
+        let style = doc
+            .objects
+            .iter()
+            .find_map(|(handle, object)| matches!(object, ObjectType::TableStyle(style) if style.name == name).then_some(*handle))
+            .expect("the style");
+        let dictionary = doc.extension_dictionary_handle(style).expect("its extension dictionary");
+        match doc.objects.get(&dictionary) {
+            Some(ObjectType::Dictionary(entries)) => entries.entries.iter().map(|(key, _)| key.clone()).collect(),
+            _ => panic!("not a dictionary"),
+        }
+    }
+
+    /// AutoCAD's R14 DWG names the entry of the cell style map `ACAD_ROUNDTRIP_2008_TABLES` (sample_AC1014.dwg, the style #87: the
+    /// name cut to 26 characters); every other version, and a DXF of any version, `ACAD_ROUNDTRIP_2008_TABLESTYLE_CELLSTYLEMAP`.
+    /// A reader takes either spelling.
+    #[test]
+    fn an_r14_dwg_names_the_cell_style_map_as_autocad_does_and_a_reader_takes_either_name() {
+        use crate::types::DxfVersion;
+        let doc = document_with_modern_styles(DxfVersion::AC1014);
+        let mut r14 = doc.clone();
+        store_table_style_carriers(&mut r14, DxfVersion::AC1014);
+        assert!(extension_keys(&r14, "R5A5-B").contains(&CELL_STYLE_MAP_KEY_R14.to_string()), "{:?}", extension_keys(&r14, "R5A5-B"));
+        assert!(!extension_keys(&r14, "R5A5-B").contains(&CELL_STYLE_MAP_KEY.to_string()));
+        let mut r2000 = doc.clone();
+        store_table_style_carriers(&mut r2000, DxfVersion::AC1015);
+        assert!(extension_keys(&r2000, "R5A5-B").contains(&CELL_STYLE_MAP_KEY.to_string()));
+        // a DXF states the long name whatever the version
+        let planned = plan_table_style_carriers(&doc, DxfVersion::AC1014).expect("carriers");
+        let mut dxf = doc.clone();
+        planned.apply(&mut dxf);
+        assert!(extension_keys(&dxf, "R5A5-B").contains(&CELL_STYLE_MAP_KEY.to_string()));
+        // the reader restores the cell styles from the short name and takes the carrier out of the document
+        let mut read = r14.clone();
+        for object in read.objects.values_mut() {
+            if let crate::objects::ObjectType::TableStyle(style) = object {
+                style.modern_overrides.clear();
+            }
+        }
+        restore_table_style_roundtrip(&mut read);
+        for object in read.objects.values() {
+            if let crate::objects::ObjectType::TableStyle(style) = object {
+                if style.name.starts_with("R5A5") {
+                    assert_eq!(style.modern_overrides.len(), 1, "{}", style.name);
+                }
+            }
+        }
+        assert!(!extension_keys(&read, "R5A5-B").contains(&CELL_STYLE_MAP_KEY_R14.to_string()));
     }
 
     #[test]

@@ -4419,6 +4419,7 @@ impl CadDocument {
         }
         if let Some(handle) = match self.objects.get(&owner) {
             Some(ObjectType::Dictionary(value)) => value.xdictionary_handle,
+            Some(ObjectType::ClassObject(value)) => value.xdictionary_handle,
             Some(ObjectType::Layout(value)) => value.xdictionary_handle,
             Some(ObjectType::XRecord(value)) => value.xdictionary_handle,
             Some(ObjectType::PlotSettings(value)) => value.xdictionary_handle,

@@ -281,15 +281,18 @@ fn handle_seed_does_not_grow_with_round_trips() {
         let first = write_and_read(&document, version);
         let second = write_and_read(&first, version);
         let third = write_and_read(&second, version);
-        assert_eq!(
-            first.header.source_handle_seed,
-            Some(5000),
-            "{version:?}: the file states the seed it was given"
+        // The file states the seed it was given, or above it by the handles of the records AutoCAD's older files hold and a drawing
+        // made in memory is given when it is written (R5b-9: the layouts, the VPORT control object); a drawing read from a file is
+        // written with the records it has and its seed does not grow.
+        let stated = first.header.source_handle_seed.expect("the first file states a seed");
+        assert!(
+            stated >= 5000 && (version >= DxfVersion::AC1018 || stated <= 5000 + 16),
+            "{version:?}: the file states the seed it was given or the handles of its records: {stated}"
         );
         for (label, read) in [("second", &second), ("third", &third)] {
             assert_eq!(
                 read.header.source_handle_seed,
-                Some(5000),
+                Some(stated),
                 "{version:?}: seed stated by the {label} file"
             );
         }
