@@ -291,7 +291,7 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// The default application IDs the APPID table leaves out (see `unused_default_app_ids` of the DXF writer),
     /// less those the DWG record writers use: annotative styles and the raw extended-data blocks of a DWG source.
-    fn skipped_app_ids_of(document: &CadDocument) -> HashSet<String> {
+    pub(crate) fn skipped_app_ids_of(document: &CadDocument) -> HashSet<String> {
         let mut skipped = crate::io::dxf::unused_default_app_ids(document);
         if skipped.is_empty() {
             return skipped;
@@ -899,7 +899,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         // Entry name
-        self.writer.write_variable_text(&layer.name);
+        self.writer.write_variable_text(&self.table_record_name(&layer.name, false));
 
         // Xref-dependant bit
         self.write_xref_flags_with_source(layer.source_flags, layer.flags.xref_dependent);
@@ -1019,7 +1019,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         // Entry name
-        self.writer.write_variable_text(&style.name);
+        self.writer.write_variable_text(&self.table_record_name(&style.name, style.is_shape_file));
 
         // Xref-dependent flag
         self.write_xref_flags_with_source(style.source_flags, style.xref_dependent);
@@ -1076,7 +1076,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         // Entry name
-        self.writer.write_variable_text(&ltype.name);
+        self.writer.write_variable_text(&self.table_record_name(&ltype.name, false));
         // Xref-dependent flag (linetypes that came in through an xref keep it,
         // otherwise AUDIT renames every "xref|name" record).
         self.write_xref_flags_with_source(ltype.source_flags, ltype.xref_dependent);
@@ -1205,7 +1205,7 @@ impl<'a> DwgObjectWriter<'a> {
             &None,
         );
 
-        self.writer.write_variable_text(&view.name);
+        self.writer.write_variable_text(&self.table_record_name(&view.name, false));
         self.write_xref_table_flags(view.xref_reference, view.xref_resolved, view.xref_dependent);
 
         self.writer.write_bit_double(view.height);
@@ -1305,7 +1305,7 @@ impl<'a> DwgObjectWriter<'a> {
             &None,
         );
 
-        self.writer.write_variable_text(&ucs.name);
+        self.writer.write_variable_text(&self.table_record_name(&ucs.name, false));
         self.write_xref_table_flags(ucs.xref_reference, ucs.xref_resolved, ucs.xref_dependent);
 
         self.writer.write_3bit_double(ucs.origin);
@@ -1348,7 +1348,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         // Common: Entry name TV 2
-        self.writer.write_variable_text(&vport.name);
+        self.writer.write_variable_text(&self.table_record_name(&vport.name, false));
         self.write_xref_table_flags(
             vport.xref_reference,
             vport.xref_resolved,
@@ -1555,7 +1555,7 @@ impl<'a> DwgObjectWriter<'a> {
                     )
             })
             .collect();
-        self.writer.write_variable_text(&name);
+        self.writer.write_variable_text(&self.table_record_name(&name, crate::io::dwg::autocad_records::app_stated_as_is(&name)));
         self.write_xref_flags_with_source(app.source_flags, false);
 
         // Unknown byte (group 71)
@@ -1598,7 +1598,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         // Common: Entry name TV 2
-        self.writer.write_variable_text(&ds.name);
+        self.writer.write_variable_text(&self.table_record_name(&ds.name, false));
         self.write_xref_table_flags(ds.xref_reference, ds.xref_resolved, ds.xref_dependent);
 
         // ── R13/R14 Only: DimStyle fields ───────────────────────────
@@ -2205,7 +2205,7 @@ impl<'a> DwgObjectWriter<'a> {
         // Entry name (DWG uses bare names without numeric suffixes)
         let stated_anonymous = self.is_dynamic_definition_stated_anonymous(record);
         let dwg_name = if stated_anonymous { "*U" } else { dwg_block_name(&record.name) };
-        self.writer.write_variable_text(dwg_name);
+        self.writer.write_variable_text(&self.table_record_name(dwg_name, record.flags.anonymous || stated_anonymous));
         // Xref dependant
         self.write_xref_dependant_bit();
 
@@ -2345,15 +2345,22 @@ impl<'a> DwgObjectWriter<'a> {
     /// the record's name. The extended data is written back as it was, so the record is written as it was too:
     /// anonymous, under the bare "*U".
     fn is_dynamic_definition_stated_anonymous(&self, record: &BlockRecord) -> bool {
-        record.source_flags & 1 != 0
-            && !record.flags.anonymous
-            && !record.name.starts_with('*')
-            && ["AcDbDynamicBlockTrueName", "ACDBDYNAMICBLOCKTRUENAME"]
-                .iter()
-                .any(|application| self.existing_xdata_values(record.handle, application).is_some())
+        crate::io::dwg::autocad_records::is_dynamic_definition_stated_anonymous(self.document, record)
     }
 
     /// Write BLOCK entity (block begin).
+    /// The name a table record states in a DWG of R14: upper case, a character R14 does not allow as `_`
+    /// (`autocad_records::r14_name`; the name of the drawing is in the `EXTNAMES` group of the record's round-trip record). The names
+    /// of the anonymous blocks and of the text styles of a shape file stay as they are.
+    fn table_record_name<'n>(&self, name: &'n str, exempt: bool) -> std::borrow::Cow<'n, str> {
+        if !exempt && crate::io::dwg::autocad_records::extnames_needed(self.dxf_version) {
+            if let Some(upper) = crate::io::dwg::autocad_records::r14_name(name) {
+                return std::borrow::Cow::Owned(upper);
+            }
+        }
+        std::borrow::Cow::Borrowed(name)
+    }
+
     fn write_block_begin(&mut self, record: &BlockRecord) {
         // New documents reserve marker handles in BlockRecord without storing
         // BLOCK entities. Synthesize those markers; imported ones retain metadata.
@@ -2441,7 +2448,7 @@ impl<'a> DwgObjectWriter<'a> {
             &common.edge_visual_style_handle,
         );
 
-        self.writer.write_variable_text(name);
+        self.writer.write_variable_text(&self.table_record_name(name, record.flags.anonymous || self.is_dynamic_definition_stated_anonymous(record)));
 
         self.register_object(common.handle);
     }

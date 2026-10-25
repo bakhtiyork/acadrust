@@ -598,6 +598,34 @@ impl DwgDocumentBuilder {
         }
     }
 
+    /// R14: the `EXTNAMES` pairs `(name in R14, name)` of the round-trip records `ACAD_XREC_ROUNDTRIP` (AutoCAD keeps the original case of
+    /// a name there, see `autocad_records`), by the handle of the dictionary that holds the record (the extension dictionary of a table
+    /// record). The records are read once here because the names must be restored before the references to them are made.
+    fn extnames_by_dictionary(&self, record_catalog: &[(u64, usize, i16, i16)]) -> HashMap<u64, Vec<(String, String)>> {
+        let mut found: HashMap<u64, Vec<(String, String)>> = HashMap::new();
+        for &(handle, offset, _, type_code) in record_catalog {
+            if type_code != OBJ_XRECORD {
+                continue;
+            }
+            let Ok((_, mut reader)) = self.obj_reader.read_record_at(offset) else { continue };
+            let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let common = self.obj_reader.read_common_non_entity_data(&mut reader, type_code);
+                if common.common.handle != handle || reader.check_error().is_err() {
+                    return None;
+                }
+                let data = objects::read_xrecord(&mut reader);
+                (reader.check_error().is_ok() && data.entries_complete).then(|| (common.owner_handle, data.entries))
+            }));
+            if let Ok(Some((dictionary, entries))) = read {
+                let pairs = crate::io::dwg::autocad_records::extnames_pairs(&entries);
+                if !pairs.is_empty() {
+                    found.insert(dictionary, pairs);
+                }
+            }
+        }
+        found
+    }
+
     fn block_marker_name(&self, handle: u64) -> Option<String> {
         let offset = self.obj_reader.offset_for(handle)?;
         let offset = usize::try_from(offset).ok()?;
@@ -1335,6 +1363,83 @@ impl DwgDocumentBuilder {
         // which may collide with objects from the DWG file.
         let _ = document.block_records.remove("*Model_Space");
         let _ = document.block_records.remove("*Paper_Space");
+
+        // ── R14: the names of the table records ────────────────────────
+        //
+        // R14 states the names in upper case and keeps the names of the drawing in `ACAD_XREC_ROUNDTRIP {EXTNAMES}` of the extension
+        // dictionary of the record. They are restored here, before the entities take the names of their layers, styles and blocks from
+        // the maps below, and before the block names are deduplicated.
+        if crate::io::dwg::autocad_records::extnames_needed(document.version) {
+            let pairs = self.extnames_by_dictionary(&record_catalog);
+            if !pairs.is_empty() {
+                let mut restored: HashSet<u64> = HashSet::new();
+                let mut restore = |handle: u64, name: &mut String, document: &mut CadDocument| {
+                    let Some(dictionary) = document.xdic_by_handle.get(&Handle::from(handle)) else { return };
+                    let Some(list) = pairs.get(&dictionary.value()) else { return };
+                    let Some((_, original)) = list.iter().find(|(upper, original)| upper == name || original.eq_ignore_ascii_case(name)) else { return };
+                    let upper = crate::io::dwg::autocad_records::r14_name(original);
+                    if upper.as_deref() != Some(name.as_str()) && !original.eq_ignore_ascii_case(name) {
+                        return;
+                    }
+                    // The numbering of the paper spaces (`*PAPER_SPACE0`) and the canonical names of the active ones have been made by now:
+                    // a name that is the original already (same letters) is applied as it is.
+                    let file = std::mem::replace(name, original.clone());
+                    document.consumed_records.note_restored_name(Handle::from(handle), upper.unwrap_or(file));
+                    restored.insert(handle);
+                };
+                for entry in &mut parsed_entries {
+                    match entry {
+                        ParsedEntry::Layer(h, data) => restore(*h, &mut data.name, document),
+                        ParsedEntry::Block(h, data) if !data.anonymous => restore(*h, &mut data.name, document),
+                        ParsedEntry::Style(h, data) => restore(*h, &mut data.name, document),
+                        ParsedEntry::Ltype(h, data) => restore(*h, &mut data.name, document),
+                        ParsedEntry::DimStyle(h, data) => restore(*h, &mut data.name, document),
+                        ParsedEntry::View(h, data) => restore(*h, &mut data.name, document),
+                        ParsedEntry::Ucs(h, data) => restore(*h, &mut data.name, document),
+                        ParsedEntry::VPort(h, data) => restore(*h, &mut data.name, document),
+                        ParsedEntry::AppId(h, data) => restore(*h, &mut data.name, document),
+                        _ => {}
+                    }
+                }
+                if !restored.is_empty() {
+                    for entry in &parsed_entries {
+                        match entry {
+                            ParsedEntry::Layer(h, data) if restored.contains(h) => {
+                                let name = viewport_override_base_layer(&data.name).map(str::to_owned).unwrap_or_else(|| data.name.clone());
+                                maps.layers.insert(*h, name);
+                            }
+                            ParsedEntry::Block(h, data) if restored.contains(h) => {
+                                maps.blocks.insert(*h, data.name.clone());
+                            }
+                            ParsedEntry::Style(h, data) if restored.contains(h) => {
+                                maps.text_styles.insert(*h, data.name.clone());
+                            }
+                            ParsedEntry::Ltype(h, data) if restored.contains(h) => {
+                                maps.linetypes.insert(*h, data.name.clone());
+                            }
+                            ParsedEntry::DimStyle(h, data) if restored.contains(h) => {
+                                maps.dim_styles.insert(*h, data.name.clone());
+                            }
+                            ParsedEntry::View(h, data) if restored.contains(h) => {
+                                maps.views.insert(*h, data.name.clone());
+                            }
+                            _ => {}
+                        }
+                    }
+                    maps.linetype_order = parsed_entries
+                        .iter()
+                        .filter_map(|entry| match entry {
+                            ParsedEntry::Ltype(_, data)
+                                if !data.name.eq_ignore_ascii_case("ByBlock") && !data.name.eq_ignore_ascii_case("ByLayer") =>
+                            {
+                                Some(data.name.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                }
+            }
+        }
 
         let layer_transparency_app_handle = parsed_entries.iter().find_map(|entry| match entry {
             ParsedEntry::AppId(handle, data)
@@ -4253,7 +4358,8 @@ impl DwgDocumentBuilder {
                     e.annotation_offset = data.annotation_offset;
                     e.origin = data.origin;
                     e.dimension_gap = data.dimgap;
-                    e.arrowhead_type = data.arrowhead_type;
+                    // Bit 8 of the R13/R14 arrowhead word is the hookline flag (`hookline_enabled` below, stated again by the writer).
+                    e.arrowhead_type = if self.obj_reader.version().r13_14_only() { data.arrowhead_type & !8 } else { data.arrowhead_type };
                     e.arrow_size = data.dimasz;
                     e.byblock_color = data.byblock_color;
                     // The R13/R14 record's by-block colour is what DXF group 77 states (the colour used when the

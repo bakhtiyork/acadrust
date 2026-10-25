@@ -8,6 +8,9 @@ use std::fmt;
 use super::parser::SatParser;
 use super::writer::SatWriter;
 
+/// The product AutoCAD's own modeler data states in its header.
+const AUTOCAD_PRODUCT: &str = "Autodesk AutoCAD";
+
 // ============================================================================
 // SAT Version
 // ============================================================================
@@ -3090,6 +3093,10 @@ impl SatDocument {
     pub fn strip_for_sab(&mut self) {
         // Determine which records to keep.
         // Core ACIS base types (last segment after hyphen split):
+        // The data AutoCAD's own modeler wrote keeps its solid history (the face and edge records of every body in
+        // sample_AC1018.dwg to sample_AC1032.dwg state `persubent-acadSolidHistory-attrib`) and the unit scale of its header
+        // (25.4 for the inch drawing of the samples): only another producer's attributes are what the note above is about.
+        let autocad = self.header.product_id == AUTOCAD_PRODUCT;
         let keep: Vec<bool> = self
             .records
             .iter()
@@ -3099,6 +3106,7 @@ impl SatDocument {
                         r.entity_type.as_str(),
                         "color-adesk-attrib" | "truecolor-adesk-attrib"
                     )
+                    || (autocad && r.entity_type == "persubent-acadSolidHistory-attrib")
             })
             .collect();
 
@@ -3157,7 +3165,11 @@ impl SatDocument {
         // IntelliCAD/AutoCAD always use 1.0 in native SAB data.
         // Source files from older ACIS versions may use different values
         // (e.g. 10.0) which can cause compatibility issues.
-        self.header.spatial_resolution = 1.0;
+        // (AutoCAD's own data keeps the scale it states: 25.4 in the inch drawing of sample_AC1018.dwg to sample_AC1032.dwg, SAB
+        // and SAT text alike.)
+        if !autocad {
+            self.header.spatial_resolution = 1.0;
+        }
     }
 
     pub fn completed_for_restore(&self) -> Option<SatDocument> {
@@ -3657,5 +3669,53 @@ mod serde_tests {
             );
             assert_eq!(serde_json::from_value::<SatToken>(json).unwrap(), expected);
         }
+    }
+}
+
+#[cfg(test)]
+mod strip_for_sab_tests {
+    use super::super::sab::{SabReader, SabWriter};
+    use super::*;
+
+    /// The first records of the body #D65 of sample_AC1024_ascii.dxf (the SAT text of AutoCAD's own modeler, product `Autodesk AutoCAD`,
+    /// scale 25.4, solid history on the faces); the pointers beyond the fragment are stripped to `$-1`.
+    fn autocad_body(product: &str) -> SatDocument {
+        let text = format!(
+            "21500 10 2 24 \n16 {product} 20 ASM 230.7.0.65535 NT 0 \n25.39999999999999858 9.999999999999999547e-07 1.000000000000000036e-10 \n\
+asmheader $-1 -1 @13 230.7.0.65535 #\n\
+body $-1 -1 $-1 $2 $-1 $3 #\n\
+lump $-1 -1 $-1 $-1 $4 $1 #\n\
+transform $-1 -1 1 0 0 0 1 0 0 0 1 17.77672546982375934 -220.8501226607159253 2.5 1 no_rotate no_reflect no_shear #\n\
+shell $-1 -1 $-1 $-1 $-1 $5 $-1 $2 #\n\
+face $6 -1 $-1 $-1 $-1 $4 $-1 $-1 forward single #\n\
+persubent-acadSolidHistory-attrib $-1 -1 $-1 $-1 $5 1 3 1 0 #\n\
+End-of-ACIS-data #\n"
+        );
+        SatDocument::parse(&text).expect("the fragment parses")
+    }
+
+    fn history_records(doc: &SatDocument) -> usize {
+        doc.records.iter().filter(|record| record.entity_type == "persubent-acadSolidHistory-attrib").count()
+    }
+
+    /// AutoCAD's own binary modeler data holds the solid history and the unit scale of its header (the bodies of sample_AC1018.dwg to
+    /// sample_AC1032.dwg: 25.4 and a `persubent-acadSolidHistory-attrib` on the faces), so the SAT text of AutoCAD's own modeler
+    /// (a DXF of R2000 to R2010) written as SAB keeps both; another producer's data is stripped to the core geometry and its scale
+    /// normalized as before.
+    #[test]
+    fn the_modeler_data_of_autocad_keeps_its_history_and_scale_in_binary_form() {
+        let mut own = autocad_body("Autodesk AutoCAD");
+        assert_eq!(history_records(&own), 1);
+        own.strip_for_sab();
+        assert_eq!(history_records(&own), 1, "the solid history stays");
+        assert_eq!(own.header.spatial_resolution, 25.4, "the unit scale stays");
+        let binary = SabReader::read(&SabWriter::write(&own)).expect("the binary data reads");
+        assert_eq!(history_records(&binary), 1);
+        assert_eq!(binary.header.spatial_resolution, 25.4);
+
+        let mut other = autocad_body("Other CAD");
+        other.strip_for_sab();
+        assert_eq!(history_records(&other), 0, "another producer's attribute is stripped");
+        assert_eq!(other.header.spatial_resolution, 1.0);
     }
 }

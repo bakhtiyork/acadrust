@@ -277,11 +277,15 @@ fn an_r14_viewport_has_the_world_axes_and_gets_its_view_parameters_back_from_the
     assert_eq!(from_dwg.ucs_x_axis, Vector3::new(1.0, 0.0, 0.0));
     assert_eq!(from_dwg.ucs_y_axis, Vector3::new(0.0, 1.0, 0.0));
     assert_eq!(from_dwg.custom_scale, 0.25);
-    assert!(from_dwg.ucs_at_origin);
+    // R14 states the flag as bit 2 of the UCS icon word of its MVIEW data, which a reader puts into the status word (the icon at the
+    // origin, as AutoCAD's own R2000 file of its R14 drawing states it: sample_AC1014.dwg and sample_AC1015.dwg).
+    assert!(from_dwg.status.ucs_icon_at_origin);
+    assert!(!from_dwg.ucs_at_origin);
     let back = dxf(&read);
     let EntityType::Viewport(from_dxf) = back.get_entity(handle).expect("viewport") else { panic!() };
     assert_eq!(from_dxf.custom_scale, from_dwg.custom_scale);
     assert_eq!(from_dxf.ucs_at_origin, from_dwg.ucs_at_origin);
+    assert_eq!(from_dxf.status.ucs_icon_at_origin, from_dwg.status.ucs_icon_at_origin);
     assert_eq!(from_dxf.view_height, from_dwg.view_height);
     assert_eq!((from_dxf.ucs_x_axis, from_dxf.ucs_y_axis), (from_dwg.ucs_x_axis, from_dwg.ucs_y_axis));
 }

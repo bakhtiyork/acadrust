@@ -30,6 +30,13 @@ fn mview_range(values: &[X]) -> Option<std::ops::Range<usize>> {
 
 pub(crate) fn record(v: &Viewport, document: &CadDocument) -> ExtendedDataRecord {
     let from_r2000 = document.dwg_source_version.is_some_and(|source| source >= crate::types::DxfVersion::AC1015);
+    // The status word of a viewport of an R2000 or later file, a DWG or a DXF, holds its UCS icon; the reader of an R14 file puts
+    // the icon word there too (`restore_impl`). `ucs_icon_visible` of the viewport is the icon word of an R14 file only (a reader of
+    // a later file leaves its default).
+    let status_holds_icon =
+        document.dwg_source_version.or(document.dxf_source_version).is_some_and(|source| source >= crate::types::DxfVersion::AC1015);
+    let icon_visible = if status_holds_icon { v.status.ucs_icon_visible } else { v.ucs_icon_visible || v.status.ucs_icon_visible };
+    let icon_at_origin = v.ucs_at_origin || v.status.ucs_icon_at_origin;
     let mut values = vec![
         X::String("MVIEW".into()),
         X::ControlString("{".into()),
@@ -49,10 +56,7 @@ pub(crate) fn record(v: &Viewport, document: &CadDocument) -> ExtendedDataRecord
         // in AutoCAD since R2000); AutoCAD's own R14 file of such a drawing states 1 for the fast zoom and the status's
         // icon bits in the icon word (sample_AC1014.dwg from sample_AC1015.dwg: 1, and 1 or 3).
         X::Integer16((v.status.fast_zoom || from_r2000) as i16),
-        X::Integer16(
-            (v.ucs_icon_visible || (from_r2000 && v.status.ucs_icon_visible)) as i16
-                | (((v.ucs_at_origin || (from_r2000 && v.status.ucs_icon_at_origin)) as i16) << 1),
-        ),
+        X::Integer16(icon_visible as i16 | ((icon_at_origin as i16) << 1)),
         X::Integer16(v.status.snap_on as i16),
         X::Integer16(v.status.grid_on as i16),
         X::Integer16(v.status.isometric_snap as i16),
@@ -190,8 +194,12 @@ fn restore_impl(
     v.status = crate::entities::ViewportStatusFlags::from_bits(int(9) as i32 | 0x8000);
     v.circle_sides = int(10);
     v.status.fast_zoom = int(11) != 0;
+    // The icon word is the UCS icon of the status word of R2000 and later: AutoCAD's own R14 file states 1 or 3 where its R2000 file of
+    // the drawing states the status bits visible and at the origin, and the viewport's own UCS-at-origin flag (group 74) clear
+    // (sample_AC1014.dwg and sample_AC1015.dwg, the viewports #240 to #26B).
     v.ucs_icon_visible = int(12) & 1 != 0;
-    v.ucs_at_origin = int(12) & 2 != 0;
+    v.status.ucs_icon_visible = int(12) & 1 != 0;
+    v.status.ucs_icon_at_origin = int(12) & 2 != 0;
     v.status.snap_on = int(13) != 0;
     v.status.grid_on = int(14) != 0;
     v.status.isometric_snap = int(15) != 0;

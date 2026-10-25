@@ -199,10 +199,12 @@ pub struct SectionWriter<'a, W: DxfStreamWriter> {
 }
 
 /// The tag as the source spelled it (a recovered multi-line attribute tag loses a numeric suffix), while the
-/// native tag still is the recovered value; an edited tag is written as it is.
-pub(crate) fn source_tag<'a>(source: &'a crate::entities::text::TextSource, tag: &'a str) -> &'a str {
+/// native tag still is the recovered value; an edited tag is written as it is. R2018 holds a multi-line attribute itself, with
+/// its own tag (sample_AC1032.dwg: `MULTI_LINE_ATT`; the files before R2018 spell it `MULTI_LINE_ATT_001`): `holds_multiline`
+/// writes the recovered tag.
+pub(crate) fn source_tag<'a>(source: &'a crate::entities::text::TextSource, tag: &'a str, holds_multiline: bool) -> &'a str {
     match &source.tag {
-        Some((original, recovered)) if recovered == tag => original,
+        Some((original, recovered)) if recovered == tag && !holds_multiline => original,
         _ => tag,
     }
 }
@@ -6611,7 +6613,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Tag
         self.writer.write_string(
             2,
-            attdef.source.as_deref().map_or(&attdef.tag, |source| source_tag(source, &attdef.tag)),
+            attdef.source.as_deref().map_or(&attdef.tag, |source| source_tag(source, &attdef.tag, self.dxf_version >= DxfVersion::AC1032)),
         )?;
 
         // Attribute flags
@@ -6784,7 +6786,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
         // Tag
         self.writer.write_string(
             2,
-            attrib.source.as_deref().map_or(&attrib.tag, |source| source_tag(source, &attrib.tag)),
+            attrib.source.as_deref().map_or(&attrib.tag, |source| source_tag(source, &attrib.tag, self.dxf_version >= DxfVersion::AC1032)),
         )?;
 
         // Attribute flags

@@ -574,10 +574,8 @@ impl<'a> DwgObjectWriter<'a> {
         // ── MAIN: Linetype flags ──
         // 00 = bylayer, 01 = byblock, 10 = continuous, 11 = handle present
         let lt_lower = linetype.to_ascii_lowercase();
-        let resolved_linetype = self
-            .document
-            .line_types
-            .get(linetype)
+        let record = self.document.line_types.get(linetype);
+        let resolved_linetype = record
             .map(|lt| lt.handle)
             .or(*linetype_handle)
             .filter(|handle| !handle.is_null());
@@ -586,7 +584,10 @@ impl<'a> DwgObjectWriter<'a> {
             || lt_lower.is_empty()
             || lt_lower == "byblock"
             || lt_lower == "continuous";
-        if resolved_linetype.is_some() && (has_preserved_handle || !is_builtin) {
+        // The continuous flag reads back as `Continuous`: a record spelled otherwise (the `CONTINUOUS` of an R12 file) is
+        // stated by its handle, which reads back as the record's own name.
+        let continuous_spelled_otherwise = lt_lower == "continuous" && record.is_some_and(|lt| lt.name != "Continuous");
+        if resolved_linetype.is_some() && (has_preserved_handle || !is_builtin || continuous_spelled_otherwise) {
             self.writer.write_2bits(0b11);
             self.writer.write_handle(
                 DwgReferenceType::HardPointer,

@@ -100,6 +100,8 @@ pub(super) fn properties(doc: &CadDocument, text: &MText) -> Vec<(&'static str, 
         ],
     );
     let value = value(text);
+    // The text ACadSharp reads of an MTEXT whose paragraph breaks the reader restored from `ACAD_MTEXT_RT` (R14, R2000).
+    let value = crate::io::dwg::autocad_records::mtext_file_value(doc, text.common.handle, &value).into_owned();
     vec![
         ("AlignmentPoint", vec3(direction)),
         ("AttachmentPoint", json!(text.attachment_point as i16)),
