@@ -519,7 +519,7 @@ fn synthesized_block_markers_state_the_full_name() {
         for (record, marker) in &stated {
             // R14 states the names in upper case (sample_AC1014.dwg: `*PAPER_SPACE0`); the model has the name of the drawing (R5b-11).
             if version == DxfVersion::AC1014 {
-                assert!(record.eq_ignore_ascii_case(marker), "{version:?}: the marker states the record's name: {record} {marker}");
+                assert_eq!(*marker, record.to_ascii_uppercase(), "{version:?}: the marker states the record's name as R14 states it");
             } else {
                 assert_eq!(record, marker, "{version:?}: the marker states the record's name");
             }

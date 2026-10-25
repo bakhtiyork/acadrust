@@ -351,8 +351,8 @@ pub(crate) struct Consumed {
     /// The MTEXT whose original text the reader restored from `ACAD_MTEXT_RT` (`restore_mtext`) with the original and the text the file
     /// had: the file spelled the paragraph breaks `\P` (or stacked a fraction another way) and the model holds the original. The view
     /// shows the file's text for such an MTEXT while its text is unedited (`mtext_file_value`); the writers state the file's text and
-    /// the record again (`state_mtext`).
-    mtext: Vec<(Handle, String, String)>,
+    /// the record again (`state_mtext`). By owner: the view and the writer look an MTEXT up once each.
+    mtext: std::collections::BTreeMap<Handle, (String, String)>,
     /// The table records whose original name the reader restored from `ACAD_XREC_ROUNDTRIP {EXTNAMES}` (R14), with the name the file
     /// states: the view shows the file's name (`unrestore_names`), the writers state the group again (`state_extnames`).
     names: Vec<(Handle, String)>,
@@ -2176,7 +2176,11 @@ fn mtext_rt_original(entries: &[XRecordEntry]) -> Option<(f64, String)> {
 fn restore_mtext(document: &mut CadDocument, found: &std::collections::HashMap<Handle, (Handle, Vec<XRecordEntry>)>) -> Vec<Handle> {
     let mut applied = Vec::new();
     let mut restored = Vec::new();
-    for (owner, (record, entries)) in found {
+    // In the order of the owners: the records are taken out in this order (a hash map's order changes from run to run).
+    let mut owners: Vec<&Handle> = found.keys().collect();
+    owners.sort();
+    for owner in owners {
+        let (record, entries) = &found[owner];
         let Some((checksum, original)) = mtext_rt_original(entries) else { continue };
         let Some(crate::entities::EntityType::MText(text)) = document.get_entity(*owner) else { continue };
         if mtext_checksum(&text.value) == checksum {
@@ -2184,12 +2188,11 @@ fn restore_mtext(document: &mut CadDocument, found: &std::collections::HashMap<H
             applied.push(*record);
         }
     }
-    restored.sort_by_key(|(owner, _, _)| owner.value());
     for (owner, original, file) in restored {
         if let Some(crate::entities::EntityType::MText(text)) = document.get_entity_mut_keep_raw(owner) {
             text.value = original.clone();
         }
-        document.consumed_records.mtext.push((owner, original, file));
+        document.consumed_records.mtext.insert(owner, (original, file));
     }
     applied
 }
@@ -2216,8 +2219,8 @@ fn state_mtext(document: &mut CadDocument, ext: &mut Ext, owner: Handle, wanted:
 /// text is the original (an edit shows as it is).
 #[cfg(feature = "acadsharp-compat")]
 pub(crate) fn mtext_file_value<'a>(document: &CadDocument, owner: Handle, value: &'a str) -> std::borrow::Cow<'a, str> {
-    match document.consumed_records.mtext.iter().find(|(handle, _, _)| *handle == owner) {
-        Some((_, original, file)) if original == value => std::borrow::Cow::Owned(file.clone()),
+    match document.consumed_records.mtext.get(&owner) {
+        Some((original, file)) if original == value => std::borrow::Cow::Owned(file.clone()),
         Some(_) => mtext_file_text(value).map_or(std::borrow::Cow::Borrowed(value), std::borrow::Cow::Owned),
         None => std::borrow::Cow::Borrowed(value),
     }
@@ -2633,16 +2636,17 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             .filter_map(|entity| {
                 let crate::entities::EntityType::MText(text) = entity else { return None };
                 let owner = text.common.handle;
-                let restored = document.consumed_records.mtext.iter().find(|(handle, original, _)| *handle == owner && *original == text.value);
+                let consumed = document.consumed_records.mtext.get(&owner);
+                let restored = consumed.filter(|(original, _)| *original == text.value);
                 let wanted = match restored {
-                    Some((_, original, file)) => Some((file.clone(), mtext_rt_entries(original, file))),
+                    Some((original, file)) => Some((file.clone(), mtext_rt_entries(original, file))),
                     None => mtext_file_text(&text.value).map(|file| {
                         let entries = mtext_rt_entries(&text.value, &file);
                         (file, entries)
                     }),
                 };
                 // A record the reader did not apply (another shape or text: the unicode and the stacking conversions) is the file's own: kept.
-                let ours = document.consumed_records.mtext.iter().any(|(handle, _, _)| *handle == owner)
+                let ours = consumed.is_some()
                     && ext
                         .of(document, owner)
                         .and_then(|extension| dictionary_at(document, extension))
@@ -2657,15 +2661,15 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         document
             .consumed_records
             .mtext
-            .iter()
-            .filter(|(owner, ..)| {
-                ext.of(document, *owner)
+            .keys()
+            .filter(|owner| {
+                ext.of(document, **owner)
                     .and_then(|extension| dictionary_at(document, extension))
                     .and_then(|dictionary| dictionary.get(MTEXT_RT))
                     .and_then(|record| record_entries(document, record))
                     .is_some_and(|entries| mtext_rt_original(entries).is_some())
             })
-            .map(|(owner, ..)| (*owner, None))
+            .map(|owner| (*owner, None))
             .collect()
     } else {
         Vec::new()

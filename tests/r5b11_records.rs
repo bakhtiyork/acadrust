@@ -606,3 +606,120 @@ fn the_hookline_flag_of_an_r14_leader_is_not_part_of_its_arrowhead_type() {
     let again = write_and_read(&out, DxfVersion::AC1014);
     assert!(again.entities().any(|entity| matches!(entity, EntityType::Leader(leader) if leader.hookline_enabled && leader.arrowhead_type == 1)));
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Review of R5b-11
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// An R12 file names its continuous line type `CONTINUOUS` (sample_AC1009_ascii.dxf: the LTYPE record and the SOLID entities). The
+/// continuous flag of an entity of R2000 and later reads back as `Continuous`, so an entity of such a record is stated by the record's
+/// handle and reads back with the record's own name.
+#[test]
+fn an_entity_of_a_continuous_line_type_spelled_otherwise_keeps_the_records_name() {
+    use acadrust::entities::Line;
+    let mut document = CadDocument::new();
+    document.line_types.rename("Continuous", "CONTINUOUS").unwrap();
+    let mut line = Line::from_points(Vector3::new(0.0, 0.0, 0.0), Vector3::new(1.0, 1.0, 0.0));
+    line.common.linetype = "CONTINUOUS".to_string();
+    document.add_entity(EntityType::Line(line)).unwrap();
+    for version in [DxfVersion::AC1015, DxfVersion::AC1018, DxfVersion::AC1032] {
+        let out = write_and_read(&document, version);
+        let read = out
+            .entities()
+            .find_map(|entity| match entity {
+                EntityType::Line(line) => Some(line.common.linetype.clone()),
+                _ => None,
+            })
+            .expect("the line");
+        assert_eq!(read, "CONTINUOUS", "{version:?}");
+    }
+}
+
+/// The UCS icon of a viewport of R2000 and later is in its status word, of a DWG and of a DXF alike; R14 states it in the icon word of
+/// the MVIEW data (1 visible, 2 at the origin), and AutoCAD's own R14 file of the drawing states 1 or 3 where its R2000 file has the
+/// status bits (sample_AC1014.dwg and sample_AC1015.dwg, the viewports #240 to #26B; group 74 is clear in both). The reader of R14
+/// puts the icon word back into the status word, and the viewport's own group 74 is not the icon's.
+#[test]
+fn the_ucs_icon_of_a_viewport_survives_r14_from_a_dxf_and_from_a_dwg() {
+    use acadrust::entities::{Viewport, ViewportStatusFlags};
+    let viewport_of = |document: &CadDocument| {
+        document
+            .entities()
+            .find_map(|entity| match entity {
+                EntityType::Viewport(viewport) if viewport.width == 160.0 => Some(viewport.clone()),
+                _ => None,
+            })
+            .expect("the viewport")
+    };
+    for (visible, at_origin) in [(true, true), (true, false), (false, false)] {
+        let mut document = CadDocument::with_version(DxfVersion::AC1015);
+        let mut viewport = Viewport::new();
+        viewport.id = 2;
+        viewport.width = 160.0;
+        viewport.height = 100.0;
+        viewport.status = ViewportStatusFlags::from_bits(0x8000 | if visible { 0x20 } else { 0 } | if at_origin { 0x40 } else { 0 });
+        document.add_entity_to_layout(EntityType::Viewport(Box::new(viewport)), "Layout1").unwrap();
+        let from_dxf = dxf_write_and_read(&document, DxfVersion::AC1015);
+        let from_dwg = write_and_read(&document, DxfVersion::AC1015);
+        for (label, source) in [("DXF", &from_dxf), ("DWG", &from_dwg)] {
+            assert_eq!(viewport_of(source).status.ucs_icon_visible, visible, "{label}: the source");
+            let out = write_and_read(source, DxfVersion::AC1014);
+            let read = viewport_of(&out);
+            assert_eq!(read.status.ucs_icon_visible, visible, "{label} {visible} {at_origin}: icon visible");
+            assert_eq!(read.status.ucs_icon_at_origin, at_origin, "{label} {visible} {at_origin}: icon at the origin");
+            assert!(!read.ucs_at_origin, "{label}: group 74 is not the icon's");
+            let again = viewport_of(&write_and_read(&out, DxfVersion::AC1014));
+            assert_eq!((again.status.ucs_icon_visible, again.status.ucs_icon_at_origin), (visible, at_origin), "{label}: R14 again");
+        }
+    }
+}
+
+/// Two names R14 states alike (`Layer 1` and `Layer_1` are both `LAYER_1` there): each record keeps its own name in its own
+/// `EXTNAMES` group, so the fork's reader restores both. (How AutoCAD's down-save states such names is not in any sample.)
+#[test]
+fn two_names_r14_states_alike_are_both_restored() {
+    let mut document = CadDocument::new();
+    document.layers.add(Layer::new("Layer 1")).unwrap();
+    document.layers.add(Layer::new("Layer_1")).unwrap();
+    let out = write_and_read(&document, DxfVersion::AC1014);
+    assert!(out.layers.iter().any(|layer| layer.name == "Layer 1"));
+    assert!(out.layers.iter().any(|layer| layer.name == "Layer_1"));
+    let again = write_and_read(&out, DxfVersion::AC1014);
+    assert!(again.layers.iter().any(|layer| layer.name == "Layer 1"));
+    assert!(again.layers.iter().any(|layer| layer.name == "Layer_1"));
+}
+
+/// A record whose checksum does not match the text the file holds (the text was edited after the down-save, by a program that kept
+/// the record) is not applied: the text stays the file's, and the record stays in the model as the file had it.
+#[test]
+fn an_mtext_record_with_another_checksum_does_not_restore_its_stale_text() {
+    let file = "edited later";
+    let stale = "first\nsecond";
+    let mut document = mtext_document(file);
+    document.version = DxfVersion::AC1015;
+    let owner = the_mtext(&document).common.handle;
+    let (dictionary, record) = (document.allocate_handle(), document.allocate_handle());
+    let mut entries = Dictionary::new();
+    entries.handle = dictionary;
+    entries.owner = owner;
+    entries.hard_owner = true;
+    entries.add_entry("ACAD_MTEXT_RT", record);
+    document.objects.insert(dictionary, ObjectType::Dictionary(entries));
+    let mut xrecord = acadrust::objects::XRecord::named("ACAD_MTEXT_RT");
+    xrecord.handle = record;
+    xrecord.owner = dictionary;
+    xrecord.reactors = vec![dictionary];
+    xrecord.add_double(40, checksum("first\\Psecond"));
+    xrecord.add_string(1, stale);
+    document.objects.insert(record, ObjectType::XRecord(xrecord));
+    for entity in document.entities_mut() {
+        if let EntityType::MText(text) = entity {
+            text.common.xdictionary_handle = Some(dictionary);
+        }
+    }
+    let out = write_and_read(&document, DxfVersion::AC1015);
+    assert_eq!(the_mtext(&out).value, file, "the stale original is not restored");
+    assert_eq!(viewed_value(&out), file);
+    let kept = out.xrecord(the_mtext(&out).common.handle, "ACAD_MTEXT_RT").expect("the record stays in the model");
+    assert_eq!(kept.entries.len(), 2);
+}

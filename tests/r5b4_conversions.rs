@@ -186,7 +186,12 @@ fn an_r14_viewport_of_a_newer_drawing_states_fast_zoom_and_the_status_icon() {
         .expect("viewport");
     assert!(viewport.status.fast_zoom, "fast zoom");
     assert!(viewport.ucs_icon_visible, "icon visible");
-    assert!(viewport.ucs_at_origin, "icon at the origin");
+    // The reader puts the icon word back into the status word, where the R2000 and later files state it; the viewport's own
+    // UCS-at-origin flag (group 74), which R14 has no place for, stays clear (sample_AC1015.dwg: status at the origin, 74 clear,
+    // for the viewports whose icon word is 3 in sample_AC1014.dwg).
+    assert!(viewport.status.ucs_icon_visible, "icon visible in the status");
+    assert!(viewport.status.ucs_icon_at_origin, "icon at the origin in the status");
+    assert!(!viewport.ucs_at_origin, "the UCS-at-origin flag is not the icon's");
 }
 
 /// The classes of a DWG source keep the zombie flag their file stated: none of AutoCAD's own classes is a zombie in any of its six
