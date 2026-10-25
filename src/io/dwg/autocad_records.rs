@@ -343,11 +343,16 @@ pub(crate) struct Consumed {
     /// The changes of the layer records (colour, plot flag, line weight): a DXF writer does not put them back (a DXF layer states all
     /// three itself, and AutoCAD's DXF of R2000 has no such record).
     layer_changes: Vec<Consumption>,
+    /// The changes of the table styles' groups of the legacy rows' data types (`consume_table_style_group`): a DWG writer of R2010
+    /// or later does not put them back, as it drops such a record of a style the model holds (`dwg_writer::prepare_roundtrip_records`:
+    /// the R2010 TABLESTYLE record states the data types; AutoCAD's sample_AC1024.dwg to sample_AC1032.dwg keep the style #87's
+    /// extension dictionary empty).
+    table_style_changes: Vec<Consumption>,
 }
 
 impl Consumed {
     pub(crate) fn is_empty(&self) -> bool {
-        self.changes.is_empty() && self.style_changes.is_empty() && self.layer_changes.is_empty()
+        self.changes.is_empty() && self.style_changes.is_empty() && self.layer_changes.is_empty() && self.table_style_changes.is_empty()
     }
 
     /// The handles of the objects the reader removed from `document` (the records it applied, and the dictionaries they left empty),
@@ -359,6 +364,7 @@ impl Consumed {
             .iter()
             .chain(self.style_changes.iter())
             .chain(self.layer_changes.iter())
+            .chain(self.table_style_changes.iter())
             .filter_map(|change| match change {
                 Consumption::Object(handle, _) if !document.objects.contains_key(handle) => Some(*handle),
                 _ => None,
@@ -375,6 +381,7 @@ impl Consumed {
             .iter()
             .chain(self.style_changes.iter())
             .chain(self.layer_changes.iter())
+            .chain(self.table_style_changes.iter())
             .filter_map(|change| match change {
                 Consumption::Object(handle, _) => Some(*handle),
                 _ => None,
@@ -501,12 +508,25 @@ pub(crate) fn consume_visual_styles(document: &mut CadDocument) {
     }
 }
 
+/// Take the group `name` of the round-trip record `record` of a table style out of the model (the whole record when it holds nothing
+/// else; the style's extension dictionary stays): `objects::table_style` calls it for the legacy rows' data types it restored, when
+/// the group is exactly the one its writer states. The view and the writers put it back (`reinstate`; a DWG of R2010 or later
+/// leaves it out, as it leaves out such a record the model holds).
+pub(crate) fn consume_table_style_group(document: &mut CadDocument, record: Handle, name: &str) {
+    let before = document.consumed_records.changes.len();
+    take_groups(document, record, &[name.to_string()]);
+    let moved = document.consumed_records.changes.split_off(before);
+    document.consumed_records.table_style_changes.extend(moved);
+}
+
 /// Put back what the reader took out of the model: the objects as the file had them and their dictionary entries. An object
 /// whose dictionary is gone (its owner was deleted with it) stays out; an entry whose name the dictionary has by now stays out.
 pub(crate) fn reinstate(document: &mut CadDocument) {
     let mut changes = std::mem::take(&mut document.consumed_records.layer_changes);
     changes.extend(std::mem::take(&mut document.consumed_records.style_changes));
     changes.extend(std::mem::take(&mut document.consumed_records.changes));
+    // made after the others (the table styles are restored after `restore_document`), so put back first
+    changes.extend(std::mem::take(&mut document.consumed_records.table_style_changes));
     let mut skipped: std::collections::HashSet<Handle> = std::collections::HashSet::new();
     for change in changes.into_iter().rev() {
         match change {
@@ -1904,6 +1924,9 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     if dxf && !document.consumed_records.layer_changes.is_empty() {
         document.to_mut().consumed_records.layer_changes.clear();
     }
+    if !dxf && version >= DxfVersion::AC1024 && !document.consumed_records.table_style_changes.is_empty() {
+        document.to_mut().consumed_records.table_style_changes.clear();
+    }
     let taken = document.consumed_records.taken();
     if !document.consumed_records.is_empty() {
         reinstate(document.to_mut());
@@ -1974,14 +1997,22 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         }
     }
     // Tables.
+    // AutoCAD's R14 file shows each of the colour, the plot flag and the line weight of a layer alone in its record (after
+    // `EXTNAMES`), never two of them: the order of a record that holds more than one is not known, so such a layer states none of
+    // them (the values fall back to what the layer record holds: the index, plotting, the default weight).
+    let unknown_layout = |layer: &crate::tables::Layer| {
+        let colour = usize::from(needs(layer_color_holds, never) && !layer_color_groups(layer).is_empty());
+        let plot = if needs(layer_plot_holds, never) { layer_plot_groups(layer).len() } else { 0 };
+        colour + plot > 1
+    };
     for layer in document.layers.iter() {
         let groups = layer_color_groups(layer);
-        let wanted = if needs(layer_color_holds, never) && (converted || has_record(layer.handle) || !groups.is_empty()) { groups } else { Vec::new() };
+        let wanted = if needs(layer_color_holds, never) && !unknown_layout(layer) && (converted || has_record(layer.handle) || !groups.is_empty()) { groups } else { Vec::new() };
         jobs.push(Job { owner: layer.handle, owns: Owns::Exact(&[LAYER_ACI, LAYER_TRUE, LAYER_BOOK]), wanted, fresh: Some(Vec::new()), leave: leaves(layer_color_holds, never) });
     }
     for layer in document.layers.iter() {
         let groups = layer_plot_groups(layer);
-        let wanted = if needs(layer_plot_holds, never) && (converted || has_record(layer.handle) || !groups.is_empty()) { groups } else { Vec::new() };
+        let wanted = if needs(layer_plot_holds, never) && !unknown_layout(layer) && (converted || has_record(layer.handle) || !groups.is_empty()) { groups } else { Vec::new() };
         jobs.push(Job { owner: layer.handle, owns: Owns::Exact(&[LAYER_PLOT, LAYER_WEIGHT]), wanted, fresh: Some(Vec::new()), leave: leaves(layer_plot_holds, never) });
     }
     for view in document.views.iter() {

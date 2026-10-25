@@ -653,7 +653,9 @@ fn the_pre_2007_table_style_record_goes_with_the_first_modern_write() {
     let handle = style.handle;
     document.objects.insert(handle, ObjectType::TableStyle(style));
     for version in [DxfVersion::AC1014, DxfVersion::AC1015] {
-        let mut old = write_and_read(&document, version);
+        // the model as the file holds it: a reader takes the group it applied out of the model, the view and the writers put it
+        // back (review of R5b-10)
+        let mut old = write_and_read(&document, version).with_round_trip_records();
         assert!(has_pre2007_carrier(&old), "{version:?}: the file states the record");
         // The style of a file that has the record and no cell style map.
         for object in old.objects.values_mut() {

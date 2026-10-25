@@ -395,28 +395,39 @@ fn a_layer_colour_record_is_edited_and_dropped_with_the_version() {
     assert!(layer_groups(&up, "LAYER_COLOR_BOOK").is_none());
 }
 
-/// AutoCAD's DXF of R2000 states the layer colour in group 420 and holds no `COLORACI` record (sample_AC1015_ascii.dxf).
+/// AutoCAD's DXF of R2000 states the index of a true-colour layer only, with no 420 or 430 and no `COLORACI` record
+/// (sample_AC1015_ascii.dxf: Layer_true_color `62 150`, Layer_color_book `62 31`); its DXF of R2004 states 420 and 430
+/// (sample_AC1018_ascii.dxf). R14 mirrors R2000.
 #[test]
-fn a_dxf_holds_the_layer_colour_in_the_layer_and_no_record() {
-    let mut document = layer_document();
-    document.version = DxfVersion::AC1015;
-    let bytes = acadrust::DxfWriter::new(&document).write_to_vec().expect("DXF write");
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(!text.contains("COLORACI") && !text.contains("COLORTRUE"));
+fn a_dxf_holds_the_layer_colour_as_autocads_dxf_of_the_version_does() {
+    let write_dxf = |document: &CadDocument, version: DxfVersion| {
+        let mut document = document.clone();
+        document.version = version;
+        acadrust::DxfWriter::new(&document).write_to_vec().expect("DXF write")
+    };
+    for version in [DxfVersion::AC1014, DxfVersion::AC1015] {
+        let bytes = write_dxf(&layer_document(), version);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(!text.contains("COLORACI") && !text.contains("COLORTRUE") && !text.contains("DIC COLOR GUIDE(R)$DIC 7"), "{version:?}");
+        let read = acadrust::DxfReader::from_reader(Cursor::new(bytes)).expect("DXF reader").read().expect("DXF read");
+        assert_eq!(layer(&read, "LAYER_TRUE_COLOR").color, Color::Index(150), "{version:?}: the nearest index");
+        assert!(layer_groups(&read, "LAYER_TRUE_COLOR").is_none(), "{version:?}");
+        let book = layer(&read, "LAYER_COLOR_BOOK");
+        assert_eq!((book.color, book.book_name.as_deref(), book.color_name.as_deref()), (Color::Index(31), None, None), "{version:?}");
+        assert_eq!(layer(&read, "PLAIN").color, Color::Index(3), "{version:?}");
+    }
+    let bytes = write_dxf(&layer_document(), DxfVersion::AC1018);
     let read = acadrust::DxfReader::from_reader(Cursor::new(bytes)).expect("DXF reader").read().expect("DXF read");
     assert_eq!(layer(&read, "LAYER_TRUE_COLOR").color, Color::Rgb { r: 17, g: 146, b: 238 });
-    assert!(layer_groups(&read, "LAYER_TRUE_COLOR").is_none());
-    // the colour-book identity goes with the colour (group 430)
     assert_eq!(layer(&read, "LAYER_COLOR_BOOK").book_name.as_deref(), Some("DIC COLOR GUIDE(R)"));
     assert_eq!(layer(&read, "LAYER_COLOR_BOOK").color_name.as_deref(), Some("DIC 7"));
     // a drawing read from an R2000 DWG (colour restored from the record) is written to a DXF without the record
     let dwg = write_and_read(&layer_document(), DxfVersion::AC1015);
     assert!(layer_groups(&dwg, "LAYER_TRUE_COLOR").is_some());
-    for version in [DxfVersion::AC1015, DxfVersion::AC1018] {
-        let mut doc = dwg.clone();
-        doc.version = version;
-        let text = String::from_utf8_lossy(&acadrust::DxfWriter::new(&doc).write_to_vec().expect("DXF write")).into_owned();
-        assert!(!text.contains("COLORACI") && !text.contains("COLORTRUE") && text.contains("DIC COLOR GUIDE(R)$DIC 7"), "{version:?}");
+    for (version, book) in [(DxfVersion::AC1015, false), (DxfVersion::AC1018, true)] {
+        let text = String::from_utf8_lossy(&write_dxf(&dwg, version)).into_owned();
+        assert!(!text.contains("COLORACI") && !text.contains("COLORTRUE"), "{version:?}");
+        assert_eq!(text.contains("DIC COLOR GUIDE(R)$DIC 7"), book, "{version:?}");
     }
 }
 
@@ -449,4 +460,116 @@ fn a_layer_keeps_its_plot_flag_and_line_weight_in_an_r14_file() {
     assert!(!layer(&out, "NOPLOT").is_plottable);
     assert_eq!(layer(&out, "HEAVY").line_weight, acadrust::types::LineWeight::Value(35));
     assert!(layer_groups(&out, "NOPLOT").is_none() && layer_groups(&out, "HEAVY").is_none());
+}
+
+// ---- the legacy rows' data types of a table style (R14 to R2004) ---------------------------------------------------------------
+
+/// A drawing with a table style that has modern cell styles and a typed data row (data type 4, format `%lu2`).
+fn table_style_document() -> (CadDocument, Handle) {
+    let mut document = CadDocument::new();
+    let styles = root_entry(&document, "ACAD_TABLESTYLE");
+    let mut style = acadrust::objects::TableStyle::new("TYPED");
+    style.handle = document.allocate_handle();
+    style.owner_handle = styles;
+    let mut cell = acadrust::objects::NamedTableCellStyle::default();
+    cell.id = 1;
+    cell.name = "_TITLE".into();
+    style.modern_overrides = vec![(1, cell)];
+    style.data_row_style.data_type = 4;
+    style.data_row_style.format_string = "%lu2".into();
+    let handle = style.handle;
+    document.objects.insert(handle, ObjectType::TableStyle(style));
+    if let Some(ObjectType::Dictionary(entries)) = document.objects.get_mut(&styles) {
+        entries.add_entry("TYPED", handle);
+    }
+    (document, handle)
+}
+
+fn table_style(document: &CadDocument, handle: Handle) -> &acadrust::objects::TableStyle {
+    match document.objects.get(&handle) {
+        Some(ObjectType::TableStyle(style)) => style,
+        _ => panic!("no table style {handle:?}"),
+    }
+}
+
+/// AutoCAD's R14 to R2004 files keep the data types of a table style's rows in `ACAD_XREC_ROUNDTRIP {ACAD_ROUNDTRIP_PRE2007_TABLESTYLE
+/// 90 .., 91 .., 1 .., ..}` (sample_AC1014.dwg to sample_AC1018.dwg, the style #87). The reader applies the group and takes it out
+/// of the model when it is the one the writer states; the view and the writers put it back (under the file's handle; an edit after
+/// the read wins).
+#[test]
+fn a_table_style_group_of_the_rows_data_types_is_taken_out_of_the_model() {
+    let (source, handle) = table_style_document();
+    for version in [DxfVersion::AC1014, DxfVersion::AC1015, DxfVersion::AC1018] {
+        let out = write_and_read(&source, version);
+        let style = table_style(&out, handle);
+        assert_eq!((style.data_row_style.data_type, style.data_row_style.format_string.as_str()), (4, "%lu2"), "{version:?}");
+        assert!(out.xrecord(handle, "ACAD_XREC_ROUNDTRIP").is_none(), "{version:?}: the record is out of the model");
+        let held = out.with_round_trip_records();
+        let record = held.xrecord(handle, "ACAD_XREC_ROUNDTRIP").unwrap_or_else(|| panic!("{version:?}: the file held no record")).clone();
+        assert_eq!(record.entries.first().and_then(|entry| entry.value.as_string()), Some("ACAD_ROUNDTRIP_PRE2007_TABLESTYLE"), "{version:?}");
+        let notes = dump(&out);
+        let consumed: Vec<u64> = notes["note/consumed_records"].as_array().expect("the note").iter().filter_map(|v| v.as_u64()).collect();
+        assert!(consumed.contains(&record.handle.value()), "{version:?}: {consumed:?}");
+        // written again at the version: the file's record under its handle
+        let again = write_and_read(&out, version).with_round_trip_records();
+        assert_eq!(again.xrecord(handle, "ACAD_XREC_ROUNDTRIP").map(|record| (record.handle, record.entries.clone())), Some((record.handle, record.entries.clone())), "{version:?}");
+        // an edit after the read wins
+        let mut edited = out.clone();
+        if let Some(ObjectType::TableStyle(style)) = edited.objects.get_mut(&handle) {
+            style.data_row_style.format_string = "%lu4".into();
+        }
+        assert_eq!(table_style(&write_and_read(&edited, version), handle).data_row_style.format_string, "%lu4", "{version:?}");
+        // a DWG of R2010 or later states the data types in the TABLESTYLE record: the file holds no record and the style's extension
+        // dictionary stays empty (sample_AC1024.dwg to sample_AC1032.dwg, the style #87)
+        for to in [DxfVersion::AC1024, DxfVersion::AC1032] {
+            let up = write_and_read(&out, to).with_round_trip_records();
+            assert!(up.xrecord(handle, "ACAD_XREC_ROUNDTRIP").is_none(), "{version:?} -> {to:?}");
+            let dictionary = up.extension_dictionary_handle(handle).unwrap_or_else(|| panic!("{version:?} -> {to:?}: the dictionary"));
+            assert!(matches!(up.objects.get(&dictionary), Some(ObjectType::Dictionary(entries)) if entries.entries.is_empty()), "{version:?} -> {to:?}");
+        }
+    }
+}
+
+/// AutoCAD's R14 file shows the colour, the plot flag and the line weight of a layer each alone in its record (sample_AC1014.dwg:
+/// `EXTNAMES` and then one of them); no sample gives the order of a record that holds two, so an R14 file states none for a layer
+/// that needs two (it reads back with the index, plotting and the default weight), and a layer that needs one keeps it. An edit
+/// after the read wins.
+#[test]
+fn an_r14_layer_that_needs_two_kinds_of_record_states_none() {
+    let mut document = CadDocument::new();
+    let mut both = Layer::new("BOTH");
+    both.color = Color::Rgb { r: 17, g: 146, b: 238 };
+    both.is_plottable = false;
+    document.layers.add(both).unwrap();
+    let mut plot_weight = Layer::new("PLOT_WEIGHT");
+    plot_weight.is_plottable = false;
+    plot_weight.line_weight = acadrust::types::LineWeight::Value(35);
+    document.layers.add(plot_weight).unwrap();
+    let mut one = Layer::new("ONE");
+    one.is_plottable = false;
+    document.layers.add(one).unwrap();
+    let out = write_and_read(&document, DxfVersion::AC1014);
+    assert!(layer_groups(&out, "BOTH").is_none() && layer_groups(&out, "PLOT_WEIGHT").is_none());
+    assert_eq!(layer(&out, "BOTH").color, Color::Index(150));
+    assert!(layer(&out, "BOTH").is_plottable && layer(&out, "PLOT_WEIGHT").is_plottable);
+    assert_eq!(layer(&out, "PLOT_WEIGHT").line_weight, Layer::new("X").line_weight);
+    assert!(!layer(&out, "ONE").is_plottable, "a layer that needs one record keeps it");
+    assert_eq!(layer_groups(&out, "ONE").expect("the record").iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["PLOTBIT"]);
+    // an edit after the read wins: the layer plots again and gets a line weight
+    let mut edited = out.clone();
+    for layer in edited.layers.iter_mut() {
+        if layer.name.eq_ignore_ascii_case("ONE") {
+            layer.is_plottable = true;
+            layer.line_weight = acadrust::types::LineWeight::Value(50);
+        }
+    }
+    let again = write_and_read(&edited, DxfVersion::AC1014);
+    assert!(layer(&again, "ONE").is_plottable);
+    assert_eq!(layer(&again, "ONE").line_weight, acadrust::types::LineWeight::Value(50));
+    assert_eq!(layer_groups(&again, "ONE").expect("the record").iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["LINEWEIGHT"]);
+    // R2000 holds the plot flag and the line weight in the layer record: the colour alone needs a record
+    let out = write_and_read(&document, DxfVersion::AC1015);
+    assert_eq!(layer(&out, "BOTH").color, Color::Rgb { r: 17, g: 146, b: 238 });
+    assert!(!layer(&out, "BOTH").is_plottable && !layer(&out, "PLOT_WEIGHT").is_plottable);
+    assert_eq!(layer(&out, "PLOT_WEIGHT").line_weight, acadrust::types::LineWeight::Value(35));
 }
