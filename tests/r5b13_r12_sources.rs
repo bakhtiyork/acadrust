@@ -94,6 +94,12 @@ fn the_default_widths_of_an_r12_polyline_are_the_polylines_own_with_widths_on_th
     // The vertices keep their own widths (an explicit zero too) and the one without takes the default; the polyline keeps the default.
     let expected = (0.2, 0.1, vec![(0.3, 0.3), (0.2, 0.1), (0.0, 0.0)]);
     assert_eq!(polyline(&document), expected);
+    // The defaults are consumed into the polyline's own widths: no second copy stays in the model.
+    for entity in document.entities() {
+        if let EntityType::Polyline2D(polyline) = entity {
+            assert_eq!(polyline.source_widths, None, "the read keeps the defaults in start_width / end_width only");
+        }
+    }
     for version in DWG_VERSIONS {
         assert_eq!(polyline(&write_and_read(&document, version)), expected, "{version:?} DWG");
     }
@@ -117,6 +123,20 @@ fn an_edit_of_the_default_widths_after_the_read_is_written() {
         assert_eq!(vertices, vec![(0.3, 0.3), (0.2, 0.1), (0.0, 0.0)], "{version:?} DWG: the vertices keep their widths");
     }
     assert_eq!(polyline(&dxf_round_trip(&document, DxfVersion::AC1009)).0, 0.5);
+
+    // Defaults cleared after the read stay cleared: the file's 0.2 / 0.1 do not come back in a DXF or a DWG.
+    for entity in document.entities_mut() {
+        if let EntityType::Polyline2D(polyline) = entity {
+            polyline.start_width = 0.0;
+            polyline.end_width = 0.0;
+        }
+    }
+    let (start, end, _) = polyline(&dxf_round_trip(&document, DxfVersion::AC1009));
+    assert_eq!((start, end), (0.0, 0.0), "R12 DXF");
+    for version in DWG_VERSIONS {
+        let (start, end, _) = polyline(&write_and_read(&document, version));
+        assert_eq!((start, end), (0.0, 0.0), "{version:?} DWG");
+    }
 }
 
 // ── Table style, layouts, dimension style, text styles, viewports, classes ───────────────────────────────────────────────────
@@ -280,4 +300,45 @@ fn a_dwg_of_an_r12_file_declares_the_classes_its_records_need() {
     let fresh = write_and_read(&CadDocument::new(), DxfVersion::AC1032);
     assert!(fresh.classes.len() > 100, "{} classes", fresh.classes.len());
     assert_eq!(fresh.classes.get_by_name("TABLESTYLE").unwrap().proxy_flags.0, 4095);
+}
+
+/// The TABLESTYLE record states the style's description (ACadSharp's writer: `Description TV 3`); the name is the key of the
+/// style's ACAD_TABLESTYLE entry. The default Standard style of an R12 file has no description and keeps none in a DWG or a DXF,
+/// and a description of its own is written instead of the name.
+#[test]
+fn a_table_style_states_its_description_and_is_named_by_its_dictionary_entry() {
+    let description = |document: &CadDocument| {
+        let style = standard_table_style(document);
+        (style.name.clone(), style.description.clone())
+    };
+    let document = r12("BOXBLANK");
+    assert_eq!(description(&document), ("Standard".to_string(), String::new()));
+    for version in DWG_VERSIONS {
+        assert_eq!(description(&write_and_read(&document, version)), ("Standard".to_string(), String::new()), "{version:?} DWG");
+    }
+    let mut described = document.clone();
+    for object in described.objects.values_mut() {
+        if let acadrust::objects::ObjectType::TableStyle(style) = object {
+            style.description = "Plain grid".to_string();
+        }
+    }
+    for version in DWG_VERSIONS {
+        assert_eq!(description(&write_and_read(&described, version)), ("Standard".to_string(), "Plain grid".to_string()), "{version:?} DWG");
+    }
+    for version in [DxfVersion::AC1015, DxfVersion::AC1032] {
+        assert_eq!(description(&dxf_round_trip(&described, version)), ("Standard".to_string(), "Plain grid".to_string()), "{version:?} DXF");
+    }
+}
+
+/// The class table of an R12 document is made when it is written: an object added after the read whose record needs a class gets
+/// it (the classes are those of the finished document, not of the file read).
+#[test]
+fn an_entity_added_to_an_r12_document_has_its_class_in_the_dwg() {
+    let mut document = r12("BOXBLANK");
+    document.add_entity(EntityType::MultiLeader(Box::new(acadrust::entities::MultiLeader::new()))).unwrap();
+    for version in [DxfVersion::AC1018, DxfVersion::AC1032] {
+        let read = write_and_read(&document, version);
+        assert!(read.classes.get_by_name("MULTILEADER").is_some(), "{version:?}: the class of the added entity is declared");
+        assert!(read.entities().any(|entity| matches!(entity, EntityType::MultiLeader(_))), "{version:?}: the entity is written");
+    }
 }

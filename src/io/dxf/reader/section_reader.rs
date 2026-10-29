@@ -13648,7 +13648,6 @@ impl<'a> SectionReader<'a> {
             Ok(Some(EntityType::Polyline3D(pl)))
         } else {
             let mut pl = Polyline2D::new();
-            pl.source_widths = Some((def_start_width, def_end_width));
             pl.common = common;
             pl.seqend = seqend;
             pl.flags = PolylineFlags::from_bits(flags as u16);
@@ -13676,6 +13675,7 @@ impl<'a> SectionReader<'a> {
                 .collect();
             // The polyline's own default widths are the record's (groups 40 / 41) whether or not a vertex states widths: the
             // DWG's 2D polyline record has the fields (R13 and later) and the vertex widths, baked above, are what is drawn.
+            // They are the only copy (`source_widths` stays empty): an edit of them after the read is what a writer states.
             pl.start_width = def_start_width;
             pl.end_width = def_end_width;
             Ok(Some(EntityType::Polyline2D(pl)))

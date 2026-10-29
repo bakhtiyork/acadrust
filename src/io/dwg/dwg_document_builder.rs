@@ -3651,6 +3651,7 @@ impl DwgDocumentBuilder {
         Self::hydrate_block_markers(document);
         Self::number_paper_space_viewports(document);
         Self::list_layout_viewports(document);
+        document.name_table_styles_by_dictionary();
         document.ensure_model_layout();
 
         document.original_objects = document

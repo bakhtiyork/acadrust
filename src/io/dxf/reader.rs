@@ -636,6 +636,7 @@ impl DxfReader {
         // The current annotation scale is the CANNOSCALE entry of the variable dictionary, in a DXF as in a DWG.
         crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::reflect_annotation_scale(&mut document);
         resolve_table_style_text_styles(&mut document);
+        document.name_table_styles_by_dictionary();
         rewire_dangling_layout_block_records(&mut document);
         document.ensure_model_layout();
         if document.version == crate::types::DxfVersion::AC1009 {
@@ -1415,6 +1416,14 @@ fn resolve_table_style_text_styles(document: &mut CadDocument) {
         .filter(|(_, object)| matches!(object, ObjectType::TableStyle(_)))
         .map(|(handle, _)| *handle)
         .collect();
+    let text_style_handles: std::collections::HashSet<u64> =
+        document.text_styles.iter().map(|style| style.handle.value()).collect();
+    // A row without a handle, or with one the file gave to another record (the default Standard table style names the
+    // handle of the default Standard text style; an R12 file spells its own `STANDARD` at a handle of its own), takes the
+    // text style of its name.
+    let unresolved = |stated: Option<Handle>| {
+        stated.map_or(true, |handle| !handle.is_null() && !text_style_handles.contains(&handle.value()))
+    };
     for handle in handles {
         let Some(ObjectType::TableStyle(style)) = document.objects.get(&handle) else {
             continue;
@@ -1422,7 +1431,7 @@ fn resolve_table_style_text_styles(document: &mut CadDocument) {
         let wanted: Vec<Option<Handle>> = [&style.data_row_style, &style.header_row_style, &style.title_row_style]
             .iter()
             .map(|row| {
-                (row.text_style_handle.is_none() && !row.text_style_name.is_empty())
+                (unresolved(row.text_style_handle) && !row.text_style_name.is_empty())
                     .then(|| document.text_styles.get(&row.text_style_name).map(|text| text.handle))
                     .flatten()
             })
@@ -1500,37 +1509,6 @@ fn rewire_stale_text_style_references(document: &mut CadDocument) {
             document.objects.get_mut(&handle)
         {
             style.text_style_handle = Some(new);
-        }
-    }
-
-    // ── TABLESTYLE row styles (group 340 of each row): the default Standard table style names the default Standard
-    // text style by handle; an R12 file spells its own `STANDARD` at a handle of its own.
-    let mut stale_rows: Vec<(Handle, [Option<Handle>; 3])> = Vec::new();
-    for (handle, object) in document.objects.iter() {
-        if let crate::objects::ObjectType::TableStyle(style) = object {
-            let rows = [&style.data_row_style, &style.header_row_style, &style.title_row_style];
-            if rows.iter().any(|row| row.text_style_handle.is_some_and(is_stale)) {
-                stale_rows.push((
-                    *handle,
-                    rows.map(|row| {
-                        row.text_style_handle
-                            .filter(|stated| is_stale(*stated))
-                            .and_then(|_| resolve(document, &row.text_style_name))
-                    }),
-                ));
-            }
-        }
-    }
-    for (handle, found) in stale_rows {
-        if let Some(crate::objects::ObjectType::TableStyle(style)) = document.objects.get_mut(&handle) {
-            for (row, new) in [&mut style.data_row_style, &mut style.header_row_style, &mut style.title_row_style]
-                .into_iter()
-                .zip(found)
-            {
-                if new.is_some() {
-                    row.text_style_handle = new;
-                }
-            }
         }
     }
 }

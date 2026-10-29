@@ -4167,6 +4167,31 @@ impl CadDocument {
         Ok(layout_handle)
     }
 
+    /// A table style is named by its key in the `ACAD_TABLESTYLE` dictionary. The TABLESTYLE record states the style's
+    /// description (DXF group 3, the first text of the DWG record), which the readers take as the name as well; a style
+    /// whose description is not its name (the default Standard style of a drawing without an OBJECTS section has an empty
+    /// one) keeps the name of its entry. Visits the entries of that dictionary only.
+    pub(crate) fn name_table_styles_by_dictionary(&mut self) {
+        let Some(ObjectType::Dictionary(root)) = self.objects.get(&self.header.named_objects_dict_handle) else {
+            return;
+        };
+        let Some(styles) = root.entries.iter().find(|(key, _)| key.eq_ignore_ascii_case("ACAD_TABLESTYLE")).map(|(_, handle)| *handle)
+        else {
+            return;
+        };
+        let entries = match self.objects.get(&styles) {
+            Some(ObjectType::Dictionary(dictionary)) => dictionary.entries.clone(),
+            _ => return,
+        };
+        for (key, handle) in entries {
+            if let Some(ObjectType::TableStyle(style)) = self.objects.get_mut(&handle) {
+                if style.name != key {
+                    style.name = key;
+                }
+            }
+        }
+    }
+
     pub fn ensure_model_layout(&mut self) {
         // Layouts name their record; a record left without the back link
         // (R13/R14 block headers have none) takes it from its layout.

@@ -1162,8 +1162,9 @@ impl<'a> DwgObjectWriter<'a> {
         };
         self.write_common_non_entity_data(type_code, value.handle, value.owner_handle, &[], &None);
 
+        // The record's text is the style's description (its name is the key of its dictionary entry).
         if !self.version.r2010_plus() {
-            self.writer.write_variable_text(&value.name);
+            self.writer.write_variable_text(&value.description);
             self.writer.write_bit_short(value.flow_direction as i16);
             self.writer
                 .write_bit_short(value.effective_flags().bits() & !STALE_TABLE_STYLE_FLAG);
@@ -1176,7 +1177,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.write_legacy_table_row_style(&value.header_row_style);
         } else {
             self.writer.write_byte(value.modern_unknown_byte);
-            self.writer.write_variable_text(&value.name);
+            self.writer.write_variable_text(&value.description);
             // The R2010+ flags field carries the table style flags.
             // Bit 8 of the flags, which older files carry, is not a style flag; the R2010+ record of AutoCAD's own
             // files states it (the first long is 8 in every sample of R2010 to R2018), so it is written as the

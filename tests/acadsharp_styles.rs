@@ -181,7 +181,8 @@ fn dwg_table_reader_retains_description_and_legacy_source_before_normalization()
                 }
             })
             .unwrap();
-        style.name = "Stored description".into(); // native writer's existing source-string slot
+        // The record's text is the description (ACadSharp's DwgObjectWriter: `Description TV 3`); the name is the dictionary key.
+        style.description = "Stored description".into();
         let restored = DwgReader::from_stream(Cursor::new(DwgWriter::write_to_vec(&doc).unwrap()))
             .read()
             .unwrap();
@@ -197,6 +198,7 @@ fn dwg_table_reader_retains_description_and_legacy_source_before_normalization()
             })
             .unwrap();
         assert_eq!(style.description, "Stored description");
+        assert_eq!(style.name, "Standard", "the name is the key of the ACAD_TABLESTYLE entry, not the description");
         assert_eq!(style.legacy_source.is_some(), version < DxfVersion::AC1024);
         let mut native = style.clone();
         native.legacy_source = None;
