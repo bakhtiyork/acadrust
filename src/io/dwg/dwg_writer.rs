@@ -76,6 +76,7 @@ impl DwgWriter {
         prepare_roundtrip_records(&mut prepared);
         let target = prepared.version;
         crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, target);
+        crate::io::dwg::autocad_conversions::unrestore_book_colors(&mut prepared, target);
         prepare_book_colors(&mut prepared)?;
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, target, false);
         crate::io::dwg::autocad_records::prepare_for_write(&mut prepared, target, false);
@@ -195,6 +196,7 @@ impl DwgWriter {
         prepare_roundtrip_records(&mut prepared);
         let target = prepared.version;
         crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, target);
+        crate::io::dwg::autocad_conversions::unrestore_book_colors(&mut prepared, target);
         prepare_book_colors(&mut prepared)?;
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, target, false);
         crate::io::dwg::autocad_records::prepare_for_write(&mut prepared, target, false);
