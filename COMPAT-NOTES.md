@@ -2067,3 +2067,75 @@ Corrections to the R5b-11 section above:
 Counts (clean build): G5-RR **180** / 288 (above); RC same-version 42 / 42; RC sample_V 9 / 36 (6 allowed + 3 reported); idem 283 / 288; C# -> fork 204; per cell, every check but G5-RR as in r11-k, and G5-RR differs in 37 cells (sample_AC1015 / AC1018 / AC1021 sources, the dynamic blocks, sample_base/empty.dwg at AC1014; geoloc at AC1014 / AC1015 / AC1018), each only by rows of the deleted rules. G4 RR 94, RC 94, idem 96 (every cell and rule count as in r11-g4). G1 45 / 49 (rs-gap.tsv identical to the agent's gap2). Determinism: `tests/r5b4_write_determinism.rs`; pinned `write-dwg` of sample_AC1032.dwg at AC1014 / AC1015, sample_AC1015.dwg at AC1014 / AC1018, sample_AC1014.dwg at AC1014 / AC1015, `write-dxf` of sample_AC1018.dwg and sample_AC1015.dwg at AC1015: the same bytes twice. Tests 2,686 passed, 0 failed, 60 ignored, 0 warnings.
 
 Open / owner questions: the R14 fast-zoom word (lossless 0 or AutoCAD's 1); the R14 records AutoCAD keeps and the fork does not write (`ACADR14ROUNDTRIP` of dimension styles, the viewport / view / VPORT `UCS` / `VIEW` / `NEWVIEWCONTROL` groups, the header chain), the R14 DIMBLK name, the VX table and viewport numbering; the R12 polyline default widths; the up-save of R14 names into a DXF of R2000 or later carries the `EXTNAMES` group (AutoCAD's up-saves drop it; no sample of a DXF up-save). UNVERIFIED: AutoCAD opening the fork's R14 files (duplicate or long upper-case names, the VX table).
+
+## R5b-12: the R14 round-trip records AutoCAD keeps (2026-10-29)
+
+Fork tree: r5a at fa5d779 + working-tree changes (nothing committed); CadKit-wt-r5a at dd1769b + working-tree changes to `Tools/g4-native-compare.py`, `g5-rr-allowlist.json`, `g4-allowlist.json`. Runs: CadKit `build.noindex/r12b-g5` (G5, per version, AC1014 last), `r12-g4` (G4), fork `target.noindex/gap12` (G1). Evidence: AutoCAD's own sample_AC1014.dwg against sample_AC1015.dwg to sample_AC1032.dwg.
+
+### Counts
+
+| | before (rv11-g5) | after |
+|---|---|---|
+| G5-RR (288) | 180 (same 41 / 42, up 30 / 59, down 109 / 187) | **200** (same 41 / 42, up 30 / 59, down **129** / 187); per target AC1014 **21** (was 1), others unchanged; exact 20 |
+| unexplained RR rows | 3,109 (cells counted by the report) | **2,539** |
+| RC same-version / sample_V / idem / C# -> fork | 42/42, 9/36, 283/288, 204 | unchanged |
+| G4 (96) | RR 94, RC 94, idem 96 | RR 94, RC 94, idem 96 (after G4-538..542; before them RC was 92) |
+| G1 | 45 / 49 | 45 / 49 (rs-gap.tsv identical) |
+| suite | 2,686 | **2,693 passed, 0 failed, 60 ignored**, 0 warnings (`cargo build --lib`, with the feature, `--bin acad-dump`) |
+
+sample_V unexplained rows per cell (rv11-g5 > r12b-g5): AC1015 -> AC1014 529 > 526, AC1018 483 > 480, AC1024 392 > 383, AC1027 320 > 311, AC1032 296 > 287; AC1014 -> AC1015 563 > 556, -> AC1018 531 > 524, -> AC1024 459 > 455, -> AC1027 351 > 343, -> AC1032 339 > 331; the other cells are unchanged. The big sets stay: the 108 absent XRecords of AutoCAD's R14 file are mostly the 28 dictionary-key `EXTNAMES` records and the 31 other header-chain records, plus the DSTYLE extended data of dimensions and leaders.
+
+### Records (versions; DWG / DXF; state; evidence)
+
+| record | versions | DWG / DXF | state |
+|---|---|---|---|
+| dimension style `ACADR14ROUNDTRIP {DSTYLE {278 DIMDSEP, 342 DIMBLK, 371 DIMLWD}}` | R14 | DWG | **fixed** (R / W / view); sample: ISO-25, Beschriftung 278 = 44, custom_style_ltypes 342 = #C80, 371 = 15; byte-equal to the sample's entries in the test and in the C# dump of the fork's file. Variables no sample shows (DIMLWE 372, DIMBLK1 / 2, DIMLDRBLK) are not written. Order of 278 against 342 / 371 UNVERIFIED (ascending codes) |
+| R14 DIMBLK name form | R14 | DWG header and dimension style | **fixed** for `_BoxBlank` -> `BOXBLANK` (sample header and style); other standard arrowheads keep the block's name, UNVERIFIED |
+| viewport `{UCS 74 71 10 10 10 146 79}` `{VIEW 281}` | R14 | DWG | **fixed** (R / W / view); 6 of 6 viewports of the sample. `{NEWVIEWCONTROL 280 4}` (4 in all six) has no model field and no other value in any sample: **open**, neither read nor written |
+| VPORT `*ACTIVE`, view `view_custom` `{UCS (74 71 / 72) ..}` `{VIEW 281}` | R14 | DWG | **fixed** (R / W / view); the sample's single VPORT and view |
+| header chain `ACDBHEADERROUNDTRIPXREC` | R14 | DWG | **partial**: `INSUNITS` and `DIMSTYLEDATA` (the header's DIMBLK handle, DIMLWD, DIMDSEP) fixed (R / W / view). **Open** (31 of 33 records): TSTACKALIGN, TSTACKSIZE, HYPERLINKBASE, STYLESHEET, LAYOUTDICT, PLOTSETDICT, PLOTSTYLNAMDICT, CEPSNTYPE, FINGERPRINTGUID, VERSIONGUID, PSVPSCALE, 14 PUCS / UCS records (the model has no fields or derives them) and `LWETCUNION` (90 = 10781, a packed word whose mapping is in no sample) |
+| VX table | R14 | DWG | **fixed**: records only for the viewports of the active paper space (AutoCAD 3, the fork 7), the reserved record is on. `previous_entry` of the record `1` (AutoCAD: the record of the second viewport) is **open** (one layout in the sample) |
+| dictionary-key `EXTNAMES` (28 records) | R14 | DWG | **open**; the sample's rule is not one rule: root keys, TABLESTYLE, MLEADERSTYLE, LAYERSTATES, IMAGE_DICT, PDFDEFINITIONS and the extension dictionaries' `AcDb...` keys are upper-cased with a record; ACAD_LAYOUT, ACAD_VISUALSTYLE, ACAD_MLINESTYLE, SECTIONVIEWSTYLE, DETAILVIEWSTYLE and valid material names keep their case and still get a record; ACAD_COLOR only invalid names. Names over 31 characters, names differing only in case and R14-forbidden characters: no sample (reported). Not changed: every consumer of the keys (variable dictionary, layouts) would need the same restore |
+| `EXTNAMES` in a DXF up-save of an R14 file | | DXF | **not changed**: no AutoCAD DXF of an R14 file exists in the samples; AutoCAD's R2000 DXF of the drawing has none, the fork's DXF of sample_AC1014.dwg carries 85 (the reinstated consumed records), and G4-RC compares it against the C# dump of the DWG, which has them |
+
+### Item 3: R12 polyline default widths
+
+The fork neither drops nor invents a width. The DXF reader bakes the default into each vertex without widths of its own (a vertex with its own 40 / 41, even 0, keeps it); the DWG states those vertex widths. AutoCAD's conversion of the same polylines does the same (sample_AC1014.dwg #35B: vertex widths 0.2 / 0.1, 0, 0, 0, 0.1 / 0.5; #4A6: constant width 0.15). The only row is the provenance member `source_widths` (G5-RR-271 widened from exactly [0, 0] to any two numbers -> null, with that evidence).
+
+### Item 4: the two doubts of the R5b-11 review
+
+* G5-RR-220 (layer material): narrowed to exactly the handle of the input's material named Global (every layer of AutoCAD's R2007 and later DXF twins states 347 = 98, the Global material), new relation `input_handle_of_named_output_const`.
+* G5-RR-207 / 208 / 210 / 211 MText family: now requires that the input MText holds a paragraph break (the only text `ACAD_MTEXT_RT` is stated for); family key `mtext_break`.
+
+### Item 5: unexplained rows per family (2,539 rows, after)
+
+(a) fork defect fixed: viewport / VX / dimstyle / header rows (above; 293 > 89 viewport rows, 143 > 0 VX rows, 38 dimdsep, 44 + 19 header). (b) format limit, rule added: DimStyle.dimblk_name (G5-RR-273, relation `input_empty_output_arrow_name`), header and header-reference arrowhead names (274, 275), the VX table (261..263 re-added, tightened: the records' viewports are entities of one block, relation `vx_table_added`). Open, unexplained: R12 doc classes 1,339 / 23 (no AutoCAD evidence for R12 sources), Table flat layout cells (edge_flags 126, value_flags 36, contents 72, legacy / override / auto_fit / block_scale 72, geometry 81: out of scope), Solid3D 128 + Region 64 SAT -> SAB (out of scope), MultiLeader text attachment 54 (out of scope), `Dictionary.<record>` 60 / `xdictionary` 48 (the empty extension dictionaries of the R12 sources' viewports and layouts, no AutoCAD R12 evidence), TextStyle records 36 (R12 unnamed styles), Viewport fast_zoom 36 (owner question, below), Viewport custom_scale 25, Layout viewports 36, BookColor 56, TableStyle 54, block_record 20 (*PAPER_SPACE0 numbering), Tolerance 6, Leader 20 (R14 dimension / leader DSTYLE extended data: AutoCAD keeps variable overrides in `1000 DSTYLE` xdata of the dimension; not attempted).
+
+### Fixes (R = reader, W = writer, V = ACadSharp view, T = tooling)
+
+* R/W/V dimension style: `io/dwg/autocad_records.rs` `dim_style_groups`, `dim_style_values`, `restore_dim_style`, `unrestored_dim_style` (`compat/acadsharp/tables.rs`); W `object_writer/mod.rs` (R14 DIMBLK name), `header_writer.rs` (`r14_arrow_name`).
+* R/W/V UCS and render mode: `ucs_groups`, `ucs_values`, `restore_viewport_ucs` / `restore_vport_ucs` / `restore_view_ucs`, `unrestored_viewport_ucs` / `_vport_ucs` / `_view_ucs`; jobs in `prepare_for_write` (before the shade plot job of a viewport, after the display job of a view).
+* R/W/V header chain: `header_roundtrip_wanted`, `restore_header_roundtrip`, `state_header_roundtrip`; V `compat/acadsharp/header.rs` (InsUnits, DimensionLineWeight, DimensionDecimalSeparator, DimensionBlockName).
+* W `io/dwg/dwg_writer.rs` `prepare_legacy_document` (VX records of the active paper space, the reserved record on).
+* T `Tools/g4-native-compare.py`: relations `input_handle_of_named_output_const`, `input_numbers_output_const`, `input_empty_output_arrow_name`, `_vx_viewports_in_one_paper_space`, family key `mtext_break`; self-tests for each.
+
+### Rules
+
+* G5-RR: narrowed 220; extended 207, 208, 210, 211 (`mtext_break`); widened 271 (evidence above); added 273, 274, 275; re-added 261, 262, 263 (tightened). None deleted. Every rule states its source (`any`) and exact replacement values.
+* G4-RC: added G4-538 (Viewport.UcsPerViewport false -> true), 539 (DimensionStyle.DecimalSeparator 46 -> 44), 540 (InsUnits 0 -> 1), 541 (DimensionLineWeight -2 -> 15), 542 (DimensionBlockName BOXBLANK -> _BoxBlank), source dwg R14 only: D-b, ACadSharp reads the R14 file without the records the fork now restores and writes to the DXF.
+
+### Changed older tests
+
+* `tests/r5b3_dwg_roundtrip.rs` `a_partial_vx_table_of_an_r14_drawing_is_filled_for_the_active_paper_space_only`: a converted drawing has records for the active paper space only (it asserted a record for every viewport; evidence sample_AC1014.dwg: 3 records for 6 viewports), the kept-record and refill checks stay.
+* `tests/r5a5_dwg_to_dxf.rs` `an_r14_viewport_has_the_world_axes_and_gets_its_view_parameters_back_from_the_dxf`: the viewport's own flag `ucs_at_origin` (group 74) now survives R14 in the UCS group (sample: 74 is not the icon bit).
+* `tests/r5b_dwg_roundtrip.rs` `handle_seed_does_not_grow_with_round_trips`: the R14 seed 5022 (the header chain dictionary and its INSUNITS record, 2 objects); stable over rewrites.
+
+### Tests
+
+`cargo test --features acadsharp-compat --no-fail-fast`: **2,693 passed, 0 failed, 60 ignored**. `tests/r5b12_records.rs` (7 tests, revert-checked: dimension style and edit, UCS groups, header chain, header arrow name, VX; the in-memory-default test is a negative test): dimension style (write, consume, view, R2000, edit wins), UCS groups of viewport / VPORT / view (write, consume, view, R2000, edit wins), header chain, arrowhead name, VX of the active paper space. Python: `g4-compare.py --self-test` (491 rules), `g5-roundtrip.py --self-test`, `g4-native-compare.py --self-test` on g5-rr (198 rules) and g4-rr (58), `g5-twin-rules.py --check` (up to date).
+
+### Doubts and UNVERIFIED
+
+* Open owner question (not decided): the R14 viewport fast zoom (lossless 0, AutoCAD 1).
+* UNVERIFIED: AutoCAD opening the fork's R14 files (records, arrowhead name, VX table), the order of 278 against 342 / 371, other arrowheads, a header chain with only some of its 33 records, the `DIMSTYLEDATA` of a drawing with default variables (no record is written).
+* G5 runs: AC1015 .. AC1032 on the build before the view fix of `DimensionBlockName` and the re-added VX rules (both affect AC1014 cells and the C# view only); AC1014 and G4 were rerun after them. G8 not measured: the new passes run for R14 files only (`restore_document`, `prepare_legacy_document`).

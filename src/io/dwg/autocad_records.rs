@@ -996,6 +996,9 @@ fn restore_viewport(viewport: &mut crate::entities::Viewport, groups: &[Group], 
         viewport.brightness = display.brightness;
         viewport.contrast = display.contrast;
     }
+    if !ucs_holds(version) {
+        applied.extend(restore_viewport_ucs(viewport, groups));
+    }
     if !shade_plot_holds(version) {
         for group in groups.iter().filter(|group| group.name == SHADE_PLOT) {
             if let [entry] = group.entries.as_slice() {
@@ -1017,11 +1020,15 @@ fn vport_prefix(vport: &crate::tables::VPort) -> String {
 /// What the readers leave in the display fields of a VPORT, view or VIEWPORT entity, for the ACadSharp view.
 #[cfg(feature = "acadsharp-compat")]
 pub(crate) fn unrestored_vport(document: &CadDocument, vport: &crate::tables::VPort) -> Option<crate::tables::VPort> {
-    if !masked(document, display_holds) {
+    if !masked(document, display_holds) && !masked(document, ucs_holds) {
         return None;
     }
     let defaults = crate::tables::VPort::new(vport.name.clone());
     let mut shown = vport.clone();
+    unrestored_vport_ucs(document, &mut shown);
+    if !masked(document, display_holds) {
+        return Some(shown);
+    }
     shown.visual_style_handle = defaults.visual_style_handle;
     shown.grid_flags = defaults.grid_flags;
     shown.grid_major = defaults.grid_major;
@@ -1034,11 +1041,15 @@ pub(crate) fn unrestored_vport(document: &CadDocument, vport: &crate::tables::VP
 
 #[cfg(feature = "acadsharp-compat")]
 pub(crate) fn unrestored_view(document: &CadDocument, view: &crate::tables::View) -> Option<crate::tables::View> {
-    if !masked(document, display_holds) {
+    if !masked(document, display_holds) && !masked(document, ucs_holds) {
         return None;
     }
     let defaults = crate::tables::View::new(view.name.clone());
     let mut shown = view.clone();
+    unrestored_view_ucs(document, &mut shown);
+    if !masked(document, display_holds) {
+        return Some(shown);
+    }
     shown.visual_style_handle = defaults.visual_style_handle;
     shown.camera_plottable = defaults.camera_plottable;
     Some(shown)
@@ -1048,11 +1059,13 @@ pub(crate) fn unrestored_view(document: &CadDocument, view: &crate::tables::View
 pub(crate) fn unrestored_viewport(document: &CadDocument, viewport: &crate::entities::Viewport) -> Option<crate::entities::Viewport> {
     let display = masked(document, display_holds);
     let shade = masked(document, shade_plot_holds);
-    if !display && !shade {
+    let ucs = masked(document, ucs_holds);
+    if !display && !shade && !ucs {
         return None;
     }
     let defaults = crate::entities::Viewport::new();
     let mut shown = viewport.clone();
+    unrestored_viewport_ucs(document, &mut shown);
     if display {
         shown.visual_style_handle = defaults.visual_style_handle;
         shown.grid_flags = defaults.grid_flags;
@@ -1651,6 +1664,11 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
             take_chain(document, record);
         }
     }
+    if !header_roundtrip_holds(version) {
+        for record in restore_header_roundtrip(document) {
+            take_chain(document, record);
+        }
+    }
     let found = scan(document, !block_data_holds(version), !mlatt_holds(version), !mtext_rt_holds(version));
     for record in restore_block_data(document, &found.blocks) {
         take_chain(document, record);
@@ -1721,6 +1739,9 @@ fn restore_record(
         }
         return applied;
     }
+    if let Some(style) = document.dim_styles.iter_mut().find(|style| style.handle == owner) {
+        return if dim_style_holds(version) { Vec::new() } else { restore_dim_style(style, groups) };
+    }
     match document.objects.get_mut(&owner) {
         Some(object) if view_style_base(object).is_some() => {
             return match view_style_base_mut(object).filter(|_| !view_style_holds(version)) {
@@ -1738,7 +1759,14 @@ fn restore_record(
         None => {}
     }
     if let Some(view) = document.views.iter_mut().find(|view| view.handle == owner) {
-        return if display_holds(version) { Vec::new() } else { restore_view(view, groups) };
+        let mut applied = if display_holds(version) { Vec::new() } else { restore_view(view, groups) };
+        if !ucs_holds(version) {
+            applied.extend(restore_view_ucs(view, groups));
+        }
+        return applied;
+    }
+    if let Some(vport) = document.vports.iter_mut().find(|vport| vport.handle == owner) {
+        return if ucs_holds(version) { Vec::new() } else { restore_vport_ucs(vport, groups) };
     }
     // Look before taking the entity: only a viewport or a solid changes.
     let wanted = match document.get_entity(owner) {
@@ -2502,6 +2530,16 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         let wanted = if needs(layer_plot_holds, never) && !unknown_layout(layer) && (converted || has_record(layer.handle) || !groups.is_empty()) { groups } else { Vec::new() };
         jobs.push(Job { owner: layer.handle, owns: Owns::Exact(&[LAYER_PLOT, LAYER_WEIGHT]), wanted, fresh: Some(Vec::new()), leave: leaves(layer_plot_holds, never) });
     }
+    for style in document.dim_styles.iter() {
+        let wanted = if needs(dim_style_holds, never) { dim_style_groups(style) } else { Vec::new() };
+        jobs.push(Job { owner: style.handle, owns: Owns::Exact(&[R14_ROUNDTRIP]), wanted, fresh: None, leave: leaves(dim_style_holds, never) });
+    }
+    for vport in document.vports.iter() {
+        let wanted = if needs(ucs_holds, never) { vport_ucs_wanted(vport) } else { Vec::new() };
+        let unchanged = wanted == vport_ucs_wanted(&crate::tables::VPort::new(vport.name.clone()));
+        let wanted = if converted || has_record(vport.handle) || !unchanged { wanted } else { Vec::new() };
+        jobs.push(Job { owner: vport.handle, owns: Owns::Exact(&[UCS_GROUP, VIEW_GROUP]), wanted, fresh: None, leave: leaves(ucs_holds, never) });
+    }
     for view in document.views.iter() {
         let defaults = crate::tables::View::new(view.name.clone());
         let differs = view.camera_plottable != defaults.camera_plottable || view.visual_style_handle != defaults.visual_style_handle;
@@ -2513,6 +2551,12 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             }
         }
         jobs.push(Job { owner: view.handle, owns: Owns::Exact(&[CAMERA_PLOTTABLE, VISUAL_STYLE]), wanted, fresh: None, leave: leaves(display_holds, never) });
+    }
+    for view in document.views.iter() {
+        let wanted = if needs(ucs_holds, never) { view_ucs_wanted(view) } else { Vec::new() };
+        let unchanged = wanted == view_ucs_wanted(&crate::tables::View::new(view.name.clone()));
+        let wanted = if converted || has_record(view.handle) || !unchanged { wanted } else { Vec::new() };
+        jobs.push(Job { owner: view.handle, owns: Owns::Exact(&[UCS_GROUP, VIEW_GROUP]), wanted, fresh: None, leave: leaves(ucs_holds, never) });
     }
     let control = document.vports.handle();
     if !control.is_null() {
@@ -2533,6 +2577,11 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         let handle = entity.common().handle;
         match entity {
             crate::entities::EntityType::Viewport(viewport) => {
+                // The UCS and the render mode come first (sample_AC1014.dwg), then the shade plot mode and the display settings.
+                let wanted = if needs(ucs_holds, never) { viewport_ucs_wanted(viewport) } else { Vec::new() };
+                let unchanged = wanted == viewport_ucs_wanted(&crate::entities::Viewport::new());
+                let wanted = if converted || has_record(handle) || !unchanged { wanted } else { Vec::new() };
+                jobs.push(Job { owner: handle, owns: Owns::Exact(&[UCS_GROUP, VIEW_GROUP]), wanted, fresh: None, leave: leaves(ucs_holds, never) });
                 // AutoCAD's record states the shade plot mode first, then the display settings (sample_AC1014.dwg, sample_AC1015.dwg).
                 let wanted = if needs(shade_plot_holds, shade_plot_dxf) && (converted || has_record(handle) || viewport.shade_plot_mode != 0) {
                     vec![Group::new(SHADE_PLOT, vec![XRecordEntry::int16(70, viewport.shade_plot_mode)])]
@@ -2574,6 +2623,26 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         (wanted.is_some() || (header_chain && header_chain_applied(document))).then_some(wanted)
     } else {
         header_chain.then_some(None)
+    };
+    // The header variables R14 has no place for. A document converted from another version states the records AutoCAD does; one written
+    // again at R14 keeps the records its chain has (the records of the others stay in the model), and states a record it lacks only
+    // for a value that differs from what a reader of a file without it gives.
+    const HEADER_RECORDS: [&str; 2] = [DIMSTYLEDATA, INSUNITS];
+    let header_rt: Option<Vec<(&'static str, Vec<XRecordEntry>)>> = if needs(header_roundtrip_holds, never) {
+        let mut wanted = header_roundtrip_wanted(&document.header);
+        if !converting {
+            let defaults = header_roundtrip_wanted(&crate::document::HeaderVariables::default());
+            wanted.retain(|(name, entries)| {
+                header_roundtrip_record(document, name).is_some()
+                    || (written_again_dwg && defaults.iter().find(|(default, _)| default == name).map_or(true, |(_, default)| default != entries))
+            });
+        }
+        (!wanted.is_empty() || HEADER_RECORDS.iter().any(|name| header_roundtrip_record(document, name).is_some())).then_some(wanted)
+    } else if has_header_roundtrip(document) && !dxf {
+        // A version that holds the values itself: the records the reader applied go (they are put back above), as AutoCAD's up-save drops them.
+        Some(Vec::new())
+    } else {
+        None
     };
     // The scale-uniformly flag of the blocks: a document written again at the version it was read from states the chain only for the
     // blocks that had one (a file of that version without the chain holds the flag some other way, or not at all).
@@ -2675,6 +2744,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         Vec::new()
     };
     if jobs.is_empty()
+        && header_rt.is_none()
         && header_vars.is_none()
         && block_jobs.is_empty()
         && wanted_multilines.is_empty()
@@ -2725,6 +2795,9 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     if let Some(wanted) = header_vars {
         state_header_vars(owned, version, wanted);
     }
+    if let Some(wanted) = header_rt {
+        state_header_roundtrip(owned, version, wanted, &HEADER_RECORDS);
+    }
     for (block, uniform) in block_jobs {
         state_block_data(owned, &mut ext, block, version, uniform);
     }
@@ -2755,4 +2828,420 @@ fn header_chain_applied(document: &CadDocument) -> bool {
                 _ => false,
             }
     })
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// What R14 has no field for in a dimension style, a VPORT, a view and a viewport (R14 DWG; R5b-12). AutoCAD's own R14 file of the
+// drawing (sample_AC1014.dwg from sample_AC1015.dwg to sample_AC1032.dwg) keeps them in `ACAD_XREC_ROUNDTRIP`:
+//
+// * a dimension style: `{ACADR14ROUNDTRIP 1000 DSTYLE 1002 { (1070 <group code of the variable> <value>)... 1002 }}` for the variables
+//   R14's record lacks: DIMDSEP (278, value 70; ISO-25 and Beschriftung state 44), DIMBLK (342, the handle 340 of the arrowhead's
+//   block record; custom_style_ltypes states `#C80`) and DIMLWD (371, value 70; custom_style_ltypes states 15). A style whose three
+//   variables are the defaults (46, none, -2: the other three styles) has none. The sample shows the pair 342, 371 in that order and
+//   no style with 278 besides: the order is the codes' (UNVERIFIED for a style that has 278 and another).
+// * a viewport, a VPORT and a view: `{UCS ..}` and `{VIEW 281}`. The UCS group is the head, the UCS origin, x axis and y axis (three
+//   groups 10), the elevation (146) and the orthographic type (79): the head of a viewport and a VPORT is `74` (the UCS icon at the
+//   origin) and `71` (the UCS per viewport), the head of a view `72` (a UCS is associated); VIEW is the render mode (281). Every
+//   viewport (6), the VPORT and the view of the sample has both groups, in the record after `EXTNAMES`, a view's after the display
+//   groups (`CAMERAPLOTTABLE`, `VISUALSTYLE`), a viewport's before the shade plot and display groups. A viewport also states
+//   `{NEWVIEWCONTROL 280 4}` between VIEW and SHADEPLOT, 4 in all six: no field of the model matches it and the sample shows no other
+//   value, so it is neither written nor read (it stays in a record the reader finds).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const R14_ROUNDTRIP: &str = "ACADR14ROUNDTRIP";
+const DSTYLE: &str = "DSTYLE";
+const UCS_GROUP: &str = "UCS";
+const VIEW_GROUP: &str = "VIEW";
+
+/// Whether a dimension style of `version` holds DIMDSEP, DIMBLK and DIMLWD itself.
+pub(crate) fn dim_style_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1015
+}
+
+/// Whether a viewport, VPORT and view of `version` hold their UCS and render mode.
+pub(crate) fn ucs_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1015
+}
+
+/// The name R14 states for an arrowhead block (DIMBLK): AutoCAD's own R14 file states `BOXBLANK` for the block `_BoxBlank` both in the
+/// header and in the dimension style (sample_AC1014.dwg, G5-RC-S012). The sample shows this one arrowhead only; another standard
+/// arrowhead is stated under the name of its block as before (UNVERIFIED how R14 spells it).
+pub(crate) fn r14_arrow_name(block: &str) -> Option<&'static str> {
+    const NAMES: [(&str, &str); 1] = [("_BoxBlank", "BOXBLANK")];
+    NAMES.iter().find(|(name, _)| name.eq_ignore_ascii_case(block)).map(|(_, r14)| *r14)
+}
+
+fn dim_style_defaults() -> crate::tables::DimStyle {
+    crate::tables::DimStyle::new("")
+}
+
+fn dim_style_groups(style: &crate::tables::DimStyle) -> Vec<Group> {
+    let defaults = dim_style_defaults();
+    let mut data: Vec<XRecordEntry> = Vec::new();
+    if style.dimdsep != defaults.dimdsep {
+        data.extend([XRecordEntry::int16(1070, 278), XRecordEntry::int16(70, style.dimdsep)]);
+    }
+    if !style.dimblk.is_null() {
+        data.extend([XRecordEntry::int16(1070, 342), XRecordEntry::handle(340, style.dimblk)]);
+    }
+    if style.dimlwd != defaults.dimlwd {
+        data.extend([XRecordEntry::int16(1070, 371), XRecordEntry::int16(70, style.dimlwd)]);
+    }
+    if data.is_empty() {
+        return Vec::new();
+    }
+    let mut entries = vec![XRecordEntry::string(1000, DSTYLE), XRecordEntry::string(1002, "{")];
+    entries.extend(data);
+    entries.push(XRecordEntry::string(1002, "}"));
+    vec![Group::new(R14_ROUNDTRIP, entries)]
+}
+
+/// The variables a `DSTYLE` group states: `(group code, value)`; `None` when the group is not of the shape AutoCAD writes (a variable
+/// no sample shows, a value of another type, a repeated variable).
+fn dim_style_values(group: &Group) -> Option<Vec<(i16, XRecordValue)>> {
+    let entries = group.entries.as_slice();
+    let is = |entry: &XRecordEntry, code: i32, text: &str| entry.code == code && entry.value.as_string() == Some(text);
+    let (open, rest) = entries.split_first()?;
+    let (head, rest) = rest.split_first()?;
+    let (close, pairs) = rest.split_last()?;
+    if !is(open, 1000, DSTYLE) || !is(head, 1002, "{") || !is(close, 1002, "}") || pairs.len() % 2 != 0 {
+        return None;
+    }
+    let mut values: Vec<(i16, XRecordValue)> = Vec::new();
+    for pair in pairs.chunks(2) {
+        let (name, value) = (&pair[0], &pair[1]);
+        let XRecordValue::Int16(code) = name.value else { return None };
+        if name.code != 1070 {
+            return None;
+        }
+        match (code, value.code, &value.value) {
+            (278 | 371, 70, XRecordValue::Int16(_)) => {}
+            (342, 340, XRecordValue::Handle(handle)) if !handle.is_null() => {}
+            _ => return None,
+        }
+        if values.iter().any(|(seen, _)| *seen == code) {
+            return None;
+        }
+        values.push((code, value.value.clone()));
+    }
+    (!values.is_empty()).then_some(values)
+}
+
+/// Restore DIMDSEP, DIMBLK and DIMLWD of a dimension style from its `ACADR14ROUNDTRIP` group; the groups applied.
+fn restore_dim_style(style: &mut crate::tables::DimStyle, groups: &[Group]) -> Vec<String> {
+    let mut applied = Vec::new();
+    for group in groups.iter().filter(|group| group.name == R14_ROUNDTRIP) {
+        let Some(values) = dim_style_values(group) else { continue };
+        for (code, value) in values {
+            match (code, value) {
+                (278, XRecordValue::Int16(value)) => style.dimdsep = value,
+                (371, XRecordValue::Int16(value)) => style.dimlwd = value,
+                (342, XRecordValue::Handle(handle)) => style.dimblk = handle,
+                _ => {}
+            }
+        }
+        applied.push(group.name.clone());
+    }
+    applied
+}
+
+/// What ACadSharp reads of a dimension style of a file of its own version that lacks DIMDSEP, DIMBLK and DIMLWD (R14): the defaults.
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn unrestored_dim_style(document: &CadDocument, style: &crate::tables::DimStyle) -> Option<crate::tables::DimStyle> {
+    if !masked(document, dim_style_holds) {
+        return None;
+    }
+    let defaults = dim_style_defaults();
+    let mut shown = style.clone();
+    shown.dimdsep = defaults.dimdsep;
+    shown.dimlwd = defaults.dimlwd;
+    shown.dimblk = defaults.dimblk;
+    Some(shown)
+}
+
+/// The UCS of a viewport, a VPORT or a view as the groups of its round-trip record: `head` is the entries before the UCS origin.
+fn ucs_groups(head: Vec<XRecordEntry>, origin: crate::types::Vector3, x_axis: crate::types::Vector3, y_axis: crate::types::Vector3, elevation: f64, ortho: i16, render_mode: i16) -> Vec<Group> {
+    let mut entries = head;
+    entries.extend([
+        XRecordEntry::point3d(10, origin.x, origin.y, origin.z),
+        XRecordEntry::point3d(10, x_axis.x, x_axis.y, x_axis.z),
+        XRecordEntry::point3d(10, y_axis.x, y_axis.y, y_axis.z),
+        XRecordEntry::double(146, elevation),
+        XRecordEntry::int16(79, ortho),
+    ]);
+    vec![Group::new(UCS_GROUP, entries), Group::new(VIEW_GROUP, vec![XRecordEntry::new(281, XRecordValue::Byte(render_mode as u8))])]
+}
+
+/// The values of a `UCS` and a `VIEW` group: the head values (0 or 1), the origin, x axis and y axis, the elevation, the orthographic
+/// type and the render mode; `None` for groups that do not have the shape AutoCAD writes (`head_codes` the codes before the origin).
+type UcsValues = (Vec<i16>, [crate::types::Vector3; 3], f64, i16, i16);
+
+fn ucs_values(groups: &[Group], head_codes: &[i32]) -> Option<UcsValues> {
+    let ucs = groups.iter().find(|group| group.name == UCS_GROUP)?;
+    let view = groups.iter().find(|group| group.name == VIEW_GROUP)?;
+    let entries = ucs.entries.as_slice();
+    if entries.len() != head_codes.len() + 5 {
+        return None;
+    }
+    let mut head = Vec::new();
+    for (entry, code) in entries.iter().zip(head_codes) {
+        match &entry.value {
+            XRecordValue::Int16(value) if entry.code == *code && matches!(*value, 0 | 1) => head.push(*value),
+            _ => return None,
+        }
+    }
+    let rest = &entries[head_codes.len()..];
+    let point = |entry: &XRecordEntry| match &entry.value {
+        XRecordValue::Point3D(x, y, z) if entry.code == 10 => Some(crate::types::Vector3::new(*x, *y, *z)),
+        _ => None,
+    };
+    let origin = point(&rest[0])?;
+    let x_axis = point(&rest[1])?;
+    let y_axis = point(&rest[2])?;
+    let elevation = (rest[3].code == 146).then(|| as_f64(&rest[3].value)).flatten()?;
+    let ortho = match (&rest[4].value, rest[4].code) {
+        (XRecordValue::Int16(value), 79) => *value,
+        _ => return None,
+    };
+    let render = match view.entries.as_slice() {
+        [entry] if entry.code == 281 => as_i32(&entry.value).filter(|mode| (0..=6).contains(mode))? as i16,
+        _ => return None,
+    };
+    Some((head, [origin, x_axis, y_axis], elevation, ortho, render))
+}
+
+fn viewport_ucs_wanted(viewport: &crate::entities::Viewport) -> Vec<Group> {
+    ucs_groups(
+        vec![XRecordEntry::int16(74, viewport.ucs_at_origin as i16), XRecordEntry::int16(71, viewport.ucs_per_viewport as i16)],
+        viewport.ucs_origin,
+        viewport.ucs_x_axis,
+        viewport.ucs_y_axis,
+        viewport.elevation,
+        viewport.ucs_ortho_type,
+        viewport.render_mode.to_value(),
+    )
+}
+
+fn vport_ucs_wanted(vport: &crate::tables::VPort) -> Vec<Group> {
+    ucs_groups(
+        vec![XRecordEntry::int16(74, vport.ucs_at_origin as i16), XRecordEntry::int16(71, vport.ucs_per_viewport as i16)],
+        vport.ucs_origin,
+        vport.ucs_x_axis,
+        vport.ucs_y_axis,
+        vport.ucs_elevation,
+        vport.ucs_ortho_type,
+        vport.render_mode.to_value(),
+    )
+}
+
+fn view_ucs_wanted(view: &crate::tables::View) -> Vec<Group> {
+    ucs_groups(
+        vec![XRecordEntry::int16(72, view.ucs_associated as i16)],
+        view.ucs_origin,
+        view.ucs_x_axis,
+        view.ucs_y_axis,
+        view.ucs_elevation,
+        view.ucs_ortho_type,
+        view.render_mode.to_value(),
+    )
+}
+
+fn restore_viewport_ucs(viewport: &mut crate::entities::Viewport, groups: &[Group]) -> Vec<String> {
+    let Some((head, [origin, x_axis, y_axis], elevation, ortho, render)) = ucs_values(groups, &[74, 71]) else { return Vec::new() };
+    viewport.ucs_at_origin = head[0] != 0;
+    viewport.ucs_per_viewport = head[1] != 0;
+    viewport.ucs_origin = origin;
+    viewport.ucs_x_axis = x_axis;
+    viewport.ucs_y_axis = y_axis;
+    viewport.elevation = elevation;
+    viewport.ucs_ortho_type = ortho;
+    viewport.render_mode = crate::entities::ViewportRenderMode::from_value(render);
+    vec![UCS_GROUP.to_string(), VIEW_GROUP.to_string()]
+}
+
+fn restore_vport_ucs(vport: &mut crate::tables::VPort, groups: &[Group]) -> Vec<String> {
+    let Some((head, [origin, x_axis, y_axis], elevation, ortho, render)) = ucs_values(groups, &[74, 71]) else { return Vec::new() };
+    vport.ucs_at_origin = head[0] != 0;
+    vport.ucs_per_viewport = head[1] != 0;
+    vport.ucs_origin = origin;
+    vport.ucs_x_axis = x_axis;
+    vport.ucs_y_axis = y_axis;
+    vport.ucs_elevation = elevation;
+    vport.ucs_ortho_type = ortho;
+    vport.render_mode = crate::entities::ViewportRenderMode::from_value(render);
+    vec![UCS_GROUP.to_string(), VIEW_GROUP.to_string()]
+}
+
+fn restore_view_ucs(view: &mut crate::tables::View, groups: &[Group]) -> Vec<String> {
+    let Some((head, [origin, x_axis, y_axis], elevation, ortho, render)) = ucs_values(groups, &[72]) else { return Vec::new() };
+    view.ucs_associated = head[0] != 0;
+    view.ucs_origin = origin;
+    view.ucs_x_axis = x_axis;
+    view.ucs_y_axis = y_axis;
+    view.ucs_elevation = elevation;
+    view.ucs_ortho_type = ortho;
+    view.render_mode = crate::entities::ViewportRenderMode::from_value(render);
+    vec![UCS_GROUP.to_string(), VIEW_GROUP.to_string()]
+}
+
+/// What ACadSharp reads of the UCS and render mode of a VPORT, a view and a viewport of a file of its own version that lacks them
+/// (R14): the defaults.
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn unrestored_vport_ucs(document: &CadDocument, vport: &mut crate::tables::VPort) {
+    if !masked(document, ucs_holds) {
+        return;
+    }
+    let defaults = crate::tables::VPort::new(vport.name.clone());
+    vport.ucs_at_origin = defaults.ucs_at_origin;
+    vport.ucs_per_viewport = defaults.ucs_per_viewport;
+    vport.ucs_origin = defaults.ucs_origin;
+    vport.ucs_x_axis = defaults.ucs_x_axis;
+    vport.ucs_y_axis = defaults.ucs_y_axis;
+    vport.ucs_elevation = defaults.ucs_elevation;
+    vport.ucs_ortho_type = defaults.ucs_ortho_type;
+    vport.render_mode = defaults.render_mode;
+}
+
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn unrestored_view_ucs(document: &CadDocument, view: &mut crate::tables::View) {
+    if !masked(document, ucs_holds) {
+        return;
+    }
+    let defaults = crate::tables::View::new(view.name.clone());
+    view.ucs_associated = defaults.ucs_associated;
+    view.ucs_origin = defaults.ucs_origin;
+    view.ucs_x_axis = defaults.ucs_x_axis;
+    view.ucs_y_axis = defaults.ucs_y_axis;
+    view.ucs_elevation = defaults.ucs_elevation;
+    view.ucs_ortho_type = defaults.ucs_ortho_type;
+    view.render_mode = defaults.render_mode;
+}
+
+#[cfg(feature = "acadsharp-compat")]
+pub(crate) fn unrestored_viewport_ucs(document: &CadDocument, viewport: &mut crate::entities::Viewport) {
+    if !masked(document, ucs_holds) {
+        return;
+    }
+    let defaults = crate::entities::Viewport::new();
+    viewport.ucs_at_origin = defaults.ucs_at_origin;
+    viewport.ucs_per_viewport = defaults.ucs_per_viewport;
+    viewport.ucs_origin = defaults.ucs_origin;
+    viewport.ucs_x_axis = defaults.ucs_x_axis;
+    viewport.ucs_y_axis = defaults.ucs_y_axis;
+    viewport.elevation = defaults.elevation;
+    viewport.ucs_ortho_type = defaults.ucs_ortho_type;
+    viewport.render_mode = defaults.render_mode;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The header variables R14 has no place for (R14 DWG; R5b-12). AutoCAD's R14 file keeps them in the dictionary
+// `ACDBHEADERROUNDTRIPXREC` of the root dictionary: one XRECORD named by the variable (not hard-owned, cloning flags 0, the records
+// not cloned; 33 records in sample_AC1014.dwg, sorted by name). This is read and written for two of them, the ones the model has a
+// field for and the sample shows a value of:
+//
+// * `INSUNITS {90 <units>}` (the sample: 1, the drawing's units), and
+// * `DIMSTYLEDATA {1000 DSTYLE 1002 { (1070 <code> <value>)... 1002 }}` for the header's dimension variables R14's header lacks, in
+//   the shape of a dimension style's `ACADR14ROUNDTRIP` group: DIMDSEP 278, DIMBLK 342 (the arrowhead's block record) and DIMLWD 371
+//   (sample: `342 #C80, 371 15`, the values of the style custom_style_ltypes, which the header holds as the current ones).
+//
+// The others (TSTACKALIGN, TSTACKSIZE, HYPERLINKBASE, STYLESHEET, LAYOUTDICT, PLOTSETDICT, PLOTSTYLNAMDICT, LWETCUNION, CEPSNTYPE,
+// FINGERPRINTGUID, VERSIONGUID, PSVPSCALE and the 14 `PUCS*` / `UCS*` records) are not read and not written: the mapping of
+// `LWETCUNION` (10781 in the sample, a packed word) to header variables is in no sample, and the rest are not part of the model's
+// header or are derived. They stay in the model as the records a reader found.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const HEADER_ROUNDTRIP: &str = "ACDBHEADERROUNDTRIPXREC";
+const INSUNITS: &str = "INSUNITS";
+const DIMSTYLEDATA: &str = "DIMSTYLEDATA";
+
+/// Whether a header of `version` holds INSUNITS and the dimension variables above itself.
+pub(crate) fn header_roundtrip_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1015
+}
+
+/// The records (name, entries) AutoCAD states for a header.
+fn header_roundtrip_wanted(header: &crate::document::HeaderVariables) -> Vec<(&'static str, Vec<XRecordEntry>)> {
+    let defaults = crate::document::HeaderVariables::default();
+    let mut data: Vec<XRecordEntry> = Vec::new();
+    if header.dim_decimal_separator != defaults.dim_decimal_separator {
+        data.extend([XRecordEntry::int16(1070, 278), XRecordEntry::int16(70, header.dim_decimal_separator as u32 as i16)]);
+    }
+    if !header.dim_arrow_block_handle.is_null() {
+        data.extend([XRecordEntry::int16(1070, 342), XRecordEntry::handle(340, header.dim_arrow_block_handle)]);
+    }
+    if header.dim_line_weight != defaults.dim_line_weight {
+        data.extend([XRecordEntry::int16(1070, 371), XRecordEntry::int16(70, header.dim_line_weight)]);
+    }
+    let mut wanted = Vec::new();
+    if !data.is_empty() {
+        let mut entries = vec![XRecordEntry::string(1000, DSTYLE), XRecordEntry::string(1002, "{")];
+        entries.extend(data);
+        entries.push(XRecordEntry::string(1002, "}"));
+        wanted.push((DIMSTYLEDATA, entries));
+    }
+    wanted.push((INSUNITS, vec![XRecordEntry::int32(90, header.insertion_units as i32)]));
+    wanted
+}
+
+/// The record `key` of the header chain of the document, if it has one.
+fn header_roundtrip_record(document: &CadDocument, key: &str) -> Option<Handle> {
+    let root = document.header.named_objects_dict_handle;
+    let chain = dictionary_at(document, root).and_then(|root| entry_ci(root, HEADER_ROUNDTRIP))?;
+    let record = dictionary_at(document, chain)?.get(key)?;
+    matches!(document.objects.get(&record), Some(ObjectType::XRecord(_))).then_some(record)
+}
+
+fn has_header_roundtrip(document: &CadDocument) -> bool {
+    let root = document.header.named_objects_dict_handle;
+    dictionary_at(document, root).is_some_and(|root| entry_ci(root, HEADER_ROUNDTRIP).is_some())
+}
+
+/// Restore INSUNITS and the dimension variables of the header from the chain; the records applied.
+fn restore_header_roundtrip(document: &mut CadDocument) -> Vec<Handle> {
+    let mut applied = Vec::new();
+    if let Some(record) = header_roundtrip_record(document, INSUNITS) {
+        if let Some([entry]) = record_entries(document, record) {
+            if let (90, XRecordValue::Int32(units)) = (entry.code, &entry.value) {
+                if let Ok(units) = i16::try_from(*units) {
+                    document.header.insertion_units = units;
+                    applied.push(record);
+                }
+            }
+        }
+    }
+    if let Some(record) = header_roundtrip_record(document, DIMSTYLEDATA) {
+        let group = Group::new(R14_ROUNDTRIP, record_entries(document, record).map(<[XRecordEntry]>::to_vec).unwrap_or_default());
+        if let Some(values) = dim_style_values(&group) {
+            for (code, value) in values {
+                match (code, value) {
+                    (278, XRecordValue::Int16(value)) => document.header.dim_decimal_separator = char::from_u32(value as u16 as u32).unwrap_or('.'),
+                    (371, XRecordValue::Int16(value)) => document.header.dim_line_weight = value,
+                    (342, XRecordValue::Handle(handle)) => document.header.dim_arrow_block_handle = handle,
+                    _ => {}
+                }
+            }
+            applied.push(record);
+        }
+    }
+    applied
+}
+
+/// State the chain records from the header: a record is replaced, made, or removed when the header no longer needs it.
+fn state_header_roundtrip(document: &mut CadDocument, version: DxfVersion, wanted: Vec<(&'static str, Vec<XRecordEntry>)>, states: &[&'static str]) {
+    let root = document.header.named_objects_dict_handle;
+    let existing = dictionary_at(document, root).and_then(|root| entry_ci(root, HEADER_ROUNDTRIP)).filter(|handle| dictionary_at(document, *handle).is_some());
+    if wanted.is_empty() {
+        if let Some(chain) = existing {
+            for key in states {
+                set_record(document, chain, key, None, false, version);
+            }
+            remove_if_empty(document, root, HEADER_ROUNDTRIP, chain);
+        }
+        return;
+    }
+    let chain = ensure_dictionary(document, root, HEADER_ROUNDTRIP, false, version);
+    for key in states {
+        let entries = wanted.iter().find(|(name, _)| name == key).map(|(_, entries)| entries.clone());
+        set_record(document, chain, key, entries, false, version);
+    }
 }

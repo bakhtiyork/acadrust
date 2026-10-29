@@ -266,10 +266,11 @@ fn viewport_owner(document: &CadDocument, viewport: acadrust::types::Handle) -> 
         .expect("the viewport of a record")
 }
 
-/// AutoCAD's R14 files hold VX records for the viewports of the active paper space only (sample_AC1014.dwg has none for the
-/// viewports of the other layouts' blocks): a drawing that has its own VX table keeps it as it is there (the writer made a
-/// record for every viewport the table lacked, which grew the handle seed and renumbered the viewports), and only a viewport
-/// of the active paper space that lacks a record gets one.
+/// AutoCAD's R14 files hold VX records for the viewports of the active paper space only (sample_AC1014.dwg from sample_AC1032.dwg: 3
+/// records, the reserved one and the two viewports of the block *PAPER_SPACE; none for the 4 viewports of the other layouts' blocks).
+/// A drawing without VX records gets them for the active paper space (R5b-12: it got one per viewport), a drawing that has VX records
+/// of its own keeps them as they are there (the writer made a record for every viewport the table lacked, which grew the handle seed
+/// and renumbered the viewports), and only a viewport of the active paper space that lacks a record gets one.
 #[test]
 fn a_partial_vx_table_of_an_r14_drawing_is_filled_for_the_active_paper_space_only() {
     let mut document = CadDocument::with_version(DxfVersion::AC1032);
@@ -282,29 +283,51 @@ fn a_partial_vx_table_of_an_r14_drawing_is_filled_for_the_active_paper_space_onl
     let first = write_and_read(&dxf_source(&document), DxfVersion::AC1014);
     let paper_space = first.header.paper_space_block_handle;
     let records: Vec<_> = first.vx_table.iter().cloned().collect();
-    assert!(records.len() >= 4, "a reserved record and one per viewport: {}", records.len());
     let of_viewports: Vec<_> = records.iter().filter(|record| !record.viewport.is_null()).collect();
-    let other = of_viewports
+    assert!(records.len() >= 3, "a reserved record and one per viewport of the active paper space: {}", records.len());
+    assert!(of_viewports.iter().all(|record| viewport_owner(&first, record.viewport) == paper_space), "a record for another layout");
+    let viewports: Vec<_> = first
+        .entities()
+        .filter_map(|e| match e {
+            EntityType::Viewport(v) => Some((v.common.handle, v.common.owner_handle)),
+            _ => None,
+        })
+        .collect();
+    let other = viewports
         .iter()
-        .find(|record| viewport_owner(&first, record.viewport) != paper_space)
-        .expect("a record of the viewport of the second layout");
-    let active = of_viewports
-        .iter()
-        .find(|record| viewport_owner(&first, record.viewport) == paper_space)
-        .expect("a record of a viewport of the active paper space");
-    let without = |dropped: acadrust::types::Handle| {
+        .find(|(_, owner)| *owner != paper_space && !owner.is_null() && first.block_records.iter().any(|b| b.handle == *owner && b.is_paper_space()))
+        .expect("a viewport of the second layout");
+    assert!(!of_viewports.iter().any(|record| record.viewport == other.0), "no record for the other layout");
+    let active = of_viewports.first().expect("a record of a viewport of the active paper space");
+    let with = |change: &dyn Fn(&mut CadDocument)| {
         let mut partial = first.clone();
-        partial.vx_table.clear();
-        for record in records.iter().filter(|record| record.handle != dropped) {
-            partial.vx_table.add_allow_duplicate(record.clone());
-        }
-        assert_eq!(partial.vx_table.len(), records.len() - 1);
+        change(&mut partial);
         partial
     };
-    let again = write_and_read(&without(other.handle), DxfVersion::AC1014);
-    assert_eq!(again.vx_table.len(), records.len() - 1, "the records the drawing had");
-    assert!(!again.vx_table.iter().any(|record| record.viewport == other.viewport), "no record for the other layout");
-    let again = write_and_read(&without(active.handle), DxfVersion::AC1014);
+    // a record the drawing has for another layout's viewport stays
+    let kept = write_and_read(
+        &with(&|d| {
+            let mut extra = acadrust::tables::VxTableRecord::new("");
+            extra.handle = d.allocate_handle();
+            extra.viewport = other.0;
+            extra.is_on = true;
+            d.vx_table.add_allow_duplicate(extra);
+        }),
+        DxfVersion::AC1014,
+    );
+    assert_eq!(kept.vx_table.len(), records.len() + 1, "the records the drawing had");
+    assert!(kept.vx_table.iter().any(|record| record.viewport == other.0));
+    // a viewport of the active paper space that lacks a record gets one again
+    let again = write_and_read(
+        &with(&|d| {
+            let rest: Vec<_> = d.vx_table.iter().filter(|record| record.handle != active.handle).cloned().collect();
+            d.vx_table.clear();
+            for record in rest {
+                d.vx_table.add_allow_duplicate(record);
+            }
+        }),
+        DxfVersion::AC1014,
+    );
     assert_eq!(again.vx_table.len(), records.len(), "the viewport of the active paper space gets a record again");
     assert!(again.vx_table.iter().any(|record| record.viewport == active.viewport));
 }
