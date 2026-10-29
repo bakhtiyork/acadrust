@@ -1741,6 +1741,22 @@ fn dump_book_color(
     // ACadSharp computes Name from the two color-book components.  Keep this
     // local to the compatibility projection: the native model intentionally
     // stores the components independently.
+    // An object the reader restored from the `DBColXD` block of a drawing before R2004 is projected as that drawing's DBCOLOR record
+    // states it: the index and no names.
+    let legacy_index = crate::io::dwg::autocad_conversions::legacy_book_color_index(doc, handle_value, value);
+    let legacy_value;
+    let value = match legacy_index {
+        Some(index) => {
+            legacy_value = crate::objects::BookColor {
+                color: crate::types::Color::from_index(index),
+                book_name: String::new(),
+                color_name: String::new(),
+                ..value.clone()
+            };
+            &legacy_value
+        }
+        None => value,
+    };
     let dictionary_name = owned_dictionary_name(doc, handle_value, value.owner);
     let dictionary_parts = dictionary_name
         .as_deref()

@@ -2522,6 +2522,34 @@ fn table_roundtrip(document: &crate::document::CadDocument, table: Handle) -> Op
     })
 }
 
+/// What completes a table of a DXF of R2010 or later: the cells of its TABLECONTENT object, the cell geometry of its TABLEGEOMETRY
+/// object and the break ranges of its round-trip record. `None` when the table has no such objects or another cell grid than the
+/// content object (the legacy cells were edited without it).
+fn dxf_completion_parts(
+    document: &crate::document::CadDocument,
+    table: &Table,
+) -> Option<(Table, Option<crate::objects::TableGeometry>, Vec<TableBreakRange>)> {
+    use crate::objects::{DataObjectData, ObjectType};
+    let link = table_roundtrip(document, table.common.handle)?;
+    let Some(ObjectType::TableContent(content)) = document.objects.get(&link.content) else {
+        return None;
+    };
+    let same_grid = content.rows.len() == table.rows.len()
+        && content.columns.len() == table.columns.len()
+        && content.rows.iter().zip(&table.rows).all(|(a, b)| a.cells.len() == b.cells.len());
+    if !same_grid {
+        return None;
+    }
+    let geometry = link.geometry.and_then(|handle| match document.objects.get(&handle) {
+        Some(ObjectType::DataObject(object)) => match &object.data {
+            DataObjectData::TableGeometry(geometry) => Some(geometry.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    Some((content.clone(), geometry, link.break_ranges))
+}
+
 /// Complete the tables of a document read from DXF.
 ///
 /// A DXF states a table as the legacy `ACAD_TABLE` entity (cell values and a few overrides) and keeps the rest of
@@ -2533,7 +2561,6 @@ fn table_roundtrip(document: &crate::document::CadDocument, table: Handle) -> Op
 /// read.
 pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocument) {
     use crate::entities::EntityType;
-    use crate::objects::{DataObjectData, ObjectType};
     if !document.entities().any(|entity| matches!(entity, EntityType::Table(_))) {
         return;
     }
@@ -2544,30 +2571,9 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
             let EntityType::Table(table) = entity else {
                 continue;
             };
-            let Some(link) = table_roundtrip(document, table.common.handle) else {
-                continue;
-            };
-            let Some(ObjectType::TableContent(content)) = document.objects.get(&link.content) else {
-                continue;
-            };
-            let same_grid = content.rows.len() == table.rows.len()
-                && content.columns.len() == table.columns.len()
-                && content
-                    .rows
-                    .iter()
-                    .zip(&table.rows)
-                    .all(|(a, b)| a.cells.len() == b.cells.len());
-            if !same_grid {
-                continue;
+            if let Some(parts) = dxf_completion_parts(document, table) {
+                work.insert(table.common.handle, parts);
             }
-            let geometry = link.geometry.and_then(|handle| match document.objects.get(&handle) {
-                Some(ObjectType::DataObject(object)) => match &object.data {
-                    DataObjectData::TableGeometry(geometry) => Some(geometry.clone()),
-                    _ => None,
-                },
-                _ => None,
-            });
-            work.insert(table.common.handle, (content.clone(), geometry, link.break_ranges));
         }
     }
     for entity in document.entities_mut_keep_raw() {
@@ -2576,6 +2582,9 @@ pub(crate) fn restore_table_roundtrip(document: &mut crate::document::CadDocumen
         };
         if let Some((content, geometry, break_ranges)) = work.remove(&table.common.handle) {
             table.restore_modern_content(&content, geometry.as_ref(), break_ranges);
+            // The legacy words of the entity (value flags, style override, cell edge flags, block scales) stay in the legacy view; the
+            // table holds what an R2010 DWG record of it holds, as a table completed from a file before R2010 does.
+            table.as_r2010_record();
         } else {
             // A table of the legacy layout: a block cell also keeps its block pointer in the cell itself, as a
             // pre-R2010 DWG record states it.
@@ -2920,9 +2929,6 @@ impl Table {
     /// other table (a table completed from a DXF, an edited one: the typed cells are converted back cell by cell).
     pub(crate) fn unrestored_legacy(&self, document: &crate::document::CadDocument) -> Option<Table> {
         let legacy = self.dxf_legacy.0.as_deref()?;
-        if !legacy_source(document) {
-            return None;
-        }
         let mut base = self.clone();
         base.dxf_legacy = DxfLegacyView(None);
         base.columns = legacy.columns.clone();
@@ -2932,8 +2938,18 @@ impl Table {
         base.value_flags = legacy.value_flags;
         base.override_flag = legacy.override_flag;
         base.legacy_style_override = legacy.legacy_style_override.clone();
-        let mut again = base.with_roundtrip_content(document)?;
-        again.as_r2010_record();
+        let again = if legacy_source(document) {
+            let mut again = base.with_roundtrip_content(document)?;
+            again.as_r2010_record();
+            again
+        } else {
+            // A table of a DXF of R2010 or later completed by `restore_table_roundtrip`.
+            let (content, geometry, break_ranges) = dxf_completion_parts(document, &base)?;
+            let mut again = base.clone();
+            again.restore_modern_content(&content, geometry.as_ref(), break_ranges);
+            again.as_r2010_record();
+            again
+        };
         (again == *self).then_some(base)
     }
 

@@ -199,6 +199,7 @@ impl<'a> DxfWriter<'a> {
         let mut prepared = self.prepare();
         crate::io::dwg::autocad_roundtrip::prepare_for_dxf(&mut prepared, output_version);
         crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, output_version);
+        crate::io::dwg::autocad_conversions::unrestore_book_colors(&mut prepared, output_version);
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, output_version, true);
         crate::io::dwg::autocad_records::prepare_for_write(&mut prepared, output_version, true);
         if crate::entities::table::tables_need_roundtrip(&prepared, output_version) {
