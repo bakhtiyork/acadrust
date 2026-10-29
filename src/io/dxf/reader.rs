@@ -636,9 +636,13 @@ impl DxfReader {
         // The current annotation scale is the CANNOSCALE entry of the variable dictionary, in a DXF as in a DWG.
         crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::reflect_annotation_scale(&mut document);
         resolve_table_style_text_styles(&mut document);
+        document.name_table_styles_by_dictionary();
         rewire_dangling_layout_block_records(&mut document);
         document.ensure_model_layout();
         if document.version == crate::types::DxfVersion::AC1009 {
+            // An R12 file has no OBJECTS section, so the layouts are the document's defaults: list the viewport entities of the
+            // paper space on its layout, as for a DXF of a later version (`read_objects`) and a DWG.
+            crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::list_layout_viewports(&mut document);
             let layers: HashMap<_, _> = document.layers.iter().map(|layer| (layer.name.to_uppercase(), layer.handle)).collect();
             for entity in document.entities_mut_keep_raw() {
                 if let EntityType::Viewport(viewport) = entity {
@@ -1412,6 +1416,14 @@ fn resolve_table_style_text_styles(document: &mut CadDocument) {
         .filter(|(_, object)| matches!(object, ObjectType::TableStyle(_)))
         .map(|(handle, _)| *handle)
         .collect();
+    let text_style_handles: std::collections::HashSet<u64> =
+        document.text_styles.iter().map(|style| style.handle.value()).collect();
+    // A row without a handle, or with one the file gave to another record (the default Standard table style names the
+    // handle of the default Standard text style; an R12 file spells its own `STANDARD` at a handle of its own), takes the
+    // text style of its name.
+    let unresolved = |stated: Option<Handle>| {
+        stated.map_or(true, |handle| !handle.is_null() && !text_style_handles.contains(&handle.value()))
+    };
     for handle in handles {
         let Some(ObjectType::TableStyle(style)) = document.objects.get(&handle) else {
             continue;
@@ -1419,7 +1431,7 @@ fn resolve_table_style_text_styles(document: &mut CadDocument) {
         let wanted: Vec<Option<Handle>> = [&style.data_row_style, &style.header_row_style, &style.title_row_style]
             .iter()
             .map(|row| {
-                (row.text_style_handle.is_none() && !row.text_style_name.is_empty())
+                (unresolved(row.text_style_handle) && !row.text_style_name.is_empty())
                     .then(|| document.text_styles.get(&row.text_style_name).map(|text| text.handle))
                     .flatten()
             })

@@ -708,7 +708,7 @@ impl DwgDocumentBuilder {
 
     /// A layout's viewport list: a DWG before R2004 has none (and a DXF never has one), the DXF reader
     /// lists the viewport entities of the layout's block; give the layout the same list.
-    fn list_layout_viewports(document: &mut CadDocument) {
+    pub(crate) fn list_layout_viewports(document: &mut CadDocument) {
         let lists: Vec<(Handle, Vec<Handle>)> = document
             .objects
             .iter()
@@ -3651,6 +3651,7 @@ impl DwgDocumentBuilder {
         Self::hydrate_block_markers(document);
         Self::number_paper_space_viewports(document);
         Self::list_layout_viewports(document);
+        document.name_table_styles_by_dictionary();
         document.ensure_model_layout();
 
         document.original_objects = document
@@ -4498,6 +4499,10 @@ impl DwgDocumentBuilder {
                     e.view_direction = data.view_direction;
                     e.view_target = data.view_target;
                     e.view_height = data.view_height;
+                    // The record has no scale; it is the paper height over the view height (as the R12 and R14 readers state it).
+                    if e.view_height.is_finite() && e.view_height > 0.0 {
+                        e.custom_scale = e.height / e.view_height;
+                    }
                     e.lens_length = data.lens_length;
                     e.front_clip_z = data.front_clip_z;
                     e.back_clip_z = data.back_clip_z;

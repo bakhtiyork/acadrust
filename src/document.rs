@@ -2274,6 +2274,7 @@ impl CadDocument {
         model_layout.owner = self.header.acad_layout_dict_handle;
         model_layout.tab_order = 0;
         model_layout.flags = 1; // model space
+        model_layout.plot_flags.model_type = true; // the plot-settings bit of the Model layout
         model_layout.block_record = self.header.model_space_block_handle;
         self.objects
             .insert(model_layout_handle, ObjectType::Layout(model_layout));
@@ -4166,6 +4167,31 @@ impl CadDocument {
         Ok(layout_handle)
     }
 
+    /// A table style is named by its key in the `ACAD_TABLESTYLE` dictionary. The TABLESTYLE record states the style's
+    /// description (DXF group 3, the first text of the DWG record), which the readers take as the name as well; a style
+    /// whose description is not its name (the default Standard style of a drawing without an OBJECTS section has an empty
+    /// one) keeps the name of its entry. Visits the entries of that dictionary only.
+    pub(crate) fn name_table_styles_by_dictionary(&mut self) {
+        let Some(ObjectType::Dictionary(root)) = self.objects.get(&self.header.named_objects_dict_handle) else {
+            return;
+        };
+        let Some(styles) = root.entries.iter().find(|(key, _)| key.eq_ignore_ascii_case("ACAD_TABLESTYLE")).map(|(_, handle)| *handle)
+        else {
+            return;
+        };
+        let entries = match self.objects.get(&styles) {
+            Some(ObjectType::Dictionary(dictionary)) => dictionary.entries.clone(),
+            _ => return,
+        };
+        for (key, handle) in entries {
+            if let Some(ObjectType::TableStyle(style)) = self.objects.get_mut(&handle) {
+                if style.name != key {
+                    style.name = key;
+                }
+            }
+        }
+    }
+
     pub fn ensure_model_layout(&mut self) {
         // Layouts name their record; a record left without the back link
         // (R13/R14 block headers have none) takes it from its layout.
@@ -4226,6 +4252,7 @@ impl CadDocument {
         layout.owner = dict_handle;
         layout.tab_order = 0;
         layout.flags = 1; // model space
+        layout.plot_flags.model_type = true; // the plot-settings bit of the Model layout
         layout.block_record = model;
         if let Some(ObjectType::Dictionary(dict)) = self.objects.get_mut(&dict_handle) {
             dict.add_entry("Model", handle);
@@ -5110,49 +5137,39 @@ impl CadDocument {
     /// calls this on a cloned document before writing (issue #51/#64
     /// class of bug).
     pub fn assign_table_entry_handles(&mut self) {
-        let mut missing_handles: Vec<(&'static str, String)> = Vec::new();
-        macro_rules! collect_missing {
-            ($tag:literal, $table:expr) => {
-                for entry in $table.iter() {
-                    if entry.handle().is_null() {
-                        missing_handles.push(($tag, entry.name().to_string()));
+        self.assign_null_table_handles();
+    }
+
+    /// Gives every table entry whose handle is NULL a fresh one, in table and entry order. Entries are visited
+    /// by position, not looked up by name: two records may share a name (the unnamed STYLE records of shape
+    /// files), and a lookup by name would give both handles to the first.
+    fn assign_null_table_handles(&mut self) {
+        macro_rules! assign {
+            ($table:expr) => {
+                let missing = $table.iter().filter(|entry| entry.handle().is_null()).count();
+                if missing > 0 {
+                    let mut fresh: Vec<Handle> = (0..missing).map(|_| self.allocate_handle()).collect();
+                    fresh.reverse();
+                    for entry in $table.iter_mut() {
+                        if entry.handle().is_null() {
+                            if let Some(handle) = fresh.pop() {
+                                entry.set_handle(handle);
+                            }
+                        }
                     }
                 }
             };
         }
-        collect_missing!("layers", self.layers);
-        collect_missing!("line_types", self.line_types);
-        collect_missing!("text_styles", self.text_styles);
-        collect_missing!("dim_styles", self.dim_styles);
-        collect_missing!("app_ids", self.app_ids);
-        collect_missing!("views", self.views);
-        collect_missing!("vports", self.vports);
-        collect_missing!("ucss", self.ucss);
-        collect_missing!("vx_table", self.vx_table);
-        collect_missing!("block_records", self.block_records);
-
-        for (tag, name) in missing_handles.drain(..) {
-            let new = self.allocate_handle();
-            macro_rules! apply_missing {
-                ($t:literal, $table:expr) => {
-                    if tag == $t {
-                        if let Some(entry) = $table.get_mut(&name) {
-                            entry.set_handle(new);
-                        }
-                    }
-                };
-            }
-            apply_missing!("layers", self.layers);
-            apply_missing!("line_types", self.line_types);
-            apply_missing!("text_styles", self.text_styles);
-            apply_missing!("dim_styles", self.dim_styles);
-            apply_missing!("app_ids", self.app_ids);
-            apply_missing!("views", self.views);
-            apply_missing!("vports", self.vports);
-            apply_missing!("ucss", self.ucss);
-            apply_missing!("vx_table", self.vx_table);
-            apply_missing!("block_records", self.block_records);
-        }
+        assign!(self.layers);
+        assign!(self.line_types);
+        assign!(self.text_styles);
+        assign!(self.dim_styles);
+        assign!(self.app_ids);
+        assign!(self.views);
+        assign!(self.vports);
+        assign!(self.ucss);
+        assign!(self.vx_table);
+        assign!(self.block_records);
     }
 
     /// 1. Assigns owner handles on model-space entities (owner = model space
@@ -5232,26 +5249,6 @@ impl CadDocument {
         // already receive handles in `add_entity`, so only table entries
         // and objects need this pass. Running after the max-handle scan
         // above keeps the fresh handles clear of file-sourced ones.
-        let mut missing_handles: Vec<(&'static str, String)> = Vec::new();
-        macro_rules! collect_missing {
-            ($tag:literal, $table:expr) => {
-                for entry in $table.iter() {
-                    if entry.handle().is_null() {
-                        missing_handles.push(($tag, entry.name().to_string()));
-                    }
-                }
-            };
-        }
-        collect_missing!("layers", self.layers);
-        collect_missing!("line_types", self.line_types);
-        collect_missing!("text_styles", self.text_styles);
-        collect_missing!("dim_styles", self.dim_styles);
-        collect_missing!("app_ids", self.app_ids);
-        collect_missing!("views", self.views);
-        collect_missing!("vports", self.vports);
-        collect_missing!("ucss", self.ucss);
-        collect_missing!("vx_table", self.vx_table);
-        collect_missing!("block_records", self.block_records);
         let null_object_keys: Vec<Handle> = self
             .objects
             .keys()
@@ -5267,28 +5264,7 @@ impl CadDocument {
             .map(|(key, _)| *key)
             .collect();
 
-        for (tag, name) in missing_handles.drain(..) {
-            let new = self.allocate_handle();
-            macro_rules! apply_missing {
-                ($t:literal, $table:expr) => {
-                    if tag == $t {
-                        if let Some(entry) = $table.get_mut(&name) {
-                            entry.set_handle(new);
-                        }
-                    }
-                };
-            }
-            apply_missing!("layers", self.layers);
-            apply_missing!("line_types", self.line_types);
-            apply_missing!("text_styles", self.text_styles);
-            apply_missing!("dim_styles", self.dim_styles);
-            apply_missing!("app_ids", self.app_ids);
-            apply_missing!("views", self.views);
-            apply_missing!("vports", self.vports);
-            apply_missing!("ucss", self.ucss);
-            apply_missing!("vx_table", self.vx_table);
-            apply_missing!("block_records", self.block_records);
-        }
+        self.assign_null_table_handles();
         for _ in null_object_keys.iter() {
             let new = self.allocate_handle();
             if let Some(mut object) = self.objects.remove(&Handle::NULL) {

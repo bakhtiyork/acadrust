@@ -13648,7 +13648,6 @@ impl<'a> SectionReader<'a> {
             Ok(Some(EntityType::Polyline3D(pl)))
         } else {
             let mut pl = Polyline2D::new();
-            pl.source_widths = Some((def_start_width, def_end_width));
             pl.common = common;
             pl.seqend = seqend;
             pl.flags = PolylineFlags::from_bits(flags as u16);
@@ -13660,9 +13659,6 @@ impl<'a> SectionReader<'a> {
             // one that carries them (even as 0) keeps its own value. Bake the
             // effective width into each vertex so tapered polylines survive —
             // this mirrors how a heavy polyline down-saves to LWPOLYLINE.
-            let per_vertex_widths = geom_vertices
-                .iter()
-                .any(|rv| rv.has_start_width || rv.has_end_width);
             pl.vertices = geom_vertices
                 .into_iter()
                 .map(|rv| Vertex2D {
@@ -13677,16 +13673,11 @@ impl<'a> SectionReader<'a> {
                     curve_tangent: rv.tangent,
                 })
                 .collect();
-            // When any vertex specifies its own width, the widths now live
-            // per-vertex; keeping a non-zero polyline default would let a
-            // renderer bleed it onto the intentionally zero-width segments.
-            if per_vertex_widths {
-                pl.start_width = 0.0;
-                pl.end_width = 0.0;
-            } else {
-                pl.start_width = def_start_width;
-                pl.end_width = def_end_width;
-            }
+            // The polyline's own default widths are the record's (groups 40 / 41) whether or not a vertex states widths: the
+            // DWG's 2D polyline record has the fields (R13 and later) and the vertex widths, baked above, are what is drawn.
+            // They are the only copy (`source_widths` stays empty): an edit of them after the read is what a writer states.
+            pl.start_width = def_start_width;
+            pl.end_width = def_end_width;
             Ok(Some(EntityType::Polyline2D(pl)))
         }
     }
@@ -18325,6 +18316,10 @@ impl<'a> SectionReader<'a> {
             }
         }
         vp.dxf_status = status_field.filter(|value| *value != vp.id);
+        // The record has no scale; it is the paper height over the view height (as the R12 and R14 readers state it).
+        if vp.view_height.is_finite() && vp.view_height > 0.0 {
+            vp.custom_scale = vp.height / vp.view_height;
+        }
 
         vp.source = Some(Box::new(source));
         Ok(Some(vp))

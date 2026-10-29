@@ -679,9 +679,17 @@ fn the_table_style_record_of_r2010_keeps_bit_8_of_its_first_long_outside_the_fla
         let mut document = CadDocument::with_version(version);
         let mut style = acadrust::objects::TableStyle::new("TS");
         style.handle = document.allocate_handle();
-        style.owner_handle = document.header.named_objects_dict_handle;
         style.modern_unknown_long1 = 8;
         let handle = style.handle;
+        // A table style is named by its entry in the ACAD_TABLESTYLE dictionary (the record states the description).
+        let styles = match document.objects.get(&document.header.named_objects_dict_handle) {
+            Some(ObjectType::Dictionary(root)) => root.get("ACAD_TABLESTYLE").expect("the table style dictionary"),
+            _ => panic!("no named object dictionary"),
+        };
+        style.owner_handle = styles;
+        if let Some(ObjectType::Dictionary(dictionary)) = document.objects.get_mut(&styles) {
+            dictionary.add_entry("TS", handle);
+        }
         document.objects.insert(handle, ObjectType::TableStyle(style));
         let first = write_and_read(&document, version);
         let second = write_and_read(&first, version);

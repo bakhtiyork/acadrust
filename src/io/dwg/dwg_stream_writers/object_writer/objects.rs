@@ -1162,8 +1162,9 @@ impl<'a> DwgObjectWriter<'a> {
         };
         self.write_common_non_entity_data(type_code, value.handle, value.owner_handle, &[], &None);
 
+        // The record's text is the style's description (its name is the key of its dictionary entry).
         if !self.version.r2010_plus() {
-            self.writer.write_variable_text(&value.name);
+            self.writer.write_variable_text(&value.description);
             self.writer.write_bit_short(value.flow_direction as i16);
             self.writer
                 .write_bit_short(value.effective_flags().bits() & !STALE_TABLE_STYLE_FLAG);
@@ -1176,7 +1177,7 @@ impl<'a> DwgObjectWriter<'a> {
             self.write_legacy_table_row_style(&value.header_row_style);
         } else {
             self.writer.write_byte(value.modern_unknown_byte);
-            self.writer.write_variable_text(&value.name);
+            self.writer.write_variable_text(&value.description);
             // The R2010+ flags field carries the table style flags.
             // Bit 8 of the flags, which older files carry, is not a style flag; the R2010+ record of AutoCAD's own
             // files states it (the first long is 8 in every sample of R2010 to R2018), so it is written as the
@@ -1366,13 +1367,14 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_long(rows.len() as i32);
         for (key, row, id, style_type, name, merge_flags) in rows {
             self.writer.write_bit_long(key);
-            self.write_default_modern_table_row_style(row, id, style_type, name, merge_flags);
+            self.write_default_modern_table_row_style(row, value, id, style_type, name, merge_flags);
         }
     }
 
     fn write_default_modern_table_row_style(
         &mut self,
         row: &RowCellStyle,
+        style: &TableStyle,
         id: i32,
         style_type: i32,
         name: &str,
@@ -1422,6 +1424,16 @@ impl<'a> DwgObjectWriter<'a> {
                     ..TableContentFormat::default()
                 },
                 borders,
+                // The margins of the style and the spacings of the base cell style, as AutoCAD states them in the cell styles it
+                // makes from the legacy rows of a table style (sample_AC1018.dwg against sample_AC1024.dwg: margin flag 1, the
+                // style's margins in all four sides, spacings 0.18).
+                margin_override_flags: 1,
+                vertical_margin: style.vertical_margin,
+                horizontal_margin: style.horizontal_margin,
+                bottom_margin: style.vertical_margin,
+                right_margin: style.horizontal_margin,
+                horizontal_spacing: 0.18,
+                vertical_spacing: 0.18,
                 ..TableCellStyleData::default()
             },
             id,
