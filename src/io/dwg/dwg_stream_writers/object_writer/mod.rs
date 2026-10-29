@@ -2416,6 +2416,9 @@ impl<'a> DwgObjectWriter<'a> {
                 b.name == record.name
                     && b.name.starts_with('*')
                     && source.get(..2).zip(b.name.get(..2)).is_some_and(|(a, n)| a.eq_ignore_ascii_case(n))
+                    // A name that differs by case only is not the file's number: an R14 file states every name in upper case
+                    // (`*PAPER_SPACE0`) and the reader restored the drawing's (`*Paper_Space0`, AutoCAD's own R2000 file).
+                    && !source.eq_ignore_ascii_case(&b.name)
             });
             (b.common.handle, source_number.unwrap_or(b.name.as_str()))
         } else {

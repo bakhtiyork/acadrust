@@ -356,6 +356,11 @@ pub(crate) struct Consumed {
     /// The table records whose original name the reader restored from `ACAD_XREC_ROUNDTRIP {EXTNAMES}` (R14), with the name the file
     /// states: the view shows the file's name (`unrestore_names`), the writers state the group again (`state_extnames`).
     names: Vec<(Handle, String)>,
+    /// The multileaders whose direction, attachments and dogleg length the reader restored from `ROUNDTRIP_MLCONTEXT` and
+    /// `ACAD_ROUNDTRIP_2010_MLEADER`, by owner: the words the file's legacy record states (what ACadSharp reads) and the words
+    /// restored. The view and the writers before R2010 state the legacy words while the restored ones are unedited
+    /// (`unrestored_mleader`); the writers state the record again from the native words.
+    mleaders: std::collections::BTreeMap<Handle, MLeaderRecord>,
 }
 
 impl Consumed {
@@ -366,6 +371,7 @@ impl Consumed {
             && self.table_style_changes.is_empty()
             && self.mtext.is_empty()
             && self.names.is_empty()
+            && self.mleaders.is_empty()
     }
 
     /// Record that the name of the table record `owner` was restored from the file's `name` (the DWG builder).
@@ -1129,6 +1135,208 @@ fn restore_solid(solid: &mut crate::entities::Solid3D, groups: &[Group]) -> Vec<
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
+// Multileader (R14 to R2007 DWG, R2000 to R2007 DXF): the record has no place for the attachment direction of the text (R2010), nor
+// for the attachment types and the dogleg length of a vertical leader; AutoCAD's own files of the drawing keep them in
+// `ACAD_XREC_ROUNDTRIP {ROUNDTRIP_MLCONTEXT, ACAD_ROUNDTRIP_2010_MLEADER}` of the extension dictionary of the multileader (the one
+// vertical multileader #B27 of sample_AC1014.dwg to sample_AC1021.dwg and their DXF twins; the 14 horizontal ones have no record) and
+// state the legacy approximation in the entity (the attachments 4 and 0, the dogleg length 0, where sample_AC1024.dwg states 0, 8, 8):
+//   ROUNDTRIP_MLCONTEXT          272 = 1   174 = 0   175 = 8   91 = 0   40 = 0.0
+//   ACAD_ROUNDTRIP_2010_MLEADER  272 = 1   173 = 0   174 = 8   41 = 8.0
+// 272 is the direction (1 vertical, the value sample_AC1024.dwg states for the root #B27 and for the entity), 174 / 175 and 173 / 174 the
+// left and right attachment of the context and of the entity (0 and 8, the R2010 words), 41 the dogleg length of the entity (8.0). The
+// groups 91 = 0 and 40 = 0.0 of the context are in no other sample: they are stated as the sample states them, and a record that
+// states other values for them is not read (it is another producer's data).
+// ---------------------------------------------------------------------------------------------------------------------
+
+const MLEADER_CONTEXT: &str = "ROUNDTRIP_MLCONTEXT";
+const MLEADER_2010: &str = "ACAD_ROUNDTRIP_2010_MLEADER";
+
+pub(crate) fn mleader_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1024
+}
+
+/// AutoCAD's DXF of R2000, R2004 and R2007 holds the record (sample_AC1015_ascii.dxf, sample_AC1018_ascii.dxf, sample_AC1021_ascii.dxf).
+fn mleader_dxf(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1015
+}
+
+/// The words of a multileader a record before R2010 restores.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct MLeaderWords {
+    direction: i16,
+    left: i16,
+    right: i16,
+    /// The dogleg length of the entity (not stated for the context: 0.0).
+    dogleg: f64,
+}
+
+/// One multileader the reader restored: `(the legacy words, the restored words)` of the context's first leader root and of the entity.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct MLeaderRecord {
+    context: Option<(MLeaderWords, MLeaderWords)>,
+    entity: Option<(MLeaderWords, MLeaderWords)>,
+}
+
+fn mleader_context_words(mleader: &crate::entities::MultiLeader) -> Option<MLeaderWords> {
+    let root = mleader.context.leader_roots.first()?;
+    Some(MLeaderWords {
+        direction: root.text_attachment_direction as i16,
+        left: mleader.context.text_left_attachment as i16,
+        right: mleader.context.text_right_attachment as i16,
+        dogleg: 0.0,
+    })
+}
+
+fn set_mleader_context_words(mleader: &mut crate::entities::MultiLeader, words: MLeaderWords) {
+    use crate::entities::multileader::{TextAttachmentDirectionType, TextAttachmentType};
+    if let Some(root) = mleader.context.leader_roots.first_mut() {
+        root.text_attachment_direction = TextAttachmentDirectionType::from(words.direction);
+    }
+    mleader.context.text_left_attachment = TextAttachmentType::from(words.left);
+    mleader.context.text_right_attachment = TextAttachmentType::from(words.right);
+}
+
+fn mleader_entity_words(mleader: &crate::entities::MultiLeader) -> MLeaderWords {
+    MLeaderWords {
+        direction: mleader.text_attachment_direction as i16,
+        left: mleader.text_left_attachment as i16,
+        right: mleader.text_right_attachment as i16,
+        dogleg: mleader.dogleg_length,
+    }
+}
+
+fn set_mleader_entity_words(mleader: &mut crate::entities::MultiLeader, words: MLeaderWords) {
+    use crate::entities::multileader::{TextAttachmentDirectionType, TextAttachmentType};
+    mleader.text_attachment_direction = TextAttachmentDirectionType::from(words.direction);
+    mleader.text_left_attachment = TextAttachmentType::from(words.left);
+    mleader.text_right_attachment = TextAttachmentType::from(words.right);
+    mleader.dogleg_length = words.dogleg;
+}
+
+/// Whether a multileader is vertical: the one kind AutoCAD writes the records for (none for a horizontal one).
+fn mleader_vertical(mleader: &crate::entities::MultiLeader) -> bool {
+    use crate::entities::multileader::TextAttachmentDirectionType::Vertical;
+    mleader.text_attachment_direction == Vertical || mleader.context.leader_roots.iter().any(|root| root.text_attachment_direction == Vertical)
+}
+
+/// The two groups of a multileader that is vertical (AutoCAD writes none for a horizontal one).
+fn mleader_groups(mleader: &crate::entities::MultiLeader) -> Vec<Group> {
+    let context = mleader_context_words(mleader);
+    let Some(context) = context.filter(|_| mleader_vertical(mleader)) else {
+        return Vec::new();
+    };
+    let entity = mleader_entity_words(mleader);
+    vec![
+        Group::new(
+            MLEADER_CONTEXT,
+            vec![
+                XRecordEntry::int16(272, context.direction),
+                XRecordEntry::int16(174, context.left),
+                XRecordEntry::int16(175, context.right),
+                XRecordEntry::int32(91, 0),
+                XRecordEntry::double(40, 0.0),
+            ],
+        ),
+        Group::new(
+            MLEADER_2010,
+            vec![
+                XRecordEntry::int16(272, entity.direction),
+                XRecordEntry::int16(173, entity.left),
+                XRecordEntry::int16(174, entity.right),
+                XRecordEntry::double(41, entity.dogleg),
+            ],
+        ),
+    ]
+}
+
+fn mleader_direction(value: i32) -> Option<i16> {
+    (0..=1).contains(&value).then_some(value as i16)
+}
+
+fn mleader_attachment(value: i32) -> Option<i16> {
+    (0..=10).contains(&value).then_some(value as i16)
+}
+
+/// The words of a `ROUNDTRIP_MLCONTEXT` group of the shape AutoCAD writes.
+fn mleader_context_group(group: &Group) -> Option<MLeaderWords> {
+    let [direction, left, right, index, zero] = group.entries.as_slice() else { return None };
+    let codes = [direction.code, left.code, right.code, index.code, zero.code];
+    if codes != [272, 174, 175, 91, 40] || as_i32(&index.value) != Some(0) || as_f64(&zero.value) != Some(0.0) {
+        return None;
+    }
+    Some(MLeaderWords {
+        direction: mleader_direction(as_i32(&direction.value)?)?,
+        left: mleader_attachment(as_i32(&left.value)?)?,
+        right: mleader_attachment(as_i32(&right.value)?)?,
+        dogleg: 0.0,
+    })
+}
+
+/// The words of an `ACAD_ROUNDTRIP_2010_MLEADER` group of the shape AutoCAD writes.
+fn mleader_entity_group(group: &Group) -> Option<MLeaderWords> {
+    let [direction, left, right, dogleg] = group.entries.as_slice() else { return None };
+    if [direction.code, left.code, right.code, dogleg.code] != [272, 173, 174, 41] {
+        return None;
+    }
+    let dogleg = as_f64(&dogleg.value).filter(|value| value.is_finite() && *value >= 0.0)?;
+    Some(MLeaderWords {
+        direction: mleader_direction(as_i32(&direction.value)?)?,
+        left: mleader_attachment(as_i32(&left.value)?)?,
+        right: mleader_attachment(as_i32(&right.value)?)?,
+        dogleg,
+    })
+}
+
+/// Restore the direction, the attachments and the dogleg length a multileader's groups state; the names of the groups applied and
+/// the words the file's legacy record stated.
+fn restore_mleader(mleader: &mut crate::entities::MultiLeader, groups: &[Group]) -> (Vec<String>, MLeaderRecord) {
+    let mut applied = Vec::new();
+    let mut record = MLeaderRecord::default();
+    let once = |name: &str| groups.iter().filter(|group| group.name == name).count() == 1;
+    for group in groups {
+        if group.name == MLEADER_CONTEXT && once(MLEADER_CONTEXT) {
+            if let (Some(words), Some(legacy)) = (mleader_context_group(group), mleader_context_words(mleader)) {
+                set_mleader_context_words(mleader, words);
+                record.context = Some((legacy, words));
+                applied.push(group.name.clone());
+            }
+        } else if group.name == MLEADER_2010 && once(MLEADER_2010) {
+            if let Some(words) = mleader_entity_group(group) {
+                let legacy = mleader_entity_words(mleader);
+                set_mleader_entity_words(mleader, words);
+                record.entity = Some((legacy, words));
+                applied.push(group.name.clone());
+            }
+        }
+    }
+    (applied, record)
+}
+
+/// The multileader as the file's legacy record stated it (what ACadSharp reads, and what the writers before R2010 state again), when
+/// the reader restored words from a record: each word that still has the restored value takes the legacy one, an edited word stays.
+/// A multileader edited to horizontal has no record (`mleader_groups`), so its entity states its own words: the legacy ones are the
+/// approximation that goes with the record only.
+pub(crate) fn unrestored_mleader(document: &CadDocument, mleader: &crate::entities::MultiLeader) -> Option<crate::entities::MultiLeader> {
+    let record = document.consumed_records.mleaders.get(&mleader.common.handle).filter(|_| mleader_vertical(mleader))?;
+    let back = |now: MLeaderWords, legacy: MLeaderWords, restored: MLeaderWords| MLeaderWords {
+        direction: if now.direction == restored.direction { legacy.direction } else { now.direction },
+        left: if now.left == restored.left { legacy.left } else { now.left },
+        right: if now.right == restored.right { legacy.right } else { now.right },
+        dogleg: if now.dogleg == restored.dogleg { legacy.dogleg } else { now.dogleg },
+    };
+    let mut shown = mleader.clone();
+    if let (Some((legacy, restored)), Some(now)) = (record.context, mleader_context_words(mleader)) {
+        set_mleader_context_words(&mut shown, back(now, legacy, restored));
+    }
+    if let Some((legacy, restored)) = record.entity {
+        set_mleader_entity_words(&mut shown, back(mleader_entity_words(mleader), legacy, restored));
+    }
+    Some(shown)
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
 // Records that are not in the object's own extension dictionary record: a dictionary of the root dictionary
 // (`ACAD_2007HEADERVARS_RT`) and the dictionary of a block record's extension dictionary (`AcDbBlockTableRecordData`).
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1780,16 +1988,27 @@ fn restore_record(
     let wanted = match document.get_entity(owner) {
         Some(crate::entities::EntityType::Viewport(_)) => true,
         Some(crate::entities::EntityType::Solid3D(_)) => !solid_history_holds(version),
+        Some(crate::entities::EntityType::MultiLeader(_)) => !mleader_holds(version),
         _ => false,
     };
     if !wanted {
         return Vec::new();
     }
-    match document.get_entity_mut_keep_raw(owner) {
+    let mut restored = None;
+    let applied = match document.get_entity_mut_keep_raw(owner) {
         Some(crate::entities::EntityType::Viewport(viewport)) => restore_viewport(viewport, groups, version),
         Some(crate::entities::EntityType::Solid3D(solid)) => restore_solid(solid, groups),
+        Some(crate::entities::EntityType::MultiLeader(mleader)) => {
+            let (applied, record) = restore_mleader(mleader, groups);
+            restored = Some(record);
+            applied
+        }
         _ => Vec::new(),
+    };
+    if let Some(record) = restored.filter(|record| *record != MLeaderRecord::default()) {
+        document.consumed_records.mleaders.insert(owner, record);
     }
+    applied
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2439,6 +2658,29 @@ fn drop_emptied_layer_dictionaries(document: &mut CadDocument) {
 /// State the groups of every kind the output version needs, from the native values, and drop the groups the version holds
 /// natively. `dxf` selects the DXF rules.
 pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>, version: DxfVersion, dxf: bool) {
+    prepare_records_for_write(document, version, dxf);
+    // After the records are stated from the native values: a multileader the reader restored states the legacy words of its file
+    // below R2010 (the record holds the others).
+    if version < DxfVersion::AC1024 && !document.consumed_records.mleaders.is_empty() {
+        let shown: Vec<crate::entities::MultiLeader> = document
+            .consumed_records
+            .mleaders
+            .keys()
+            .filter_map(|handle| match document.get_entity(*handle) {
+                Some(crate::entities::EntityType::MultiLeader(mleader)) => unrestored_mleader(document, mleader),
+                _ => None,
+            })
+            .collect();
+        let owned = document.to_mut();
+        for mleader in shown {
+            if let Some(crate::entities::EntityType::MultiLeader(target)) = owned.get_entity_mut_keep_raw(mleader.common.handle) {
+                **target = mleader;
+            }
+        }
+    }
+}
+
+fn prepare_records_for_write(document: &mut std::borrow::Cow<'_, CadDocument>, version: DxfVersion, dxf: bool) {
     // The records the reader took out of the model are the starting point: the objects of the file, refreshed below. R2013 and later
     // hold the properties of a visual style in the style: its record and extension dictionary stay out.
     if version >= DxfVersion::AC1027 && !document.consumed_records.style_changes.is_empty() {
@@ -2612,6 +2854,10 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
                 // The gradient of a hatch before R2004 (R14 and R2000 DWG, R2000 DXF).
                 let wanted: Vec<Group> = if needs(gradient_holds, gradient_dxf) { gradient_group(&hatch.gradient_color).into_iter().collect() } else { Vec::new() };
                 jobs.push(Job { owner: handle, owns: Owns::Exact(&[GRADIENT]), wanted, fresh: Some(Vec::new()), leave: leaves(gradient_holds, gradient_dxf) });
+            }
+            crate::entities::EntityType::MultiLeader(mleader) => {
+                let wanted = if needs(mleader_holds, mleader_dxf) { mleader_groups(mleader) } else { Vec::new() };
+                jobs.push(Job { owner: handle, owns: Owns::Exact(&[MLEADER_CONTEXT, MLEADER_2010]), wanted, fresh: Some(Vec::new()), leave: leaves(mleader_holds, mleader_dxf) });
             }
             crate::entities::EntityType::Solid3D(solid) => {
                 let wanted = if needs(solid_history_holds, never) { solid_groups(solid) } else { Vec::new() };
@@ -3252,5 +3498,169 @@ fn state_header_roundtrip(document: &mut CadDocument, version: DxfVersion, wante
     for key in states {
         let entries = wanted.iter().find(|(name, _)| name == key).map(|(_, entries)| entries.clone());
         set_record(document, chain, key, entries, false, version);
+    }
+}
+
+#[cfg(test)]
+mod mleader_tests {
+    use super::*;
+    use crate::entities::multileader::{LeaderRoot, TextAttachmentDirectionType as Direction, TextAttachmentType as Attach};
+    use crate::entities::{EntityType, MultiLeader};
+
+    /// AutoCAD's records of the vertical multileader #B27 (sample_AC1014.dwg to sample_AC1021.dwg and the DXF twins).
+    fn autocad_entries() -> Vec<XRecordEntry> {
+        join(&[
+            Group::new(
+                MLEADER_CONTEXT,
+                vec![XRecordEntry::int16(272, 1), XRecordEntry::int16(174, 0), XRecordEntry::int16(175, 8), XRecordEntry::int32(91, 0), XRecordEntry::double(40, 0.0)],
+            ),
+            Group::new(MLEADER_2010, vec![XRecordEntry::int16(272, 1), XRecordEntry::int16(173, 0), XRecordEntry::int16(174, 8), XRecordEntry::double(41, 8.0)]),
+        ])
+    }
+
+    /// The multileader as AutoCAD's R2004 file states it (sample_AC1018.dwg: left attachment 4, right 0, no dogleg, horizontal) with its
+    /// round-trip records; `read` has the reader's work done.
+    fn drawing(read: bool) -> (CadDocument, Handle) {
+        let mut document = CadDocument::with_version(DxfVersion::AC1018);
+        document.dwg_source_version = Some(DxfVersion::AC1018);
+        let mut mleader = MultiLeader::new();
+        mleader.context.leader_roots = vec![LeaderRoot::new(0)];
+        mleader.text_left_attachment = Attach::BottomOfBottomLine;
+        mleader.text_right_attachment = Attach::TopOfTopLine;
+        mleader.context.text_left_attachment = Attach::BottomOfBottomLine;
+        mleader.context.text_right_attachment = Attach::TopOfTopLine;
+        mleader.dogleg_length = 0.0;
+        let handle = document.add_entity(EntityType::MultiLeader(Box::new(mleader))).unwrap();
+        let record = document.ensure_xrecord(handle, KEY);
+        let Some(ObjectType::XRecord(record)) = document.objects.get_mut(&record) else { panic!("record") };
+        record.entries = autocad_entries();
+        record.entries_complete = true;
+        if read {
+            restore_document(&mut document);
+        }
+        (document, handle)
+    }
+
+    fn mleader(document: &CadDocument, handle: Handle) -> MultiLeader {
+        match document.get_entity(handle) {
+            Some(EntityType::MultiLeader(mleader)) => (**mleader).clone(),
+            _ => panic!("no multileader"),
+        }
+    }
+
+    fn words(mleader: &MultiLeader) -> (Direction, Direction, i16, i16, i16, i16, f64) {
+        (
+            mleader.text_attachment_direction,
+            mleader.context.leader_roots[0].text_attachment_direction,
+            mleader.text_left_attachment as i16,
+            mleader.text_right_attachment as i16,
+            mleader.context.text_left_attachment as i16,
+            mleader.context.text_right_attachment as i16,
+            mleader.dogleg_length,
+        )
+    }
+
+    fn record_entries_of(document: &CadDocument, handle: Handle) -> Option<Vec<XRecordEntry>> {
+        document.xrecord(handle, KEY).map(|record| record.entries.clone())
+    }
+
+    /// The ACadSharp view of a restored multileader shows the words the file's entity states (ACadSharp does not read the records into
+    /// the entity): those of the same drawing before the reader's work (review of R5b-15: the view had no test).
+    #[cfg(feature = "acadsharp-compat")]
+    #[test]
+    fn the_acadsharp_view_of_a_restored_multileader_shows_the_file_words() {
+        let shown = |document: &CadDocument| {
+            let dump = crate::compat::acadsharp::dump_document(document, "", "new");
+            let props = dump["objects"].as_array().unwrap().iter().find(|object| object["type"] == "MultiLeader").expect("a multileader")["props"].clone();
+            ["TextAttachmentDirection", "TextLeftAttachment", "TextRightAttachment", "LandingDistance"].map(|key| props[key].clone())
+        };
+        let (file, _) = drawing(false);
+        let (read, _) = drawing(true);
+        assert_eq!(shown(&read), shown(&file));
+        assert_ne!(shown(&read)[1], serde_json::json!(0), "not the restored left attachment");
+    }
+
+    /// The reader restores the words the records state and takes the records out of the model; the ACadSharp view and the writers before
+    /// R2010 state the legacy words of the file.
+    #[test]
+    fn the_records_of_a_vertical_multileader_are_read_and_the_file_words_stay_in_the_view() {
+        let (document, handle) = drawing(true);
+        assert_eq!(words(&mleader(&document, handle)), (Direction::Vertical, Direction::Vertical, 0, 8, 0, 8, 8.0));
+        assert!(record_entries_of(&document, handle).is_none(), "the record is out of the model");
+        let shown = unrestored_mleader(&document, &mleader(&document, handle)).expect("a restored multileader");
+        assert_eq!(words(&shown), (Direction::Horizontal, Direction::Horizontal, 4, 0, 4, 0, 0.0), "what ACadSharp reads");
+        // an edit after the read wins, word by word
+        let mut edited = document.clone();
+        let Some(EntityType::MultiLeader(target)) = edited.get_entity_mut(handle) else { panic!() };
+        target.text_attachment_direction = Direction::Horizontal;
+        target.dogleg_length = 5.0;
+        let shown = unrestored_mleader(&edited, &mleader(&edited, handle)).unwrap();
+        assert_eq!(words(&shown), (Direction::Horizontal, Direction::Horizontal, 4, 0, 4, 0, 5.0));
+    }
+
+    /// Written again before R2010 the record is AutoCAD's and the entity states the legacy words; written for R2010 and later the record is
+    /// gone and the entity states the restored words; an edit that makes the multileader horizontal drops the record.
+    #[test]
+    fn a_vertical_multileader_states_the_records_before_r2010_and_not_after() {
+        let (document, handle) = drawing(true);
+        for version in [DxfVersion::AC1014, DxfVersion::AC1015, DxfVersion::AC1018, DxfVersion::AC1021] {
+            for dxf in [false, true] {
+                let mut prepared = std::borrow::Cow::Borrowed(&document);
+                prepare_for_write(&mut prepared, version, dxf);
+                assert_eq!(record_entries_of(&prepared, handle).unwrap(), autocad_entries(), "{version:?} dxf {dxf}");
+                assert_eq!(words(&mleader(&prepared, handle)), (Direction::Horizontal, Direction::Horizontal, 4, 0, 4, 0, 0.0), "{version:?} dxf {dxf}");
+            }
+        }
+        for dxf in [false, true] {
+            let mut prepared = std::borrow::Cow::Borrowed(&document);
+            prepare_for_write(&mut prepared, DxfVersion::AC1024, dxf);
+            assert!(record_entries_of(&prepared, handle).is_none_or(|entries| entries.is_empty()), "dxf {dxf}: R2010 states the words itself");
+            assert_eq!(words(&mleader(&prepared, handle)), (Direction::Vertical, Direction::Vertical, 0, 8, 0, 8, 8.0));
+        }
+        let mut edited = document.clone();
+        let Some(EntityType::MultiLeader(target)) = edited.get_entity_mut(handle) else { panic!() };
+        target.text_attachment_direction = Direction::Horizontal;
+        target.context.leader_roots[0].text_attachment_direction = Direction::Horizontal;
+        let mut prepared = std::borrow::Cow::Borrowed(&edited);
+        prepare_for_write(&mut prepared, DxfVersion::AC1018, false);
+        assert!(record_entries_of(&prepared, handle).is_none_or(|entries| entries.is_empty()), "a horizontal multileader has no record");
+        // without the record the legacy words would replace the multileader's own attachments and dogleg length, which the entity holds
+        assert_eq!(words(&mleader(&prepared, handle)), (Direction::Horizontal, Direction::Horizontal, 0, 8, 0, 8, 8.0), "its own words");
+        assert!(unrestored_mleader(&edited, &mleader(&edited, handle)).is_none(), "the view shows its own words too");
+    }
+
+    /// A drawing of R2010 or later (no consumed record) gets the records AutoCAD writes for a vertical multileader when it is saved
+    /// before R2010, none for a horizontal one; a record of another shape is another producer's data and is neither read nor changed.
+    #[test]
+    fn a_down_save_states_the_records_for_a_vertical_multileader_only() {
+        let (mut document, handle) = drawing(true);
+        document.consumed_records = Consumed::default();
+        document.dwg_source_version = Some(DxfVersion::AC1032);
+        document.version = DxfVersion::AC1032;
+        let record = document.xrecord(handle, KEY);
+        assert!(record.is_none(), "the records were taken out of the model by the read above");
+        let mut prepared = std::borrow::Cow::Borrowed(&document);
+        prepare_for_write(&mut prepared, DxfVersion::AC1018, false);
+        assert_eq!(record_entries_of(&prepared, handle).unwrap(), autocad_entries(), "converted from R2018");
+        let (horizontal, other) = {
+            let mut horizontal = document.clone();
+            let Some(EntityType::MultiLeader(target)) = horizontal.get_entity_mut(handle) else { panic!() };
+            target.text_attachment_direction = Direction::Horizontal;
+            target.context.leader_roots[0].text_attachment_direction = Direction::Horizontal;
+            (horizontal, handle)
+        };
+        let mut prepared = std::borrow::Cow::Borrowed(&horizontal);
+        prepare_for_write(&mut prepared, DxfVersion::AC1018, false);
+        assert!(record_entries_of(&prepared, other).is_none(), "no record for a horizontal multileader");
+        // the same groups with another value in the part the sample states as 0: not read
+        let (mut foreign, handle) = drawing(false);
+        let record = foreign.ensure_xrecord(handle, KEY);
+        let Some(ObjectType::XRecord(xrecord)) = foreign.objects.get_mut(&record) else { panic!() };
+        xrecord.entries[4] = XRecordEntry::int32(91, 3);
+        let before = xrecord.entries.clone();
+        restore_document(&mut foreign);
+        assert_eq!(words(&mleader(&foreign, handle)).0, Direction::Vertical, "the entity group has the shape and is read");
+        let left = record_entries_of(&foreign, handle).unwrap();
+        assert_eq!(left, before[..6].to_vec(), "only the group of another shape stays, as it was");
     }
 }

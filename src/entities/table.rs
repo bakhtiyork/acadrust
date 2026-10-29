@@ -2454,6 +2454,8 @@ impl Default for TableBuilder {
 
 /// The key of the extension-dictionary record that links a table to its TABLECONTENT and TABLEGEOMETRY objects.
 const ROUNDTRIP_RECORD_KEY: &str = "ACAD_XREC_ROUNDTRIP";
+/// The value flags AutoCAD states in the legacy record of every table it writes (`Table::legacy_value_flags`).
+const LEGACY_TABLE_VALUE_FLAGS: i32 = 22;
 /// The first entry (group 102) of that record.
 const ROUNDTRIP_TABLE_MARKER: &str = "ACAD_ROUNDTRIP_2008_TABLE_ENTITY";
 
@@ -2730,6 +2732,38 @@ pub(crate) fn store_table_roundtrip(document: &mut crate::document::CadDocument,
                 record.reactors = vec![record.owner];
             }
             record.synchronize_object_references();
+        }
+    }
+}
+
+/// Whether a table without legacy words has the objects the reader completes it from (it was read from a file of R2010 or later, which
+/// keeps them, or `store_table_roundtrip` made them) and holds no value flags.
+fn table_needs_value_flags(document: &crate::document::CadDocument, table: &Table) -> bool {
+    table.value_flags == 0 && table.dxf_legacy.0.is_none() && table_roundtrip(document, table.common.handle).is_some()
+}
+
+pub(crate) fn tables_need_value_flags(document: &crate::document::CadDocument) -> bool {
+    use crate::entities::EntityType;
+    document.entities().any(|entity| matches!(entity, EntityType::Table(table) if table_needs_value_flags(document, table)))
+}
+
+/// State the value flags of the legacy entity record (a DWG before R2010, a DXF) of the tables that have none. AutoCAD states 22 in
+/// every table it writes there (both tables of sample_AC1014.dwg to sample_AC1021.dwg and the DXF twins of R2000 to R2018, whatever
+/// the R2010 record of the table holds: its own short is 22 and 6). A table with the objects the reader completes it from reads back
+/// as its R2010 record again (value flags 0, `as_r2010_record`); a flat table, which reads back as it is written, and a table with
+/// words of its own keep what they hold. Applied to the copy of the document a writer prepares.
+pub(crate) fn state_legacy_value_flags(document: &mut crate::document::CadDocument) {
+    use crate::entities::EntityType;
+    let handles: Vec<Handle> = document
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::Table(table) if table_needs_value_flags(document, table) => Some(table.common.handle),
+            _ => None,
+        })
+        .collect();
+    for handle in handles {
+        if let Some(EntityType::Table(table)) = document.get_entity_mut(handle) {
+            table.value_flags = LEGACY_TABLE_VALUE_FLAGS;
         }
     }
 }

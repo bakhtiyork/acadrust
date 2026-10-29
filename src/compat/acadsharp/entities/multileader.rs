@@ -34,6 +34,9 @@ fn standard_style(doc: &CadDocument) -> Option<Handle> {
 }
 
 pub(super) fn collect(doc: &CadDocument, value: &MultiLeader, out: &mut Vec<Value>) {
+    // A multileader the reader restored from AutoCAD's round-trip records shows the words of the file's legacy record, as ACadSharp reads them.
+    let legacy = crate::io::dwg::autocad_records::unrestored_mleader(doc, value);
+    let value = legacy.as_ref().unwrap_or(value);
     let source = value.dxf_source.as_deref();
     let dxf = source.is_some();
     let absent = |code| source.is_some_and(|s| !s.contains(code));

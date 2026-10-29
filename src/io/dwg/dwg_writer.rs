@@ -61,8 +61,20 @@ impl DwgWriter {
     }
 
     /// Write a DWG file to any `Write + Seek` output.
-    pub fn write_to_writer<W: Write + Seek>(mut output: W, document: &CadDocument) -> Result<()> {
+    pub fn write_to_writer<W: Write + Seek>(output: W, document: &CadDocument) -> Result<()> {
+        Self::write_impl(output, document, false)
+    }
+
+    /// The writer behind `write_to_writer` and `write_to_writer_no_lz77`: `skip_lz77` stores the pages of the R2007 container
+    /// uncompressed, which no other version has (the document's version decides the container).
+    fn write_impl<W: Write + Seek>(mut output: W, document: &CadDocument, skip_lz77: bool) -> Result<()> {
         validate_unknown_records(document)?;
+        if skip_lz77 && !uses_ac21_format(document.version) {
+            return Err(DxfError::UnsupportedVersion(format!(
+                "The uncompressed (no LZ77) container exists for DWG R2007 only, not for {:?}",
+                document.version
+            )));
+        }
         if document.version == DxfVersion::AC1009 {
             let bytes = crate::io::dwg::r12::write_document(document)?;
             output.write_all(&bytes)?;
@@ -140,6 +152,9 @@ impl DwgWriter {
                 crate::objects::store_visual_style_roundtrip(&mut owned);
                 let version = owned.version;
                 crate::entities::table::store_table_roundtrip(&mut owned, version);
+                if version < DxfVersion::AC1024 && crate::entities::table::tables_need_value_flags(&owned) {
+                    crate::entities::table::state_legacy_value_flags(&mut owned);
+                }
             }
             if classless {
                 // After the passes above: they make objects, and the classes are those of the finished document.
@@ -151,7 +166,11 @@ impl DwgWriter {
         };
 
         let result = if uses_ac21_format(version) {
-            write_ac21(&mut output, document, version)
+            if skip_lz77 {
+                write_ac21_impl(&mut output, document, version, true)
+            } else {
+                write_ac21(&mut output, document, version)
+            }
         } else if uses_paged_format(version) {
             write_ac18(&mut output, document, version)
         } else {
@@ -181,26 +200,13 @@ impl DwgWriter {
         Self::write_to_writer_no_lz77(writer, document)
     }
 
-    /// Write an AC21 DWG without LZ77 to any `Write + Seek` output.
+    /// Write an AC21 DWG without LZ77 to any `Write + Seek` output. The document is prepared as `write_to_writer` prepares it; a
+    /// document of another version than R2007 is refused (it would be written in the R2007 container, which its version does not use).
     pub fn write_to_writer_no_lz77<W: Write + Seek>(
-        mut output: W,
+        output: W,
         document: &CadDocument,
     ) -> Result<()> {
-        validate_unknown_records(document)?;
-        validate_version(document.version)?;
-        let mut prepared = crate::io::loft_parameters::prepared(document);
-        prepare_surface_classes(&mut prepared);
-        prepare_database_references(&mut prepared);
-        prepare_table_keys(&mut prepared);
-        prepare_active_viewport_elevation(&mut prepared);
-        prepare_roundtrip_records(&mut prepared);
-        let target = prepared.version;
-        crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, target);
-        crate::io::dwg::autocad_conversions::unrestore_book_colors(&mut prepared, target);
-        prepare_book_colors(&mut prepared)?;
-        crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, target, false);
-        crate::io::dwg::autocad_records::prepare_for_write(&mut prepared, target, false);
-        write_ac21_impl(&mut output, prepared.as_ref(), document.version, true)
+        Self::write_impl(output, document, true)
     }
 
     /// Write a DWG file to a byte vector (useful for testing).

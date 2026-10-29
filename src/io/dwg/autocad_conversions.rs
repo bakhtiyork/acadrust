@@ -1753,7 +1753,6 @@ mod tests {
         };
         assert_eq!(book_of(&old).color, Color::from_rgb(226, 144, 0));
         assert_eq!(legacy_book_color_index(&old, handle, &book_of(&old)), Some(30));
-        // `write_to_writer_no_lz77` writes the R2007 container (`write_ac21_impl`) whatever the version: not a file below R2004.
         let read = DwgReader::from_stream(std::io::Cursor::new(DwgWriter::write_to_vec(&old).unwrap())).read().unwrap();
         let book = book_of(&read);
         assert_eq!((book.color, book.color_name.as_str()), (Color::from_rgb(226, 144, 0), "RAL 1006"));
