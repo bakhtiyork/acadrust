@@ -748,7 +748,7 @@ fn write_header_fields(w: &mut SectionWriter, v: DxfVersion, h: &HeaderVariables
     if r13_14_only(v) {
         w.write_variable_text(&h.dim_post);
         w.write_variable_text(&h.dim_alt_post);
-        w.write_variable_text(&h.dim_arrow_block);
+        w.write_variable_text(crate::io::dwg::autocad_records::r14_arrow_name(&h.dim_arrow_block).map_or(h.dim_arrow_block.as_str(), |name| name));
         w.write_variable_text(&h.dim_arrow_block1);
         w.write_variable_text(&h.dim_arrow_block2);
     }

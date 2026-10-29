@@ -435,13 +435,15 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
     }));
     for v in doc.dim_styles.iter() {
         records.push(Box::new(move || {
+            // R14 has no place for DIMDSEP, DIMBLK and DIMLWD: AutoCAD's record holds them, ACadSharp reads the defaults.
+            let unrestored = crate::io::dwg::autocad_records::unrestored_dim_style(doc, v);
             let mut out = Vec::new();
             entry(
                 doc,
                 v.handle,
                 "DimensionStyle",
                 doc.dim_styles.handle(),
-                super::table_dimstyle::map(doc, v),
+                super::table_dimstyle::map(doc, unrestored.as_ref().unwrap_or(v)),
                 &mut out,
             );
             out.pop().expect("table entry")

@@ -1020,20 +1020,19 @@ fn add_missing_object_classes(document: &mut CadDocument) {
 /// back to in these versions.
 fn prepare_legacy_document(document: &mut CadDocument) {
     use crate::objects::ObjectType;
-    // A document without VX records (a DXF, or a DWG of a later version) gets one per viewport. A drawing that has VX records
-    // of its own (an R14 DWG) keeps them: AutoCAD's R14 files hold records for the viewports of the active paper space only
-    // (sample_AC1014.dwg: none for the viewports of the other layouts' blocks), so only a viewport of the active paper space
-    // that lacks one gets one.
+    // AutoCAD's R14 files hold VX records for the viewports of the active paper space only (sample_AC1014.dwg from sample_AC1032.dwg:
+    // 3 records, the reserved one and the two viewports of the block *PAPER_SPACE, none for the 4 viewports of the other layouts'
+    // blocks), so a document without VX records (a DXF, or a DWG of a later version) gets one per viewport of the active paper space
+    // (R5b-12: it got one per viewport, 7 records), and a drawing that has VX records of its own (an R14 DWG) keeps them and gets
+    // one only for a viewport of the active paper space that lacks one.
     if document.version <= DxfVersion::AC1014 {
-        let own_records = !document.vx_table.is_empty();
         let paper_space = document.header.paper_space_block_handle;
         let missing: Vec<_> = document
             .entities()
             .filter_map(|entity| match entity {
                 crate::entities::EntityType::Viewport(viewport)
-                    if !own_records
-                        || (viewport.common.owner_handle == paper_space
-                            && !document.vx_table.iter().any(|record| record.viewport == viewport.common.handle)) =>
+                    if (paper_space.is_null() || viewport.common.owner_handle == paper_space)
+                        && !document.vx_table.iter().any(|record| record.viewport == viewport.common.handle) =>
                 {
                     Some((viewport.common.handle, viewport.is_on()))
                 }
@@ -1055,6 +1054,8 @@ fn prepare_legacy_document(document: &mut CadDocument) {
             let mut reserved = crate::tables::VxTableRecord::new("");
             reserved.handle = document.allocate_handle();
             reserved.is_xref_reference = true;
+            // AutoCAD's reserved record is on (sample_AC1014.dwg).
+            reserved.is_on = true;
             document.vx_table.add_allow_duplicate(reserved);
         }
         for (viewport, is_on) in missing {

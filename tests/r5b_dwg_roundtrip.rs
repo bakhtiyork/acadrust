@@ -283,8 +283,9 @@ fn handle_seed_does_not_grow_with_round_trips() {
         let third = write_and_read(&second, version);
         // R14 states its names in upper case and keeps the names of the drawing in a round-trip record (and its extension
         // dictionary) of each of the 10 table records whose name differs (3 line types, Standard text and dimension style, 2
-        // applications, 2 block records, *Active): 20 objects take the handles from the seed. (R5b-11, AutoCAD's own R14 file.)
-        let seed = if version == DxfVersion::AC1014 { 5020 } else { 5000 };
+        // applications, 2 block records, *Active): 20 objects take the handles from the seed. (R5b-11, AutoCAD's own R14 file.) R5b-12: the
+        // header chain `ACDBHEADERROUNDTRIPXREC` (the dictionary and its INSUNITS record, sample_AC1014.dwg) takes 2 more.
+        let seed = if version == DxfVersion::AC1014 { 5022 } else { 5000 };
         assert_eq!(
             first.header.source_handle_seed,
             Some(seed),

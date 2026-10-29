@@ -1709,7 +1709,15 @@ impl<'a> DwgObjectWriter<'a> {
             // DIMAPOST T 4
             self.writer.write_variable_text(&ds.dimapost);
             // DIMBLK T 5
-            self.writer.write_variable_text(&ds.dimblk_name);
+            // The arrowhead R14 names: its record states the block as a name (the block of a style read from a later file, and its R14
+            // spelling `BOXBLANK`); the handle goes to AutoCAD's `ACADR14ROUNDTRIP` record.
+            let arrow = if ds.dimblk_name.is_empty() {
+                self.document.block_records.iter().find(|block| !ds.dimblk.is_null() && block.handle == ds.dimblk).map(|block| block.name.as_str())
+            } else {
+                Some(ds.dimblk_name.as_str())
+            };
+            let stated = arrow.map_or("", |name| crate::io::dwg::autocad_records::r14_arrow_name(name).unwrap_or(if ds.dimblk_name.is_empty() { "" } else { name }));
+            self.writer.write_variable_text(stated);
             // DIMBLK1 T 6
             self.writer.write_variable_text(&ds.dimblk1_name);
             // DIMBLK2 T 7

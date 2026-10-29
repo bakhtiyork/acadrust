@@ -924,6 +924,16 @@ fn project_source_values(
             value[key] = json!("ByBlock");
         }
     }
+    // R14 has no place for INSUNITS and the dimension variables of AutoCAD's `ACDBHEADERROUNDTRIPXREC` records, which ACadSharp reads
+    // as objects: the native header holds them, the view shows what ACadSharp reads.
+    if crate::io::dwg::autocad_records::masked(doc, crate::io::dwg::autocad_records::header_roundtrip_holds) {
+        let defaults = crate::document::HeaderVariables::default();
+        value["InsUnits"] = json!(defaults.insertion_units);
+        value["DimensionLineWeight"] = json!(defaults.dim_line_weight);
+        value["DimensionDecimalSeparator"] = character(defaults.dim_decimal_separator);
+        // the restored block handle names the block of the header's DIMBLK; ACadSharp reads R14's name
+        value["DimensionBlockName"] = json!(crate::io::dwg::autocad_records::r14_arrow_name(&h.dim_arrow_block).unwrap_or(h.dim_arrow_block.as_str()));
+    }
     // Color.TrueColor is the little-endian packed RGB integer in ACadSharp.
     // Keep this local to header projection; native Color is unchanged.
     for key in [

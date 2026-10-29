@@ -280,7 +280,10 @@ fn an_r14_viewport_has_the_world_axes_and_gets_its_view_parameters_back_from_the
     // R14 states the flag as bit 2 of the UCS icon word of its MVIEW data, which a reader puts into the status word (the icon at the
     // origin, as AutoCAD's own R2000 file of its R14 drawing states it: sample_AC1014.dwg and sample_AC1015.dwg).
     assert!(from_dwg.status.ucs_icon_at_origin);
-    assert!(!from_dwg.ucs_at_origin);
+    // The viewport's own flag (group 74, the entity's `ucs_at_origin`) is not the icon's: AutoCAD's R14 file keeps it in the UCS group
+    // of the viewport's round-trip record (R5b-12: sample_AC1014.dwg, `{UCS 74 ..}`, 0 in all 6 viewports whose icon bits differ), so
+    // it survives R14 (it was lost before).
+    assert!(from_dwg.ucs_at_origin);
     let back = dxf(&read);
     let EntityType::Viewport(from_dxf) = back.get_entity(handle).expect("viewport") else { panic!() };
     assert_eq!(from_dxf.custom_scale, from_dwg.custom_scale);
