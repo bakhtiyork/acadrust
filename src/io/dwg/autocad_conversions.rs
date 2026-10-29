@@ -580,6 +580,7 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
                 _ => None,
             })
             .collect();
+        let mut books = Vec::new();
         for (handle, application, app) in taken {
             let mut list = document.consumed_xdata.remove(&handle).unwrap_or_default();
             if let Some(entry) = with_object(document, handle, |data| take_record(data, application, app, &list)) {
@@ -588,8 +589,11 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
             if !list.is_empty() {
                 document.consumed_xdata.insert(handle, list);
             }
+            if matches!(document.objects.get(&handle), Some(ObjectType::BookColor(_))) {
+                books.push(handle);
+            }
         }
-        restore_read_book_colors(document);
+        restore_read_book_colors(document, &books);
     }
     if !holds_dimension_fill(version) {
         let handles: Vec<Handle> = document.dim_styles.iter().map(|style| style.handle).collect();
@@ -697,14 +701,14 @@ fn taken_book_block<'a>(document: &'a CadDocument, handle: Handle) -> Option<&'a
 /// DBCOLOR in AutoCAD's R2004 file has them: sample_AC1015.dwg #996 index 42, sample_AC1018.dwg (226, 144, 0), "RAL CLASSIC", "RAL 1006").
 /// The block was taken out of the extended data by the caller; the ACadSharp view shows the object as the old record states it
 /// (`legacy_book_color_index`), and the writers of a version below R2004 state the index again (`unrestore_book_colors`).
-fn restore_read_book_colors(document: &mut CadDocument) {
+fn restore_read_book_colors(document: &mut CadDocument, books: &[Handle]) {
     if document.version >= DxfVersion::AC1018 {
         return;
     }
-    let restored: Vec<(Handle, Color, String)> = document
-        .objects
+    // The objects whose block the read took out (`books`), not a scan of the object map.
+    let restored: Vec<(Handle, Color, String)> = books
         .iter()
-        .filter_map(|(handle, object)| match object {
+        .filter_map(|handle| match document.objects.get(handle)? {
             ObjectType::BookColor(book) if !book.color.is_true_color() && book.book_name.is_empty() && book.color_name.is_empty() => {
                 let record = taken_book_block(document, *handle)?;
                 // The block names the index of the record; another index is another producer's block.
@@ -748,10 +752,11 @@ pub(crate) fn unrestore_book_colors(document: &mut std::borrow::Cow<'_, CadDocum
     if version >= DxfVersion::AC1018 {
         return;
     }
+    // Only an object with a taken block can be one (`legacy_book_color_index`): the records taken, not the object map.
     let old: Vec<(Handle, i16)> = document
-        .objects
-        .iter()
-        .filter_map(|(handle, object)| match object {
+        .consumed_xdata
+        .keys()
+        .filter_map(|handle| match document.objects.get(handle)? {
             ObjectType::BookColor(book) => legacy_book_color_index(document, *handle, book).map(|index| (*handle, index)),
             _ => None,
         })
@@ -1712,6 +1717,47 @@ mod tests {
         r2004.dwg_source_version = Some(DxfVersion::AC1018);
         restore_document(&mut r2004);
         assert_eq!(legacy_book_color_index(&r2004, handle, &book_of(&r2004)), None);
+    }
+
+    /// The DWG writers below R2004 state the index the file's DBCOLOR record and block had, not the nearest index of the restored
+    /// colour: a block of index 30 for (226, 144, 0), whose nearest index is 42, is written and read back as 30.
+    #[test]
+    fn a_dwg_before_r2004_states_the_index_the_colour_book_record_was_read_with() {
+        use crate::io::dwg::{DwgReader, DwgWriter};
+        let mut modern = document(DxfVersion::AC1032);
+        modern.dwg_source_version = Some(DxfVersion::AC1032);
+        let mut book = BookColor::new();
+        book.handle = modern.allocate_handle();
+        book.book_name = "RAL CLASSIC".into();
+        book.color_name = "RAL 1006".into();
+        book.color = Color::from_rgb(226, 144, 0);
+        let handle = book.handle;
+        modern.objects.insert(handle, ObjectType::BookColor(book));
+        assert_eq!(crate::types::aci_table::nearest_aci(226, 144, 0), 42);
+        // the file of R2000 as another index states it: record and block 30
+        let mut old = written(&modern, DxfVersion::AC1027);
+        old.version = DxfVersion::AC1015;
+        old.dwg_source_version = Some(DxfVersion::AC1015);
+        if let Some(ObjectType::BookColor(book)) = old.objects.get_mut(&handle) {
+            book.color = Color::from_index(30);
+            book.book_name.clear();
+            book.color_name.clear();
+        }
+        let block = old.object_xdata.get_mut(&handle).unwrap().records_mut().iter_mut().find(|record| record.application_name == ACAD).unwrap();
+        assert!(matches!(block.values[1], X::Integer16(42)));
+        block.values[1] = X::Integer16(30);
+        restore_document(&mut old);
+        let book_of = |document: &CadDocument| match document.objects.get(&handle) {
+            Some(ObjectType::BookColor(book)) => book.clone(),
+            _ => panic!("colour book"),
+        };
+        assert_eq!(book_of(&old).color, Color::from_rgb(226, 144, 0));
+        assert_eq!(legacy_book_color_index(&old, handle, &book_of(&old)), Some(30));
+        // `write_to_writer_no_lz77` writes the R2007 container (`write_ac21_impl`) whatever the version: not a file below R2004.
+        let read = DwgReader::from_stream(std::io::Cursor::new(DwgWriter::write_to_vec(&old).unwrap())).read().unwrap();
+        let book = book_of(&read);
+        assert_eq!((book.color, book.color_name.as_str()), (Color::from_rgb(226, 144, 0), "RAL 1006"));
+        assert_eq!(legacy_book_color_index(&read, handle, &book), Some(30), "the record and the block state 30");
     }
 
     /// sample_AC1018.dwg: a block record states its units in `ACAD DesignCenter Data`; AutoCAD's R2007 and later files do not.
