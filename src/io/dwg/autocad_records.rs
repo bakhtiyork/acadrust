@@ -1138,7 +1138,7 @@ fn restore_solid(solid: &mut crate::entities::Solid3D, groups: &[Group]) -> Vec<
 // Multileader (R14 to R2007 DWG, R2000 to R2007 DXF): the record has no place for the attachment direction of the text (R2010), nor
 // for the attachment types and the dogleg length of a vertical leader; AutoCAD's own files of the drawing keep them in
 // `ACAD_XREC_ROUNDTRIP {ROUNDTRIP_MLCONTEXT, ACAD_ROUNDTRIP_2010_MLEADER}` of the extension dictionary of the multileader (the one
-// vertical multileader #B27 of sample_AC1014.dwg to sample_AC1021.dwg and their DXF twins; the 29 horizontal ones have no record) and
+// vertical multileader #B27 of sample_AC1014.dwg to sample_AC1021.dwg and their DXF twins; the 14 horizontal ones have no record) and
 // state the legacy approximation in the entity (the attachments 4 and 0, the dogleg length 0, where sample_AC1024.dwg states 0, 8, 8):
 //   ROUNDTRIP_MLCONTEXT          272 = 1   174 = 0   175 = 8   91 = 0   40 = 0.0
 //   ACAD_ROUNDTRIP_2010_MLEADER  272 = 1   173 = 0   174 = 8   41 = 8.0
@@ -1215,13 +1215,16 @@ fn set_mleader_entity_words(mleader: &mut crate::entities::MultiLeader, words: M
     mleader.dogleg_length = words.dogleg;
 }
 
+/// Whether a multileader is vertical: the one kind AutoCAD writes the records for (none for a horizontal one).
+fn mleader_vertical(mleader: &crate::entities::MultiLeader) -> bool {
+    use crate::entities::multileader::TextAttachmentDirectionType::Vertical;
+    mleader.text_attachment_direction == Vertical || mleader.context.leader_roots.iter().any(|root| root.text_attachment_direction == Vertical)
+}
+
 /// The two groups of a multileader that is vertical (AutoCAD writes none for a horizontal one).
 fn mleader_groups(mleader: &crate::entities::MultiLeader) -> Vec<Group> {
-    use crate::entities::multileader::TextAttachmentDirectionType::Vertical;
     let context = mleader_context_words(mleader);
-    let vertical = mleader.text_attachment_direction == Vertical
-        || mleader.context.leader_roots.iter().any(|root| root.text_attachment_direction == Vertical);
-    let Some(context) = context.filter(|_| vertical) else {
+    let Some(context) = context.filter(|_| mleader_vertical(mleader)) else {
         return Vec::new();
     };
     let entity = mleader_entity_words(mleader);
@@ -1313,8 +1316,10 @@ fn restore_mleader(mleader: &mut crate::entities::MultiLeader, groups: &[Group])
 
 /// The multileader as the file's legacy record stated it (what ACadSharp reads, and what the writers before R2010 state again), when
 /// the reader restored words from a record: each word that still has the restored value takes the legacy one, an edited word stays.
+/// A multileader edited to horizontal has no record (`mleader_groups`), so its entity states its own words: the legacy ones are the
+/// approximation that goes with the record only.
 pub(crate) fn unrestored_mleader(document: &CadDocument, mleader: &crate::entities::MultiLeader) -> Option<crate::entities::MultiLeader> {
-    let record = document.consumed_records.mleaders.get(&mleader.common.handle)?;
+    let record = document.consumed_records.mleaders.get(&mleader.common.handle).filter(|_| mleader_vertical(mleader))?;
     let back = |now: MLeaderWords, legacy: MLeaderWords, restored: MLeaderWords| MLeaderWords {
         direction: if now.direction == restored.direction { legacy.direction } else { now.direction },
         left: if now.left == restored.left { legacy.left } else { now.left },
@@ -3559,6 +3564,22 @@ mod mleader_tests {
         document.xrecord(handle, KEY).map(|record| record.entries.clone())
     }
 
+    /// The ACadSharp view of a restored multileader shows the words the file's entity states (ACadSharp does not read the records into
+    /// the entity): those of the same drawing before the reader's work (review of R5b-15: the view had no test).
+    #[cfg(feature = "acadsharp-compat")]
+    #[test]
+    fn the_acadsharp_view_of_a_restored_multileader_shows_the_file_words() {
+        let shown = |document: &CadDocument| {
+            let dump = crate::compat::acadsharp::dump_document(document, "", "new");
+            let props = dump["objects"].as_array().unwrap().iter().find(|object| object["type"] == "MultiLeader").expect("a multileader")["props"].clone();
+            ["TextAttachmentDirection", "TextLeftAttachment", "TextRightAttachment", "LandingDistance"].map(|key| props[key].clone())
+        };
+        let (file, _) = drawing(false);
+        let (read, _) = drawing(true);
+        assert_eq!(shown(&read), shown(&file));
+        assert_ne!(shown(&read)[1], serde_json::json!(0), "not the restored left attachment");
+    }
+
     /// The reader restores the words the records state and takes the records out of the model; the ACadSharp view and the writers before
     /// R2010 state the legacy words of the file.
     #[test]
@@ -3603,6 +3624,9 @@ mod mleader_tests {
         let mut prepared = std::borrow::Cow::Borrowed(&edited);
         prepare_for_write(&mut prepared, DxfVersion::AC1018, false);
         assert!(record_entries_of(&prepared, handle).is_none_or(|entries| entries.is_empty()), "a horizontal multileader has no record");
+        // without the record the legacy words would replace the multileader's own attachments and dogleg length, which the entity holds
+        assert_eq!(words(&mleader(&prepared, handle)), (Direction::Horizontal, Direction::Horizontal, 0, 8, 0, 8, 8.0), "its own words");
+        assert!(unrestored_mleader(&edited, &mleader(&edited, handle)).is_none(), "the view shows its own words too");
     }
 
     /// A drawing of R2010 or later (no consumed record) gets the records AutoCAD writes for a vertical multileader when it is saved
