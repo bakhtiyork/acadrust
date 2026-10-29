@@ -1366,13 +1366,14 @@ impl<'a> DwgObjectWriter<'a> {
         self.writer.write_bit_long(rows.len() as i32);
         for (key, row, id, style_type, name, merge_flags) in rows {
             self.writer.write_bit_long(key);
-            self.write_default_modern_table_row_style(row, id, style_type, name, merge_flags);
+            self.write_default_modern_table_row_style(row, value, id, style_type, name, merge_flags);
         }
     }
 
     fn write_default_modern_table_row_style(
         &mut self,
         row: &RowCellStyle,
+        style: &TableStyle,
         id: i32,
         style_type: i32,
         name: &str,
@@ -1422,6 +1423,16 @@ impl<'a> DwgObjectWriter<'a> {
                     ..TableContentFormat::default()
                 },
                 borders,
+                // The margins of the style and the spacings of the base cell style, as AutoCAD states them in the cell styles it
+                // makes from the legacy rows of a table style (sample_AC1018.dwg against sample_AC1024.dwg: margin flag 1, the
+                // style's margins in all four sides, spacings 0.18).
+                margin_override_flags: 1,
+                vertical_margin: style.vertical_margin,
+                horizontal_margin: style.horizontal_margin,
+                bottom_margin: style.vertical_margin,
+                right_margin: style.horizontal_margin,
+                horizontal_spacing: 0.18,
+                vertical_spacing: 0.18,
                 ..TableCellStyleData::default()
             },
             id,

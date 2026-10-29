@@ -726,7 +726,7 @@ pub(crate) fn default_classes() -> Vec<DxfClass> {
         ("ACDBPLACEHOLDER", "AcDbPlaceHolder", 0, "ObjectDBX Classes", false),
         ("LAYOUT", "AcDbLayout", 0, "ObjectDBX Classes", false),
         ("DICTIONARYVAR", "AcDbDictionaryVar", 0, "ObjectDBX Classes", false),
-        ("TABLESTYLE", "AcDbTableStyle", 1025, "ObjectDBX Classes", false),
+        ("TABLESTYLE", "AcDbTableStyle", 4095, "ObjectDBX Classes", false),
         ("MATERIAL", "AcDbMaterial", 1025, "ObjectDBX Classes", false),
         ("VISUALSTYLE", "AcDbVisualStyle", 4095, "ObjectDBX Classes", false),
         ("SCALE", "AcDbScale", 1153, "ObjectDBX Classes", false),

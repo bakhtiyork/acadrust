@@ -1923,15 +1923,19 @@ impl<'a> DwgObjectWriter<'a> {
             // 341 DIMLDRBLK (hard pointer)
             self.writer
                 .write_handle(DwgReferenceType::HardPointer, ds.dimldrblk.value());
+            // A style that names its arrowheads (an R12 or R14 file states the block by name, and the style's handles are
+            // 0) states the block's handle here: the built-in arrowheads are the blocks `_<name>`.
+            let (dimblk, dimblk1, dimblk2) = (
+                self.arrow_block_handle(ds.dimblk, &ds.dimblk_name),
+                self.arrow_block_handle(ds.dimblk1, &ds.dimblk1_name),
+                self.arrow_block_handle(ds.dimblk2, &ds.dimblk2_name),
+            );
             // 342 DIMBLK (hard pointer)
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, ds.dimblk.value());
+            self.writer.write_handle(DwgReferenceType::HardPointer, dimblk.value());
             // 343 DIMBLK1 (hard pointer)
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, ds.dimblk1.value());
+            self.writer.write_handle(DwgReferenceType::HardPointer, dimblk1.value());
             // 344 DIMBLK2 (hard pointer)
-            self.writer
-                .write_handle(DwgReferenceType::HardPointer, ds.dimblk2.value());
+            self.writer.write_handle(DwgReferenceType::HardPointer, dimblk2.value());
         }
 
         // R2007+
@@ -2354,6 +2358,23 @@ impl<'a> DwgObjectWriter<'a> {
     /// anonymous, under the bare "*U".
     fn is_dynamic_definition_stated_anonymous(&self, record: &BlockRecord) -> bool {
         crate::io::dwg::autocad_records::is_dynamic_definition_stated_anonymous(self.document, record)
+    }
+
+    /// The handle a dimension style states for an arrowhead block: its own, or, when the style names the block only (a DXF of R12
+    /// states `DIMBLK` by name and no handle; so does the R14 record), the handle of the block of that name (the built-in arrowheads
+    /// are the blocks `_<name>`). An unknown name stays 0.
+    fn arrow_block_handle(&self, handle: Handle, name: &str) -> Handle {
+        if !handle.is_null() || name.is_empty() {
+            return handle;
+        }
+        let found = |wanted: &str| {
+            self.document
+                .block_records
+                .iter()
+                .find(|record| record.name.eq_ignore_ascii_case(wanted) && !record.handle.is_null())
+                .map(|record| record.handle)
+        };
+        found(name).or_else(|| found(&format!("_{name}"))).unwrap_or(handle)
     }
 
     /// Write BLOCK entity (block begin).

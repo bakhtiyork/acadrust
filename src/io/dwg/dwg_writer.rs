@@ -94,9 +94,11 @@ impl DwgWriter {
         // class of bug).
         let mut owned;
         let dxf_classes = states_dxf_classes(document);
+        let classless = has_no_class_list(document);
         let document: &CadDocument = if document.has_null_table_entries()
             || document.version < DxfVersion::AC1027
             || dxf_classes
+            || classless
             || has_stale_profile_classes(document)
         {
             owned = document.clone();
@@ -137,6 +139,10 @@ impl DwgWriter {
                 crate::objects::store_visual_style_roundtrip(&mut owned);
                 let version = owned.version;
                 crate::entities::table::store_table_roundtrip(&mut owned, version);
+            }
+            if classless {
+                // After the passes above: they make objects, and the classes are those of the finished document.
+                declare_used_classes_only(&mut owned);
             }
             &owned
         } else {
@@ -869,6 +875,43 @@ fn states_dxf_classes(document: &CadDocument) -> bool {
     document.dwg_source_version.is_none()
         && document.classes.source_classes().is_some_and(|classes| !classes.is_empty())
         && (document.version >= DxfVersion::AC1027 || document.dxf_source_version == Some(document.version))
+}
+
+/// Whether the document comes from a format that has no CLASSES section (R12, DXF or DWG): the class table of the file written is
+/// the writer's, not a list the source stated.
+fn has_no_class_list(document: &CadDocument) -> bool {
+    document.dxf_source_version.or(document.dwg_source_version) == Some(DxfVersion::AC1009)
+        && document.classes.source_classes().map_or(true, |classes| classes.is_empty())
+}
+
+/// The class table of a drawing that has no class list of its own: the classes a record of the document is written under and the
+/// fixed object types it holds (LAYOUT, ACDBPLACEHOLDER and the others `reconciled_classes` registers), in the writer's order,
+/// instead of the whole list of classes AutoCAD registers. A class no record needs says nothing about the drawing.
+fn declare_used_classes_only(document: &mut CadDocument) {
+    use crate::objects::ObjectType;
+    let mut used: std::collections::HashSet<String> = required_class_names(document)
+        .into_iter()
+        .map(|name| name.to_ascii_uppercase())
+        .collect();
+    for object in document.objects.values() {
+        let fixed = match object {
+            ObjectType::Layout(_) => "LAYOUT",
+            ObjectType::PlaceHolder(_) => "ACDBPLACEHOLDER",
+            ObjectType::DictionaryVariable(_) => "DICTIONARYVAR",
+            ObjectType::DictionaryWithDefault(_) => "ACDBDICTIONARYWDFLT",
+            ObjectType::PlotSettings(_) => "PLOTSETTINGS",
+            ObjectType::Scale(_) => "SCALE",
+            _ => continue,
+        };
+        used.insert(fixed.to_string());
+    }
+    let table: Vec<crate::classes::DxfClass> = document
+        .classes
+        .iter()
+        .filter(|class| used.contains(&class.dxf_name.to_ascii_uppercase()))
+        .cloned()
+        .collect();
+    document.classes.replace_entries(table);
 }
 
 /// The classes a record of the document is written under (entities, objects, fields).

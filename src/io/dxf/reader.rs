@@ -639,6 +639,9 @@ impl DxfReader {
         rewire_dangling_layout_block_records(&mut document);
         document.ensure_model_layout();
         if document.version == crate::types::DxfVersion::AC1009 {
+            // An R12 file has no OBJECTS section, so the layouts are the document's defaults: list the viewport entities of the
+            // paper space on its layout, as for a DXF of a later version (`read_objects`) and a DWG.
+            crate::io::dwg::dwg_document_builder::DwgDocumentBuilder::list_layout_viewports(&mut document);
             let layers: HashMap<_, _> = document.layers.iter().map(|layer| (layer.name.to_uppercase(), layer.handle)).collect();
             for entity in document.entities_mut_keep_raw() {
                 if let EntityType::Viewport(viewport) = entity {
@@ -1497,6 +1500,37 @@ fn rewire_stale_text_style_references(document: &mut CadDocument) {
             document.objects.get_mut(&handle)
         {
             style.text_style_handle = Some(new);
+        }
+    }
+
+    // ── TABLESTYLE row styles (group 340 of each row): the default Standard table style names the default Standard
+    // text style by handle; an R12 file spells its own `STANDARD` at a handle of its own.
+    let mut stale_rows: Vec<(Handle, [Option<Handle>; 3])> = Vec::new();
+    for (handle, object) in document.objects.iter() {
+        if let crate::objects::ObjectType::TableStyle(style) = object {
+            let rows = [&style.data_row_style, &style.header_row_style, &style.title_row_style];
+            if rows.iter().any(|row| row.text_style_handle.is_some_and(is_stale)) {
+                stale_rows.push((
+                    *handle,
+                    rows.map(|row| {
+                        row.text_style_handle
+                            .filter(|stated| is_stale(*stated))
+                            .and_then(|_| resolve(document, &row.text_style_name))
+                    }),
+                ));
+            }
+        }
+    }
+    for (handle, found) in stale_rows {
+        if let Some(crate::objects::ObjectType::TableStyle(style)) = document.objects.get_mut(&handle) {
+            for (row, new) in [&mut style.data_row_style, &mut style.header_row_style, &mut style.title_row_style]
+                .into_iter()
+                .zip(found)
+            {
+                if new.is_some() {
+                    row.text_style_handle = new;
+                }
+            }
         }
     }
 }
