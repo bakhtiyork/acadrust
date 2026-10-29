@@ -1739,8 +1739,12 @@ fn restore_record(
         }
         return applied;
     }
-    if let Some(style) = document.dim_styles.iter_mut().find(|style| style.handle == owner) {
-        return if dim_style_holds(version) { Vec::new() } else { restore_dim_style(style, groups) };
+    // A version whose records hold the values restores nothing here: no scan of the table per record (the owner falls through to
+    // the lookups below, which apply nothing to a table record).
+    if !dim_style_holds(version) {
+        if let Some(style) = document.dim_styles.iter_mut().find(|style| style.handle == owner) {
+            return restore_dim_style(style, groups);
+        }
     }
     match document.objects.get_mut(&owner) {
         Some(object) if view_style_base(object).is_some() => {
@@ -1758,15 +1762,19 @@ fn restore_record(
         Some(_) => return Vec::new(),
         None => {}
     }
-    if let Some(view) = document.views.iter_mut().find(|view| view.handle == owner) {
-        let mut applied = if display_holds(version) { Vec::new() } else { restore_view(view, groups) };
-        if !ucs_holds(version) {
-            applied.extend(restore_view_ucs(view, groups));
+    if !display_holds(version) || !ucs_holds(version) {
+        if let Some(view) = document.views.iter_mut().find(|view| view.handle == owner) {
+            let mut applied = if display_holds(version) { Vec::new() } else { restore_view(view, groups) };
+            if !ucs_holds(version) {
+                applied.extend(restore_view_ucs(view, groups));
+            }
+            return applied;
         }
-        return applied;
     }
-    if let Some(vport) = document.vports.iter_mut().find(|vport| vport.handle == owner) {
-        return if ucs_holds(version) { Vec::new() } else { restore_vport_ucs(vport, groups) };
+    if !ucs_holds(version) {
+        if let Some(vport) = document.vports.iter_mut().find(|vport| vport.handle == owner) {
+            return restore_vport_ucs(vport, groups);
+        }
     }
     // Look before taking the entity: only a viewport or a solid changes.
     let wanted = match document.get_entity(owner) {
@@ -2535,8 +2543,9 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
         jobs.push(Job { owner: style.handle, owns: Owns::Exact(&[R14_ROUNDTRIP]), wanted, fresh: None, leave: leaves(dim_style_holds, never) });
     }
     for vport in document.vports.iter() {
+        // The groups are built only for a version that needs them (a writer of a later version makes no defaults per record).
         let wanted = if needs(ucs_holds, never) { vport_ucs_wanted(vport) } else { Vec::new() };
-        let unchanged = wanted == vport_ucs_wanted(&crate::tables::VPort::new(vport.name.clone()));
+        let unchanged = !wanted.is_empty() && wanted == vport_ucs_wanted(&crate::tables::VPort::new(vport.name.clone()));
         let wanted = if converted || has_record(vport.handle) || !unchanged { wanted } else { Vec::new() };
         jobs.push(Job { owner: vport.handle, owns: Owns::Exact(&[UCS_GROUP, VIEW_GROUP]), wanted, fresh: None, leave: leaves(ucs_holds, never) });
     }
@@ -2554,7 +2563,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
     }
     for view in document.views.iter() {
         let wanted = if needs(ucs_holds, never) { view_ucs_wanted(view) } else { Vec::new() };
-        let unchanged = wanted == view_ucs_wanted(&crate::tables::View::new(view.name.clone()));
+        let unchanged = !wanted.is_empty() && wanted == view_ucs_wanted(&crate::tables::View::new(view.name.clone()));
         let wanted = if converted || has_record(view.handle) || !unchanged { wanted } else { Vec::new() };
         jobs.push(Job { owner: view.handle, owns: Owns::Exact(&[UCS_GROUP, VIEW_GROUP]), wanted, fresh: None, leave: leaves(ucs_holds, never) });
     }
@@ -2579,7 +2588,7 @@ pub(crate) fn prepare_for_write(document: &mut std::borrow::Cow<'_, CadDocument>
             crate::entities::EntityType::Viewport(viewport) => {
                 // The UCS and the render mode come first (sample_AC1014.dwg), then the shade plot mode and the display settings.
                 let wanted = if needs(ucs_holds, never) { viewport_ucs_wanted(viewport) } else { Vec::new() };
-                let unchanged = wanted == viewport_ucs_wanted(&crate::entities::Viewport::new());
+                let unchanged = !wanted.is_empty() && wanted == viewport_ucs_wanted(&crate::entities::Viewport::new());
                 let wanted = if converted || has_record(handle) || !unchanged { wanted } else { Vec::new() };
                 jobs.push(Job { owner: handle, owns: Owns::Exact(&[UCS_GROUP, VIEW_GROUP]), wanted, fresh: None, leave: leaves(ucs_holds, never) });
                 // AutoCAD's record states the shade plot mode first, then the display settings (sample_AC1014.dwg, sample_AC1015.dwg).

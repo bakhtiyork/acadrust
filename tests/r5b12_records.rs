@@ -89,6 +89,10 @@ fn an_r14_dimension_style_keeps_dimdsep_dimblk_and_dimlwd_in_the_record_autocad_
     // the view: ACadSharp reads the defaults and the record as an object, one record for each of the two styles
     let comma = style(&r14, "Comma").handle;
     assert!(r14.extension_dictionary_handle(comma).is_some());
+    // consumed on read: the record is out of the native model (the view puts it back)
+    for name in ["Comma", "Arrow"] {
+        assert!(r14.xrecord(style(&r14, name).handle, "ACAD_XREC_ROUNDTRIP").is_none(), "{name}: the record is out of the model");
+    }
     let records = records_with(&r14, "ACADR14ROUNDTRIP");
     let hex = format!("{:X}", block.value());
     let mut expected = vec![
@@ -209,6 +213,25 @@ fn an_r14_viewport_vport_and_view_keep_their_ucs_and_render_mode_in_the_records_
     assert!(records.iter().any(|text| text.contains("102=UCS 74=1 71=1 10=[1.0,2.0,3.0] 10=[0.0,1.0,0.0] 10=[-1.0,0.0,0.0] 146=1.5 79=2 102=VIEW 281=2")), "{records:?}");
     assert!(records.iter().any(|text| text.contains("102=UCS 72=1 10=[4.0,5.0,6.0] 10=[0.0,0.0,1.0] 10=[1.0,0.0,0.0] 146=2.5 79=3 102=VIEW 281=3")), "{records:?}");
     assert!(records.iter().any(|text| text.contains("102=UCS 74=1 71=0 10=[7.0,8.0,9.0]")), "{records:?}");
+    // consumed on read: the native model's records hold no UCS or VIEW group (the view puts them back)
+    let ucs_kept = |owner: Handle| {
+        r14.xrecord(owner, "ACAD_XREC_ROUNDTRIP")
+            .is_some_and(|record| record.entries.iter().any(|entry| entry.code == 102 && matches!(entry.value.as_string(), Some("UCS" | "VIEW"))))
+    };
+    assert!(!ucs_kept(viewport.common.handle) && !ucs_kept(view.handle) && !ucs_kept(vport.handle), "the groups are out of the model");
+    // the view shows what ACadSharp reads of R14: the defaults
+    let viewed = acadrust::compat::acadsharp::dump_document(&r14, "", "new");
+    let shown: Vec<_> = viewed["objects"].as_array().unwrap().iter().filter(|object| matches!(object["type"].as_str(), Some("Viewport" | "View" | "VPort"))).collect();
+    assert_eq!(shown.iter().filter(|object| object["type"] != "VPort").count(), 2, "the viewport and the view");
+    assert!(shown.iter().any(|object| object["type"] == "VPort" && object["props"]["Name"] == "SECOND"));
+    for object in shown {
+        let key = if object["type"] == "VPort" { "Origin" } else { "UcsOrigin" };
+        let origin: Vec<f64> = object["props"][key].as_array().unwrap().iter().map(|value| value.as_f64().unwrap()).collect();
+        assert_eq!((object["props"]["RenderMode"].as_i64(), origin), (Some(0), vec![0.0, 0.0, 0.0]), "{}", object["handle"]);
+        if object["type"] == "Viewport" {
+            assert_eq!(object["props"]["UcsPerViewport"].as_bool(), Some(false));
+        }
+    }
     // R2000 holds the values itself
     let r15 = write_and_read(&r14, DxfVersion::AC1015);
     let viewport = the_viewport(&r15);
@@ -261,6 +284,18 @@ fn a_down_save_to_r14_states_vx_records_for_the_active_paper_space_only() {
     let viewports: Vec<_> = r14.vx_table.iter().filter(|record| !record.viewport.is_null()).collect();
     assert!(!viewports.is_empty(), "the active paper space has viewports");
     assert!(viewports.iter().all(|record| owner(record.viewport) == paper_space), "a record for a viewport of another layout");
+    // exactly one record for each viewport of the active paper space
+    let mut recorded: Vec<Handle> = viewports.iter().map(|record| record.viewport).collect();
+    recorded.sort();
+    let mut active: Vec<Handle> = r14
+        .entities()
+        .filter_map(|entity| match entity {
+            EntityType::Viewport(viewport) if viewport.common.owner_handle == paper_space => Some(viewport.common.handle),
+            _ => None,
+        })
+        .collect();
+    active.sort();
+    assert_eq!(recorded, active, "the records are the viewports of the active paper space");
     let total = r14.entities().filter(|entity| matches!(entity, EntityType::Viewport(_))).count();
     assert!(viewports.len() < total, "{} records for {total} viewports", viewports.len());
     let reserved: Vec<_> = r14.vx_table.iter().filter(|record| record.viewport.is_null()).collect();
@@ -280,6 +315,12 @@ fn an_r14_header_keeps_insunits_and_the_dimension_variables_in_the_chain_autocad
     source.header.dim_arrow_block_handle = block;
     let r14 = write_and_read(&source, DxfVersion::AC1014);
     assert_eq!((r14.header.insertion_units, r14.header.dim_line_weight, r14.header.dim_arrow_block_handle), (4, 25, block));
+    // consumed on read: the chain held only the two records the reader applied, so it is out of the native model
+    let root = match r14.objects.get(&r14.header.named_objects_dict_handle) {
+        Some(acadrust::objects::ObjectType::Dictionary(root)) => root,
+        _ => panic!("no root dictionary"),
+    };
+    assert!(root.get("ACDBHEADERROUNDTRIPXREC").is_none(), "the chain is out of the model");
     // the view shows R14's header (units 0, weight -2) and the records as objects
     let viewed = acadrust::compat::acadsharp::dump_document(&r14, "", "new");
     assert_eq!((viewed["header"]["InsUnits"].as_i64(), viewed["header"]["DimensionLineWeight"].as_i64()), (Some(0), Some(-2)));

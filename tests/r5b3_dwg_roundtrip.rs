@@ -298,6 +298,13 @@ fn a_partial_vx_table_of_an_r14_drawing_is_filled_for_the_active_paper_space_onl
         .find(|(_, owner)| *owner != paper_space && !owner.is_null() && first.block_records.iter().any(|b| b.handle == *owner && b.is_paper_space()))
         .expect("a viewport of the second layout");
     assert!(!of_viewports.iter().any(|record| record.viewport == other.0), "no record for the other layout");
+    // exactly the reserved record and one record for each viewport of the active paper space
+    let mut recorded: Vec<_> = of_viewports.iter().map(|record| record.viewport).collect();
+    recorded.sort();
+    let mut in_paper_space: Vec<_> = viewports.iter().filter(|(_, owner)| *owner == paper_space).map(|(handle, _)| *handle).collect();
+    in_paper_space.sort();
+    assert_eq!(recorded, in_paper_space);
+    assert_eq!(records.len(), in_paper_space.len() + 1);
     let active = of_viewports.first().expect("a record of a viewport of the active paper space");
     let with = |change: &dyn Fn(&mut CadDocument)| {
         let mut partial = first.clone();
