@@ -1705,6 +1705,32 @@ impl<'a> DwgObjectWriter<'a> {
 
     // â”€â”€ Leader â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
+    /// The dimension gap and arrowhead size an R13/R14 LEADER record states. Those versions keep inline copies of the values
+    /// the leader uses (sample_AC1014.dwg, leader #512: 2.5 and 0.625 = DIMASZ and DIMGAP of its style ISO-25); R2000 and later
+    /// take them from the dimension style or the `ACAD` `DSTYLE` override of the leader, so a leader read from there holds 0.
+    /// A stated value stays; a leader read from an R13/R14 DWG keeps its own 0.
+    fn leader_inline_sizes(&self, e: &Leader) -> (f64, f64) {
+        use crate::types::DxfVersion;
+        if !self.version.r13_14_only() || e.arrow_size != 0.0 && e.dimension_gap != 0.0 {
+            return (e.dimension_gap, e.arrow_size);
+        }
+        if self.document.dwg_source_version.is_some_and(|version| version <= DxfVersion::AC1014) {
+            return (e.dimension_gap, e.arrow_size);
+        }
+        let style = self.document.dim_styles.get(&e.dimension_style);
+        let gap = if e.dimension_gap != 0.0 {
+            e.dimension_gap
+        } else {
+            leader_style_override(e, 147).or_else(|| style.map(|style| style.dimgap)).unwrap_or(0.0)
+        };
+        let size = if e.arrow_size != 0.0 {
+            e.arrow_size
+        } else {
+            leader_style_override(e, 41).or_else(|| style.map(|style| style.dimasz)).unwrap_or(0.0)
+        };
+        (gap, size)
+    }
+
     fn write_leader(&mut self, e: &Leader) {
         self.entity_preamble(common::OBJ_LEADER, &e.common);
 
@@ -1741,8 +1767,9 @@ impl<'a> DwgObjectWriter<'a> {
         }
 
         // R13-R14 Only: DIMGAP and arrowhead data
+        let (dimension_gap, arrow_size) = self.leader_inline_sizes(e);
         if self.version.r13_14_only() {
-            self.writer.write_bit_double(e.dimension_gap);
+            self.writer.write_bit_double(dimension_gap);
         }
 
         // R13-R2007: annotation box height / width. A leader read from R2010 or later states neither; AutoCAD's own R14 to
@@ -1779,7 +1806,7 @@ impl<'a> DwgObjectWriter<'a> {
         };
         self.writer.write_bit_short(arrowhead_or_unknown);
         if self.version.r13_14_only() {
-            self.writer.write_bit_double(e.arrow_size);
+            self.writer.write_bit_double(arrow_size);
             self.writer.write_bit(e.dwg_unknown_bit2);
             self.writer.write_bit(e.dwg_unknown_bit3);
             self.writer.write_bit_short(e.dwg_unknown_short1);
@@ -5944,4 +5971,16 @@ mod tests {
         let (output, _map, _, _) = writer.write();
         assert!(!output.is_empty());
     }
+}
+
+/// The value of dimension variable `code` in the `ACAD` `DSTYLE` extended data of a leader (`1000 DSTYLE 1002 { (1070 code value)...`).
+fn leader_style_override(leader: &Leader, code: i16) -> Option<f64> {
+    use crate::xdata::XDataValue;
+    let record = leader.common.extended_data.records().iter().find(|record| record.application_name.eq_ignore_ascii_case("ACAD"))?;
+    let values = &record.values;
+    let start = values.iter().position(|value| matches!(value, XDataValue::String(name) if name.trim_end_matches('\0') == "DSTYLE"))?;
+    values[start + 1..].windows(2).take_while(|pair| !matches!(pair[0], XDataValue::ControlString(ref text) if text == "}")).find_map(|pair| match (&pair[0], &pair[1]) {
+        (XDataValue::Integer16(found), XDataValue::Real(value) | XDataValue::Distance(value) | XDataValue::ScaleFactor(value)) if *found == code => Some(*value),
+        _ => None,
+    })
 }

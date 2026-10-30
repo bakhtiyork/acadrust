@@ -205,6 +205,11 @@ impl<'a> DxfWriter<'a> {
         if crate::entities::table::tables_need_roundtrip(&prepared, output_version) {
             crate::entities::table::store_table_roundtrip(prepared.to_mut(), output_version);
         }
+        // AutoCAD's DXF of every version states the value flags 22 in the ACAD_TABLE entity, whatever the table's R2010 record
+        // holds (sample_AC1015_ascii.dxf to sample_AC1032_ascii.dxf: both tables).
+        if crate::entities::table::tables_need_value_flags(&prepared) {
+            crate::entities::table::state_legacy_value_flags(prepared.to_mut());
+        }
         // The modern cell styles of a table style have no place in the DXF TABLESTYLE record: they travel
         // in a CELLSTYLEMAP object of its extension dictionary (an R2010+ DWG keeps them in the record). The
         // output states those objects besides the document's own; the document is not copied for them.

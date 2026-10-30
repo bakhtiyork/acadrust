@@ -1420,7 +1420,11 @@ impl<'a> DwgObjectWriter<'a> {
         // Circle zoom BS 72
         self.writer.write_bit_short(vport.circle_zoom);
         // Fast zoom B 73
-        self.writer.write_bit(vport.fast_zoom);
+        self.writer.write_bit(if self.version.r13_14_only() {
+            crate::io::dwg::legacy_viewport::fast_zoom_at_r14(self.document, vport.fast_zoom)
+        } else {
+            vport.fast_zoom
+        });
         // UCSICON X 74 — 2 individual bits
         self.writer.write_bit(vport.ucsicon_lower);
         self.writer.write_bit(vport.ucsicon_origin);
