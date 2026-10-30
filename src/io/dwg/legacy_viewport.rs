@@ -37,6 +37,45 @@ pub(crate) fn fast_zoom_at_r14(document: &CadDocument, stated: bool) -> bool {
     stated || !document.dwg_source_version.or(document.dxf_source_version).is_some_and(|source| matches!(source, AC1012 | AC1014))
 }
 
+/// Whether the document was read from an R13/R14 file (a DWG or a DXF).
+fn read_from_r14(document: &CadDocument) -> bool {
+    use crate::types::DxfVersion::{AC1012, AC1014};
+    document.dwg_source_version.or(document.dxf_source_version).is_some_and(|source| matches!(source, AC1012 | AC1014))
+}
+
+/// The fast zoom flag a viewport states in the status word of a DWG of R2000 or later. A viewport read from an R13/R14 file holds the
+/// flag its MVIEW record stated (1 for the six viewports of AutoCAD's own R14 file, sample_AC1014.dwg), and AutoCAD's R2000 and later
+/// files of the same drawing hold 0 for all of them (sample_AC1015.dwg to sample_AC1032.dwg: FASTZOOM is 1 and fixed since R2000, the
+/// status word has no use for it), so a document read from an R13/R14 file states 0 there; every other document states what it holds.
+pub(crate) fn fast_zoom_after_r14(document: &CadDocument, stated: bool) -> bool {
+    stated && !read_from_r14(document)
+}
+
+/// The extended data of a viewport read from an R13/R14 file, for a DWG of R2000 or later: without the MVIEW group of the application
+/// ACAD. Its view parameters are fields of the viewport from R2000 on (AutoCAD's R2000 and later files of the drawing hold no extended
+/// data on the six viewports, sample_AC1015.dwg to sample_AC1032.dwg), and the R14 writer states the group again from those fields
+/// (`record`). `None` when the viewport needs no change (another source, no MVIEW group).
+pub(crate) fn without_mview(common: &crate::entities::EntityCommon, document: &CadDocument) -> Option<crate::entities::EntityCommon> {
+    if !read_from_r14(document) {
+        return None;
+    }
+    let data = &common.extended_data;
+    let record = data.records().iter().find(|record| record.application_name.eq_ignore_ascii_case("ACAD"))?;
+    let range = mview_range(&record.values)?;
+    let mut common = common.clone();
+    let name = record.application_name.clone();
+    if let Some(record) = common.extended_data.records_mut().iter_mut().find(|record| record.application_name == name) {
+        record.values.drain(range);
+    }
+    if common.extended_data.get_record(&name).is_some_and(|record| record.values.is_empty()) {
+        common.extended_data.remove_record(&name);
+    }
+    if let Some(app) = document.app_ids.get("ACAD") {
+        common.extended_data.raw_dwg_eed.retain(|(handle, _)| *handle != app.handle.value());
+    }
+    Some(common)
+}
+
 pub(crate) fn record(v: &Viewport, document: &CadDocument) -> ExtendedDataRecord {
     // The status word of a viewport of an R2000 or later file, a DWG or a DXF, holds its UCS icon; the reader of an R14 file puts
     // the icon word there too (`restore_impl`). `ucs_icon_visible` of the viewport is the icon word of an R14 file only (a reader of

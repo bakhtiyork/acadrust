@@ -360,6 +360,9 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R5b-16 R14 fast zoom | `io/dwg/legacy_viewport.rs` `fast_zoom_at_r14` (MVIEW record of a viewport; the VPORT record in `object_writer/mod.rs`) | The R13/R14 DWG states fast zoom 1 for a viewport and a VPORT unless the document was read from an R13/R14 file (DWG or DXF), which keeps its own flag. Before: 1 only for a DWG source of R2000 or later; a DXF source or a document made in memory stated 0. Owner decision of 2026-10-29 (a down-save does what AutoCAD's down-save does). The DXF writer is unchanged (no AutoCAD R14 DXF). | AutoCAD's R14 file: 1 for the six viewports #240 to #26B and the VPORT; its R2000 and later files: 0 in the viewports' status (sample_AC1014.dwg, sample_AC1015.dwg to sample_AC1032.dwg). |
 | R5b-16 DXF table value flags | `io/dxf/writer/mod.rs` `write_dxf` (calls `entities/table.rs` `tables_need_value_flags` / `state_legacy_value_flags` on the output copy) | The DXF writer states the value flags 22 (group 90) for a table that holds the R2010 record with its objects and no flags of its own (a table read from an R2010+ DWG), at every DXF version; the DWG writer did so before R2010 since R5b-15. A table with value flags of its own, and a flat table, are unchanged. Read back, the table is the R2010 record again. | AutoCAD's DXF files of R2000 to R2018 state `90 22` for both tables (sample_AC1015_ascii.dxf to sample_AC1032_ascii.dxf). |
 | R5b-17 modeler data of R14 and R2000 (3DSOLID, REGION, BODY in DWG down- and up-saves) | New `entities/acis/conversion.rs` (`prepare_for_write`, called from `DwgWriter::write_impl` after the record passes; `convert`; the model of the records, readers and writers of SAT 106, SAT 400, SAT text 20800 / 21200 / 21500 and AutoCAD's binary data 20800 to 22300): AutoCAD's modeler data is written in the form AutoCAD writes for the release of the drawing: SAT text 106 at R14, SAT text 400 at R2000, the binary data of the release (20800 / 21500 / 21800 / 22300 with the ASM magic and `End of ASM data` from R2018) when the source is the text of R14 or R2000. Per record: `body lump shell face loop coedge edge vertex point transform plane-surface straight-curve persubent-acadSolidHistory-attrib`. R14 drops the product, units, tolerance and date lines and writes numbers for senses and flags and no `wire` in a shell; the binary releases add `-1`, `$-1` after the attribute pointer (the transform only the `-1`), the curve parameters and `unknown` to an edge, an integer to a vertex (from 21200) and to a coedge (from 21800), and count the pointers from an `asmheader`. Derived only where the samples show the rule: an edge's parameters (the range of its curve when finite; else the signed distance of the vertex from the curve's root; 44 of 44 doubles of the samples equal), a vertex integer (0 at the start of its edge, 1 at its end; 25 of 25), a coedge integer (0; 61 of 61), the units 25.4 of a body from R14 in an inch drawing (INSUNITS 1; AutoCAD keeps INSUNITS in its R14 round-trip record), the product and tolerances of the samples. Doubles print as `%.19g`. A body with another record kind, a shape or a value the samples do not show (cone, sphere, torus or spline surface, elliptic curve, reversed edge, finite plane bounds, another attribute, a pointer to a record that is not there, other units) refuses the write (`NotImplemented`, names the entity and the reason). Review: also refused are a modeler other than the samples' `ASM 230.7.0.65535 NT` (the R2000 text's product line, the binary header; before, an R2000 body of another modeler was up-saved with the samples' `asmheader`), binary data whose second header word is not 0, and, where an edge's parameters are derived, a straight curve whose direction is not of length 1, a vertex off the curve of its edge or a finite range that does not end at the edge's vertices (beyond the modeler's absolute tolerance): the samples show the two rules only where these hold. Another producer's data (header product, save version, flags), the binary releases among themselves (`reversion.rs`) and data already in the form of the release are left as they are. The converted entity loses its raw record and its ACIS source. `drawing_date` (shared with `sab_from_sat`) gives the date of a body that states none. | Before, a down-save to R14 or R2000 wrote binary data into a file that holds SAT text only (read back by the fork, which accepts it, but a form AutoCAD never writes), an up-save wrote the text with its R14 / R2000 header into the binary slot (`400` header, no `asmheader`, edge parameters 0, senses `0`), and R14 and R2000 text was copied between the two releases. The three bodies (3DSOLID #D65 and #D6A, REGION #D69) of sample_AC1014.dwg to sample_AC1032.dwg and their DXF twins state the same model at every release, record by record: the fork's conversion equals AutoCAD's own data outside the date in all 96 converted bodies (down to R14 and R2000 from R2004 to R2018 DWG and DXF, up from R14, R2000 DWG, R2000 DXF to R2004, R2010, R2013 and R2018, and between the two text releases). `ACAD_SOLID_HIST` is the only record AutoCAD keeps around the body (already restored). Not derivable: the units of a body from R14 in a drawing that is not in inches, the dropped fields of the binary releases when they are not the sample's constants; those refuse. Unit tests in `conversion.rs` (10, with AutoCAD's own data of the REGION and the 3DSOLID in `conversion_samples.rs`). |
+| R5b-18 view parameters of a viewport read from R13/R14 | `io/dwg/legacy_viewport.rs` (`without_mview`, `fast_zoom_after_r14`), `object_writer/entities.rs` `write_viewport_entity` (R2000 and later branch) | A viewport of a document read from an R13/R14 file (DWG or DXF) is written to a DWG of R2000 or later without the `MVIEW` group of its `ACAD` extended data (the other groups of the record stay; the raw block of the application is not copied) and with fast zoom 0 in its status word. The R14 writer states the group again from the fields (`record`), fast zoom as R5b-16. A viewport of another source keeps its extended data and its flag. | AutoCAD's R14 file has the record and fast zoom 1 on the six viewports #240 to #26B (sample_AC1014.dwg); its R2000 to R2018 files of the drawing have no extended data on them and fast zoom 0 (sample_AC1015.dwg to sample_AC1032.dwg). Rules G5-RR-303 / 304. An edit after the read cannot be told from the read value (fast zoom set on a viewport of an R14 source is dropped at R2000 and later). |
+| R5b-18 referenced bit of symbol table records before R2007 | `object_writer/common.rs` `write_referenced_flags` (used by `write_xref_flags_with_source` for layer, text style, line type and application, and for dimension style, view and VPORT in `object_writer/mod.rs`) | A DWG of R14, R2000 or R2004 states bit 64 (referenced) on every record of these seven tables, whatever the source states; R2007 and later write no such bit (unchanged). The UCS record keeps its own flag (no sample). | AutoCAD's sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg: 64 on all 44 / 42 / 42 applications, all layers (64, 65, 66, 68), text styles, line types, dimension styles, the view and the VPORT; sample_AC1024.dwg to sample_AC1032.dwg none. The source bit was kept before, so a down-save from R2010 wrote 0. Rules G5-RR-305..313 (the bit added, nothing else changed). |
+| R5b-18 order of the extended data of an R14 block record | `object_writer/common.rs` (extra EED of `write_common_non_entity_data_eed_internal`, `autocad_conversions.rs` constants made `pub(crate)`) | The `ACAD` `DesignCenter Data` record (insertion units) of a block record written to R13/R14 goes after the block's other records and before its description and preview icon records (`CONTENTBLOCKDESCRIPTION`, `CONTENTBLOCKICON`); it was added last. R2000 and R2004 keep it last. | AutoCAD's R14 file (sample_AC1014.dwg): `ACDBDYNAMICBLOCKGUID`, ACAD for #6F2; the four dynamic-block applications, ACAD, description, icon for #A7E; ACAD, icon for #77F. Its R2000 and R2004 files state ACAD after the other records (#6F2: the GUID application first). |
 
 ## ACadSharp differential dump
 
@@ -2535,3 +2538,91 @@ Trees: fork r5a at 4aa10e5 + working tree, CadKit-wt-r5a at e269d58 + working tr
 * **Counts (clean build).** G5-RR **269 / 288** (same 41 / 42, up 59 / 59, down 169 / 187; AC1014 43, AC1015 43, AC1018 43, AC1024 46, AC1027 47, AC1032 47); no rules 20; without G5-RR-207..211 95. Unexplained RR rows 40 (geolocation 27, line weight display 1, Spline 8, Block / BlockEnd 4; Solid3D 0, Region 0). RC same 42 / 42, sample_V 9 / 36, idem 283 / 288, C# -> fork 204. Every cell status and every RR row file (263) equals the agent's r17-g5. G4: RR 94, RC 94, idem 96 / 96, all 96 cells identical to r17-g4 and rv16-g4.
 * **Writer cost (G8).** `prepare_for_write` returns at once for R12 / R13 targets and otherwise walks the entities once with a type match; it copies nothing unless a body changes (revert-checked). Not measured: no allocation or clone on a file without 3D bodies.
 * Doubts: the vertex integer (0 / 1) and the edge-parameter rules are fitted to 25 and 44 values of three bodies (now limited to their geometric premises); the date of a dateless body (R14, DXF) is the drawing's, AutoCAD stamps its save time; the relation accepts any date there. UNVERIFIED: AutoCAD opening the fork's converted R14 / R2000 / R2004+ files.
+
+
+## R5b-18: the sample_V cells, the fork's down- and up-saves against AutoCAD's own save of the same drawing (2026-10-30)
+
+Fork tree: r5a at 06c2878 + working tree; CadKit-wt-r5a at 3f21001 + working tree (`Tools/g5-roundtrip.py`, `Tools/g4-native-compare.py`, `Tools/g4_relations.py`, `Tools/g5-rr-allowlist.json`, `Tools/g5-rc-allowlist.json`). Final runs on a clean build (`cargo clean -p acadrust`): CadKit `build.noindex/r18-g5` (G5, one version at a time, `--jobs 3`), `build.noindex/r18-g4`. Baseline: the reviewed `build.noindex/rv17-g5`. The cells were measured row by row with `G5_KEEP=1` runs of the six sample_AC10xx.dwg before and after (rows of `rows-rc-sample_v.jsonl` after the pairing of `sv_pair_records`, the three files of a family printed side by side).
+
+### Counts (288 cells)
+
+| | before | after |
+|---|---|---|
+| G5-RR | 269 / 288 (same 41/42, up 59/59, down 169/187), unexplained rows 40 | 269 / 288 (same), unexplained rows 40 |
+| RC same-version / sample_V / idem / C#->fork | 42/42, 9/36, 283/288, 204 | 42/42, **9/36**, 283/288, 204 |
+| sample_V, 30 off-diagonal cells: rows left | common 673, dropped 577, added 20 (unreachable 2,144, kept 2,931 reported only) | common **385**, dropped 577, added 17 (unreachable 2,076, kept 2,927) |
+| G4 RR / RC / idem | 94 / 94 / 96 of 96 | 94 / 94 / 96 of 96 (AecObjects only) |
+| G1 | 45 / 49 | 45 / 49 |
+
+No sample_V cell changed status: 24 of the 27 failing cells need AutoCAD data the samples show and the fork does not derive (below); the three cells that could pass are blocked by one such family each.
+
+### sample_V per cell (verdict, gated rows common / dropped / added)
+
+| cell (sample_W > V) | before: verdict, common / dropped / added | after |
+|---|---|---|
+| 1014 > 15 | FAIL 35/0/0 | FAIL 9/0/0 |
+| 1014 > 18 | FAIL 42/1/0 | FAIL 11/1/0 |
+| 1014 > 24 | FAIL 50/0/0 | FAIL 17/0/0 |
+| 1014 > 27 | FAIL 44/0/0 | FAIL 19/0/0 |
+| 1014 > 32 | FAIL 48/0/0 | FAIL 23/0/0 |
+| 1015 > 14 | FAIL 38/99/5 | FAIL 32/99/4 |
+| 1015 > 18 | FAIL 7/1/0 | FAIL 2/1/0 |
+| 1015 > 24 | FAIL 19/0/0 | FAIL 4/0/0 |
+| 1015 > 27 | FAIL 13/0/0 | FAIL 6/0/0 |
+| 1015 > 32 | FAIL 17/0/0 | FAIL 10/0/0 |
+| 1018 > 14 | FAIL 41/101/6 | FAIL 33/101/4 |
+| 1018 > 15 | FAIL 4/3/0 | FAIL 0/3/0 |
+| 1018 > 24 | FAIL 8/0/0 | FAIL 2/0/0 |
+| 1018 > 27 | FAIL 6/0/0 | FAIL 4/0/0 |
+| 1018 > 32 | FAIL 12/0/0 | FAIL 8/0/0 |
+| 1024 > 14 | FAIL 76/102/4 | FAIL 53/102/4 |
+| 1024 > 15 | FAIL 18/11/3 | FAIL 7/11/3 |
+| 1024 > 18 | FAIL 9/8/0 | FAIL 3/8/0 |
+| 1024 > 27 | FAIL 2/0/0 | FAIL 2/0/0 |
+| 1024 > 32 | FAIL 6/0/0 | FAIL 6/0/0 |
+| 1027 > 14 | FAIL 69/102/1 | FAIL 53/102/1 |
+| 1027 > 15 | FAIL 11/11/0 | FAIL 7/11/0 |
+| 1027 > 18 | FAIL 6/8/0 | FAIL 3/8/0 |
+| 1027 > 24 | pass 0/0/0 | pass 0/0/0 |
+| 1027 > 32 | FAIL 4/0/0 | FAIL 4/0/0 |
+| 1032 > 14 | FAIL 69/105/1 | FAIL 53/105/1 |
+| 1032 > 15 | FAIL 11/14/0 | FAIL 7/14/0 |
+| 1032 > 18 | FAIL 8/11/0 | FAIL 7/11/0 |
+| 1032 > 24 | pass 0/0/0 | pass 0/0/0 |
+| 1032 > 27 | pass 0/0/0 | pass 0/0/0 |
+
+### Families (27 failing cells; gated rows before the job; classification; state)
+
+| family | cells | rows | classification | state |
+|---|---|---|---|---|
+| viewport `ExtendedData` (MVIEW record) and `Status` (fast zoom), R14 source to R2000+ | 5 | 90 | fork defect (AutoCAD's R2000+ files hold neither) | **fixed** (W), G5-RR-303 / 304 |
+| `AppId.Flags` 64 (hidden before by the handle pairing of applications) | 11 | 73 | fork defect: AutoCAD states 64 on every record of seven tables before R2007, the fork kept the source bit | **fixed** (W), G5-RR-305..313 |
+| `BlockRecord.ExtendedData` (application handles, order ACAD / icon, GUID) | 5 | 51 | tool defect (applications are numbered by each writer) + fork defect (order of the R14 records) | **fixed**: pairing by name, R14 order (W) |
+| `Spline.ExtendedData` application handle | 14 | 22 | tool defect (same) | handle rows **fixed**; 16 rows left = owner decision B (record kept at R2013+) |
+| dictionary `EntryNames` / `EntryHandles` | 24 | 271 | tool defect (entries that lead to unreachable / kept objects counted twice) + R14 key case (open) | 108 rows **fixed**; 163 left: R14 keys in upper case with their EXTNAMES records (28, "not derivable from one sample", R5b-11), entries of dropped records |
+| `Solid3D` / `Region` `AcisData` | 11 | 33 | format difference (the save time in the modeler header; the first rule knew only `ACIS BinaryFile`, not SAT text and `ASM BinaryFile`) | **fixed** (tool): G5-RC-053 / 054 widened, 057 / 058 |
+| `CadHeader.MeasurementUnits` | 2 | 2 | reading difference (ACadSharp reads it from the Template section only and defaults to 1; AutoCAD's R2004 file has none) | rule G5-RC-059 |
+| `TextEntity` `AnnotativeData` second flag | 18 | 36 | AutoCAD-side data: R2010+ states 1 for two of four texts (style `custom_text_style`), every earlier file 0; not derivable up (no other property tells), derivable down (0) | **open** (down-save: cells also need the ACDS records) |
+| `MText.ColumnData.Heights` (R2018) | 5 | 20 | AutoCAD-side data: negative laid-out heights (-2.94, -23.73, -3, -204.35), needs the text layout | **open** |
+| `XRecord` / `CadDictionary` dropped (14 cells, 410 + 167 rows) | 14 | 577 | AutoCAD-side data not derived: R14 `ACDBHEADERROUNDTRIPXREC` header chain (39), `DWGPROPS`, `AUXHDRRNDTRIPDATA`, EXTNAMES of dictionary keys (28 + 28), `ACAD_LAYOUTSELFREF`; `AcDsDecomposeData` schemas (7 + 3, with the `AcadAnnotativeDecomposition` application and the `AppIdsTable.Count` row) from R2013 data storage; `ACAD_MTEXT_RT` / `_2008_RT` for a `\U+` text and for a stacked fraction (one sample each) | **open** |
+| `Leader` / `DimensionAligned` / `Angular2Line` / `Angular3Pt` `ExtendedData` (DSTYLE) | 10 | 80 | AutoCAD-side representation: R14 names the arrow blocks (groups 5 / 6 / 7) and adds 270 / 271, R2000+ states handles (342..344); four entities | **open** (derivable from the four, not written) |
+| `XRecord.Entries` (R14 viewport round-trip record: UCS, VIEW, NEWVIEWCONTROL, ...) | 3 | 36 | AutoCAD-side data not derived (listed open since R5b-9) | **open** |
+| class `InstanceCount` (CELLSTYLEMAP, DICTIONARYVAR) / class `DATATABLE` | 8 / 6 | 10 / 6 | consequence of objects AutoCAD makes or drops (DICTIONARYVAR entries for header variables an older release lacks, a second CELLSTYLEMAP); the class table is not derivable from the object dump | **open** |
+| `added` XRecord / AppId / CadDictionary (R14, R2000) | 6 | 20 | records the fork writes for owners AutoCAD gave none | **open** |
+| `BlockRecord.Name` / `Block.Name` (R14 dynamic block) | 3 | 6 | AutoCAD keeps the lower case of a dynamic definition's name, the fork writes the EXTNAMES form | **open** |
+| `AppId.XDictionary` | 3 | 3 | fork writes an extension dictionary for `AcadAnnotativeDecomposition` where AutoCAD has none | **open** |
+
+### Behaviour changes (fork)
+The table rows "R5b-18 view parameters of a viewport read from R13/R14", "R5b-18 referenced bit of symbol table records before R2007" and "R5b-18 order of the extended data of an R14 block record" above. Tests: `tests/r5b18_sample_v.rs` (4), each revert-checked. Suite (`cargo test --features acadsharp-compat --no-fail-fast`, clean build): **2,735 passed, 0 failed, 60 ignored**, 0 warnings in `cargo build --lib` and the feature build; G1 45 / 49.
+
+### Tool changes (CadKit `Tools/`)
+* `sv_pair_applications`: AppId records pair with AutoCAD's of the same name (a writer numbers the applications it registers; `G5-RC-056` already said so for one object type). Self-tests: renumbered with the reference following, other contents, another application, the target handle held by another object, the xdata of another application.
+* `sv_entry_categories`: a dictionary's entry rows are not counted a second time when the entry lists differ only by entries that lead to an object AutoCAD's file holds and the fork's lacks and sample_W does not hold (`unreachable`) or to an object of sample_W that AutoCAD's file lacks (`kept`). Entries to dropped or added objects, other keys and case differences stay gated (the old self-test expectations are unchanged). Self-tests for each.
+* `acis_equal_outside_date` accepts SAT text and the `ASM BinaryFile` header; G5-RC-053 / 054 widened to all sample_V cells, 057 / 058 new (examples and a relation self-test with accept and reject cases).
+* RR relations `viewport_mview_record_dropped`, `bit_set_in_output` (self-tests); rules G5-RR-303..313 (the bit is added, nothing else changed), G5-RC-059.
+
+### Doubts, UNVERIFIED
+* AutoCAD opening the fork's R2000+ files without the MVIEW record and the R14 files with the new record order; the referenced bit rests on the three AutoCAD files before R2007 (UCS records excluded: no sample).
+* A viewport of an R13/R14 source whose fast zoom was set after the read loses it at R2000+ (not distinguishable from the read value).
+* Pairing applications and demoting dictionary entries make 288 rows disappear from the gated count; they hide no fork defect the object rows do not show (dropped / added objects stay gated), but the verdict of a cell no longer fails on a row of this kind alone.
+* The R14 DSTYLE, header chain, EXTNAMES and the ACDS decompose records are open; sample_V cannot reach 36 without them.
