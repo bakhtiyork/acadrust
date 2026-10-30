@@ -27,8 +27,9 @@
 //!
 //! It does not invent anything else: a record kind, a field value or a shape the samples do not show (the kinds of `read_rec`; a cone,
 //! sphere, torus or spline surface, an elliptic or interpolated curve, an attribute other than the solid history, a reversed
-//! edge, finite plane bounds, a pointer to another kind of record than the samples show) refuses the whole body, and the writer
-//! reports it.
+//! edge, finite plane bounds, a pointer to another kind of record than the samples show; for the derived edge parameters a
+//! direction not of length 1, a vertex off its curve or a finite range that does not end at the vertices; a modeler other
+//! than the samples' `ASM 230.7.0.65535 NT`) refuses the whole body, and the writer reports it.
 
 use std::borrow::Cow;
 
@@ -776,6 +777,9 @@ fn header_from_text(lines: &[&str]) -> R<Header> {
     if product != AUTOCAD {
         return Err(format!("data of the producer {product}"));
     }
+    if asm != ASM {
+        return Err(format!("data of the modeler {asm}, which the samples do not show"));
+    }
     let numbers: Vec<f64> = lines
         .get(2)
         .ok_or("a header without the units line")?
@@ -844,8 +848,8 @@ fn parse_binary(data: &[u8]) -> R<Model> {
         return Err("data that is no AutoCAD's binary modeler data".to_string());
     }
     let word = |at: usize| i32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
-    let (save, bodies, flags) = (word(15), word(23), word(27));
-    if flags_of(save) != Some(flags) || data.starts_with(ASM_MAGIC) != (save == 22300) || bodies != 2 {
+    let (save, records, bodies, flags) = (word(15), word(19), word(23), word(27));
+    if flags_of(save) != Some(flags) || data.starts_with(ASM_MAGIC) != (save == 22300) || records != 0 || bodies != 2 {
         return Err("a header that is not AutoCAD's".to_string());
     }
     let layout = Layout::of(Form::Modern(save));
@@ -885,6 +889,9 @@ fn parse_binary(data: &[u8]) -> R<Model> {
     reader.finished()?;
     if product != AUTOCAD {
         return Err(format!("data of the producer {product}"));
+    }
+    if asm != ASM {
+        return Err(format!("data of the modeler {asm}, which the samples do not show"));
     }
     let mut recs = Vec::new();
     for record in records {
@@ -974,18 +981,32 @@ impl Model {
         let Rec::Straight { root, direction, bounds, .. } = self.rec(*curve)? else {
             return Err("an edge on a curve other than a straight one, which the samples do not show".to_string());
         };
-        match bounds {
-            [Bound::At(from), Bound::At(to)] => Ok((*from, *to)),
-            [Bound::Infinite, Bound::Infinite] => {
-                let along = |vertex: i32| -> R<f64> {
-                    let position = self.vertex_position(vertex)?;
-                    let d = [position[0] - root[0], position[1] - root[1], position[2] - root[2]];
-                    let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                    // the sign: the side of the root the direction points to
-                    Ok(if d[0] * direction[0] + d[1] * direction[1] + d[2] * direction[2] < 0.0 { -distance } else { distance })
-                };
-                Ok((along(*start)?, along(*end)?))
+        // Both rules hold where the samples show them: a direction of length 1 and the vertices on the curve (within the
+        // modeler's absolute tolerance), a finite range that ends at the two vertices. Anything else is refused.
+        let tolerance = self.header.as_ref().map_or(1e-6, |header| header.resabs);
+        if ((direction[0] * direction[0] + direction[1] * direction[1] + direction[2] * direction[2]).sqrt() - 1.0).abs() > 1e-12 {
+            return Err("a straight curve whose direction is not of length 1, which the samples do not show".to_string());
+        }
+        let along = |vertex: i32| -> R<f64> {
+            let position = self.vertex_position(vertex)?;
+            let d = [position[0] - root[0], position[1] - root[1], position[2] - root[2]];
+            let distance = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+            let dot = d[0] * direction[0] + d[1] * direction[1] + d[2] * direction[2];
+            if (distance * distance - dot * dot).max(0.0).sqrt() > tolerance {
+                return Err("a vertex off the curve of its edge, which the samples do not show".to_string());
             }
+            // the sign: the side of the root the direction points to
+            Ok(if dot < 0.0 { -distance } else { distance })
+        };
+        let (from_vertex, to_vertex) = (along(*start)?, along(*end)?);
+        match bounds {
+            [Bound::At(from), Bound::At(to)] => {
+                if (from - from_vertex).abs() > tolerance || (to - to_vertex).abs() > tolerance {
+                    return Err("a curve whose range does not end at the vertices of its edge, which the samples do not show".to_string());
+                }
+                Ok((*from, *to))
+            }
+            [Bound::Infinite, Bound::Infinite] => Ok((from_vertex, to_vertex)),
             _ => Err("a curve with one finite bound, which the samples do not show".to_string()),
         }
     }
@@ -1467,6 +1488,39 @@ mod tests {
         let state = data[at..].windows(5).position(|window| window == [INTEGER, 0, 0, 0, 0]).unwrap() + at;
         data[state + 1] = 1;
         assert!(convert(&AcisData::from_sab(data), DxfVersion::AC1015, &context()).unwrap_err().contains("coedge integer"));
+    }
+
+    /// The rules of the edge parameters hold where the samples show them, and only AutoCAD's modeler of the samples is converted.
+    #[test]
+    fn the_edge_parameters_and_the_modeler_are_derived_only_from_what_the_samples_show() {
+        // the samples convert
+        for text in [s::REGION_400, s::BOX_400] {
+            assert!(convert(&AcisData::from_sat(text), DxfVersion::AC1018, &context()).unwrap().is_some());
+        }
+        // a finite range that does not end at the vertices of the edge
+        let short = s::REGION_400.replacen("F 0 F 3.907787419987343469 #", "F 0 F 3.5 #", 1);
+        assert!(refusal(&AcisData::from_sat(&short), DxfVersion::AC1018).contains("range does not end"));
+        // a direction not of length 1
+        let long = s::BOX_400.replacen("straight-curve $-1 2.5 0 2.5 0 1 0 I I #", "straight-curve $-1 2.5 0 2.5 0 2 0 I I #", 1);
+        assert!(refusal(&AcisData::from_sat(&long), DxfVersion::AC1018).contains("length 1"));
+        // a vertex off the curve of its edge
+        let off = s::BOX_400.replacen("straight-curve $-1 2.5 0 2.5 0 1 0 I I #", "straight-curve $-1 2.5 0 2.5001 0 1 0 I I #", 1);
+        assert!(refusal(&AcisData::from_sat(&off), DxfVersion::AC1018).contains("off the curve"));
+        // the text releases among themselves state no edge parameters: the same bodies convert
+        for text in [&short, &long, &off] {
+            assert!(convert(&AcisData::from_sat(text), DxfVersion::AC1014, &context()).unwrap().is_some());
+        }
+        // another modeler (same length) in the text of R2000 and in the binary data
+        let other = s::REGION_400.replacen("ASM 230.7.0.65535 NT", "ASM 219.3.1.20000 NT", 1);
+        assert!(refusal(&AcisData::from_sat(&other), DxfVersion::AC1018).contains("modeler"));
+        let mut data = bytes(s::REGION_22300);
+        let at = data.windows(20).position(|window| window == b"ASM 230.7.0.65535 NT").unwrap();
+        data[at..at + 20].copy_from_slice(b"ASM 219.3.1.20000 NT");
+        assert!(refusal(&AcisData::from_sab(data), DxfVersion::AC1015).contains("modeler"));
+        // the second header word of the binary data
+        let mut data = bytes(s::REGION_20800);
+        data[19] = 1;
+        assert!(refusal(&AcisData::from_sab(data), DxfVersion::AC1015).contains("header"));
     }
 
     fn document(version: DxfVersion, acis: AcisData) -> CadDocument {
