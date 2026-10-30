@@ -5555,22 +5555,11 @@ impl<'a> DwgObjectWriter<'a> {
     }
 
     fn sab_from_sat(&self, sat: &crate::entities::acis::SatDocument) -> Vec<u8> {
-        let julian = self.document.header.update_date_julian;
-        if !sat.header.date.is_empty() || julian <= 0.0 {
+        let Some(date) = crate::entities::acis::conversion::drawing_date(self.document.header.update_date_julian).filter(|_| sat.header.date.is_empty()) else {
             return crate::entities::acis::SabWriter::write(sat);
-        }
-        // Drawing dates count the fraction from midnight, not noon.
-        let (year, month, day, hour, minute, second) = crate::fields::julian_parts(julian - 0.5);
-        const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-        const MONTHS: [&str; 12] = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-        ];
-        let weekday = DAYS[crate::fields::weekday(julian - 0.5) as usize % 7];
+        };
         let mut dated = sat.clone();
-        dated.header.date = format!(
-            "{weekday} {} {day:>2} {hour:02}:{minute:02}:{second:02} {year}",
-            MONTHS[(month as usize).clamp(1, 12) - 1]
-        );
+        dated.header.date = date;
         crate::entities::acis::SabWriter::write(&dated)
     }
 

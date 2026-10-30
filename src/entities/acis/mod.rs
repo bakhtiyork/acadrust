@@ -42,6 +42,9 @@
 //! assert!(output.contains("700"));
 //! ```
 
+pub(crate) mod conversion;
+#[cfg(test)]
+mod conversion_samples;
 pub mod parser;
 pub mod primitives;
 pub(crate) mod reversion;
