@@ -198,6 +198,7 @@ impl<'a> DxfWriter<'a> {
     ) -> Result<()> {
         let mut prepared = self.prepare();
         crate::io::dwg::autocad_roundtrip::prepare_for_dxf(&mut prepared, output_version);
+        crate::io::dwg::dimension_overrides::prepare_for_dxf(&mut prepared, output_version);
         crate::io::dwg::autocad_conversions::restore_book_colors(&mut prepared, output_version);
         crate::io::dwg::autocad_conversions::unrestore_book_colors(&mut prepared, output_version);
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, output_version, true);
@@ -333,6 +334,7 @@ impl<'a> DxfWriter<'a> {
         let mut prepared = self.prepare();
         // The attribute lock of an R12 drawing is a record (AutoCAD's R12 DXF holds `AcDbAttr`, sample_AC1009_ascii.dxf).
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, crate::types::DxfVersion::AC1009, true);
+        crate::io::dwg::dimension_overrides::prepare_for_dxf(&mut prepared, crate::types::DxfVersion::AC1009);
         let document = prepared.as_ref();
         let (handle_start, handle_seed) =
             Self::handle_range(document, crate::types::DxfVersion::AC1009, None, true);

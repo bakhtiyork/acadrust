@@ -36,6 +36,7 @@
 
 pub mod annotative_eed;
 pub(crate) mod autocad_conversions;
+pub(crate) mod dimension_overrides;
 pub(crate) mod autocad_records;
 pub(crate) mod autocad_roundtrip;
 pub(crate) mod typeface_eed;

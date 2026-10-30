@@ -366,6 +366,43 @@ impl<'a> DwgObjectWriter<'a> {
         }
     }
 
+    /// The `DSTYLE` extended data of a dimension or leader as an R13 / R14 file states it (see `dimension_overrides`): AutoCAD's R14
+    /// files name the arrowhead blocks, state DIMUNIT and the angular precision and give a leader its arrowhead.
+    pub(super) fn dimension_override_xdata<'x>(
+        &self,
+        type_code: i16,
+        common: &crate::entities::EntityCommon,
+        xdata: std::borrow::Cow<'x, crate::xdata::ExtendedData>,
+    ) -> std::borrow::Cow<'x, crate::xdata::ExtendedData> {
+        let is_dimension_or_leader =
+            type_code == OBJ_LEADER || (OBJ_DIMENSION_ORDINATE..=OBJ_DIMENSION_DIAMETER).contains(&type_code);
+        if !is_dimension_or_leader || !self.version.r13_14_only() {
+            return xdata;
+        }
+        let Some(entity) = self.document.get_entity(common.handle) else { return xdata };
+        match crate::io::dwg::dimension_overrides::r14_form(self.document, entity, &xdata) {
+            Some(stated) => std::borrow::Cow::Owned(stated),
+            None => xdata,
+        }
+    }
+
+    /// The `AnnotativeData` flag of a text as a drawing before R2010 states it (see `autocad_roundtrip::states_text_annotative_flag`).
+    pub(super) fn text_annotative_xdata<'x>(
+        &self,
+        type_code: i16,
+        xdata: std::borrow::Cow<'x, crate::xdata::ExtendedData>,
+    ) -> std::borrow::Cow<'x, crate::xdata::ExtendedData> {
+        use crate::io::dwg::autocad_roundtrip as round_trip;
+        if type_code != OBJ_TEXT || round_trip::states_text_annotative_flag(self.dxf_version) {
+            return xdata;
+        }
+        let application = self.document.app_ids.get("AcadAnnotative").map(|app| app.handle.value());
+        match round_trip::with_annotative_flag_cleared(&xdata, application) {
+            Some(cleared) => std::borrow::Cow::Owned(cleared),
+            None => xdata,
+        }
+    }
+
     // ── write_common_entity_data ────────────────────────────────────
     /// Full preamble for an entity: type code, handle, xdata, graphic
     /// flag, entity mode, reactors/xdic, layer/linetype, colour,

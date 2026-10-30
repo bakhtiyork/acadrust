@@ -684,6 +684,8 @@ impl DxfReader {
         // The native values of the version-gated records of AutoCAD's other conversions (attribute lock, dimension text fill,
         // modeler revision, multileader version).
         crate::io::dwg::autocad_conversions::restore_document(&mut document);
+        // The R2000 form of the dimension overrides of an R12 / R14 file (AutoCAD's R12 DXF holds the R14 form: sample_AC1009_ascii.dxf).
+        crate::io::dwg::dimension_overrides::restore_document(&mut document);
 
         // The legacy viewport-entity table (VX_CONTROL) exists in R13-R2000 files only. A DWG of a later
         // version has no such control object (its header handle is null); the document default would

@@ -605,7 +605,8 @@ fn dimension_text(base: &crate::entities::DimensionBase) -> Value {
 }
 
 fn dimension_has_style_override(doc: &CadDocument, base: &crate::entities::DimensionBase) -> bool {
-    base.common.extended_data.records().iter()
+    let data = crate::io::dwg::dimension_overrides::view_data(doc, base.common.handle, &base.common.extended_data);
+    data.records().iter()
         .find(|record| record.application_name.eq_ignore_ascii_case("ACAD"))
         .and_then(|record| record.values.first())
         .is_some_and(|value| match value {
