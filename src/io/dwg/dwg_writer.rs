@@ -92,6 +92,7 @@ impl DwgWriter {
         prepare_book_colors(&mut prepared)?;
         crate::io::dwg::autocad_conversions::prepare_for_write(&mut prepared, target, false);
         crate::io::dwg::autocad_records::prepare_for_write(&mut prepared, target, false);
+        crate::entities::acis::conversion::prepare_for_write(&mut prepared)?;
         let document = prepared.as_ref();
         let perf = std::env::var_os("PERF").is_some();
         let started = web_time::Instant::now();

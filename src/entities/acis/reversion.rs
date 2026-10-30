@@ -22,11 +22,11 @@
 
 use crate::types::DxfVersion;
 
-const ACIS_MAGIC: &[u8; 15] = b"ACIS BinaryFile";
-const ASM_MAGIC: &[u8; 15] = b"ASM BinaryFile4";
+pub(super) const ACIS_MAGIC: &[u8; 15] = b"ACIS BinaryFile";
+pub(super) const ASM_MAGIC: &[u8; 15] = b"ASM BinaryFile4";
 
 /// The ACIS save version and the fourth header word AutoCAD states for each DWG version.
-const SAVES: [(DxfVersion, i32, i32); 5] = [
+pub(super) const SAVES: [(DxfVersion, i32, i32); 5] = [
     (DxfVersion::AC1018, 20800, 0),
     (DxfVersion::AC1021, 21200, 26),
     (DxfVersion::AC1024, 21500, 24),
@@ -62,20 +62,20 @@ const KNOWN: &[(&str, &str, i32, i32)] = &[
     ("End-of-ASM-data", "uuuI", 21800, i32::MAX),
 ];
 
-const INTEGER: u8 = 0x04;
-const DOUBLE: u8 = 0x06;
-const STRING_1: u8 = 0x07;
-const STRING_2: u8 = 0x08;
-const STRING_4: u8 = 0x09;
-const TRUE: u8 = 0x0A;
-const FALSE: u8 = 0x0B;
-const POINTER: u8 = 0x0C;
-const IDENT: u8 = 0x0D;
-const SUB_IDENT: u8 = 0x0E;
-const END: u8 = 0x11;
-const POSITION: u8 = 0x13;
-const VECTOR: u8 = 0x14;
-const ENUM: u8 = 0x15;
+pub(super) const INTEGER: u8 = 0x04;
+pub(super) const DOUBLE: u8 = 0x06;
+pub(super) const STRING_1: u8 = 0x07;
+pub(super) const STRING_2: u8 = 0x08;
+pub(super) const STRING_4: u8 = 0x09;
+pub(super) const TRUE: u8 = 0x0A;
+pub(super) const FALSE: u8 = 0x0B;
+pub(super) const POINTER: u8 = 0x0C;
+pub(super) const IDENT: u8 = 0x0D;
+pub(super) const SUB_IDENT: u8 = 0x0E;
+pub(super) const END: u8 = 0x11;
+pub(super) const POSITION: u8 = 0x13;
+pub(super) const VECTOR: u8 = 0x14;
+pub(super) const ENUM: u8 = 0x15;
 
 /// The letter of a token's kind in the shapes of [`KNOWN`].
 fn token_class(tag: u8) -> u8 {
@@ -96,7 +96,7 @@ fn token_class(tag: u8) -> u8 {
 }
 
 /// The end of the token at `at`, when it is one of the kinds the samples show.
-fn token_end(data: &[u8], at: usize) -> Option<usize> {
+pub(super) fn token_end(data: &[u8], at: usize) -> Option<usize> {
     let tag = *data.get(at)?;
     let end = match tag {
         INTEGER | POINTER | ENUM => at + 5,
