@@ -43,8 +43,8 @@ const CHANGE_GUID: &str = "ACAD_OBJECT_CHANGE_GUID";
 const ACAD: &str = "ACAD";
 const SAVED_BY_VERSION: &str = "AcDbSavedByObjectVersion";
 const BOOK_COLOR: &str = "DBColXD";
-const BLOCK_DESCRIPTION: &str = "CONTENTBLOCKDESCRIPTION";
-const BLOCK_ICON: &str = "CONTENTBLOCKICON";
+pub(crate) const BLOCK_DESCRIPTION: &str = "CONTENTBLOCKDESCRIPTION";
+pub(crate) const BLOCK_ICON: &str = "CONTENTBLOCKICON";
 const SPLINE_DATA: &str = "ACAD_SPLINE_DATA";
 
 /// The first version that holds each value natively.

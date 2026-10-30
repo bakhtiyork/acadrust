@@ -2263,7 +2263,8 @@ impl<'a> DwgObjectWriter<'a> {
             self.register_object(e.common.handle);
             return;
         }
-        self.entity_preamble(common::OBJ_VIEWPORT, &e.common);
+        let without_mview = crate::io::dwg::legacy_viewport::without_mview(&e.common, self.document);
+        self.entity_preamble(common::OBJ_VIEWPORT, without_mview.as_ref().unwrap_or(&e.common));
 
         // Center 3BD 10
         self.writer.write_3bit_double(e.center);
@@ -2310,7 +2311,11 @@ impl<'a> DwgObjectWriter<'a> {
         } else {
             0
         };
-        self.writer.write_bit_long(e.status.to_bits() | grid_bits);
+        let mut status = e.status.to_bits();
+        if self.version.r2000_plus() && !crate::io::dwg::legacy_viewport::fast_zoom_after_r14(self.document, e.status.fast_zoom) {
+            status &= !(1 << 7);
+        }
+        self.writer.write_bit_long(status | grid_bits);
         // Style Sheet TV 1
         self.writer.write_variable_text(&e.style_sheet);
         // Render Mode RC 281

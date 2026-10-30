@@ -1206,7 +1206,7 @@ impl<'a> DwgObjectWriter<'a> {
         );
 
         self.writer.write_variable_text(&self.table_record_name(&view.name, false));
-        self.write_xref_table_flags(view.xref_reference, view.xref_resolved, view.xref_dependent);
+        self.write_referenced_flags(view.xref_reference, view.xref_resolved, view.xref_dependent);
 
         self.writer.write_bit_double(view.height);
         self.writer.write_bit_double(view.width);
@@ -1349,7 +1349,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // Common: Entry name TV 2
         self.writer.write_variable_text(&self.table_record_name(&vport.name, false));
-        self.write_xref_table_flags(
+        self.write_referenced_flags(
             vport.xref_reference,
             vport.xref_resolved,
             vport.xref_dependent,
@@ -1603,7 +1603,7 @@ impl<'a> DwgObjectWriter<'a> {
 
         // Common: Entry name TV 2
         self.writer.write_variable_text(&self.table_record_name(&ds.name, false));
-        self.write_xref_table_flags(ds.xref_reference, ds.xref_resolved, ds.xref_dependent);
+        self.write_referenced_flags(ds.xref_reference, ds.xref_resolved, ds.xref_dependent);
 
         // ── R13/R14 Only: DimStyle fields ───────────────────────────
         // These fields are ONLY written for R13/R14 (not R2000+).

@@ -865,9 +865,21 @@ impl<'a> DwgObjectWriter<'a> {
                 let mut replacement = crate::xdata::ExtendedDataRecord::new(&application.name);
                 replacement.values = values;
                 let source_position = eed.raw_dwg_eed.iter().position(|(app, _)| *app == app_handle);
+                let absent = eed.get_record(&application.name).is_none();
                 eed.merge_modeled_record(&replacement);
-                // The merged block keeps the place its application had in the source; without its verbatim block
-                // the application would be written after all the others.
+                // The insertion units of a block record (`DesignCenter Data`) go after its other records and before the description and
+                // the preview icon of an R14 block: AutoCAD's R14 file states `ACDBDYNAMICBLOCKGUID`, ACAD, `CONTENTBLOCKDESCRIPTION`,
+                // `CONTENTBLOCKICON` (R5b-18, sample_AC1014.dwg: #6F2, #A7E, #77F). Its R2000 and R2004 files state them last.
+                if absent && self.version.r13_14_only() && crate::tables::block_record::design_center_units(&replacement.values).is_some() {
+                    if let Some(record) = eed.remove_record(&application.name) {
+                        let content = eed.records().iter().position(|r| {
+                            r.application_name == crate::io::dwg::autocad_conversions::BLOCK_DESCRIPTION
+                                || r.application_name == crate::io::dwg::autocad_conversions::BLOCK_ICON
+                        });
+                        let at = content.unwrap_or(eed.records().len());
+                        eed.insert_record(at, record);
+                    }
+                }
                 let merged_bytes = source_position.and_then(|_| {
                     eed.get_record(&application.name)
                         .and_then(|record| self.encode_xdata_record(record))
@@ -984,8 +996,21 @@ impl<'a> DwgObjectWriter<'a> {
 
     /// The xref flags of a table entry that models only the dependent bit. The "referenced" bit (64 of the DXF
     /// group 70) is kept from the entry's source flags: it is stored from R2000 to R2004 and not afterwards.
+    ///
+    /// R5b-18: a DWG of R14 to R2004 states the bit for every record of the tables the samples show it on (`write_referenced_flags`).
     pub fn write_xref_flags_with_source(&mut self, source_flags: i16, xref_dep: bool) {
-        self.write_xref_table_flags(source_flags & 64 != 0, false, xref_dep);
+        self.write_referenced_flags(source_flags & 64 != 0, false, xref_dep);
+    }
+
+    /// The xref flags of a record of the application, layer, text style, line type, dimension style, view and VPORT tables. AutoCAD
+    /// states the "referenced" bit (64 of the DXF group 70) on every record of these tables in its files of R14, R2000 and R2004
+    /// (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg: all 44, 42 and 42 applications, 21 layers, 6 text styles, 8 line types,
+    /// 6 dimension styles, the view and the VPORT; every record of these tables in the 23 R14 to R2004 DWG files of the corpus too) and on
+    /// none in R2010 and later (the format stores it from R13 to R2004 only), whatever the drawing it was saved from. An R13 file keeps
+    /// the bit of the source (no R13 DWG shows the rule), as does a version with no use for it.
+    pub fn write_referenced_flags(&mut self, stated: bool, xref_resolved: bool, xref_dependent: bool) {
+        let referenced = stated || (self.dxf_version >= crate::types::DxfVersion::AC1014 && !self.version.r2007_plus());
+        self.write_xref_table_flags(referenced, xref_resolved, xref_dependent);
     }
 
     pub fn write_xref_table_flags(
