@@ -28,8 +28,16 @@ fn mview_range(values: &[X]) -> Option<std::ops::Range<usize>> {
     None
 }
 
+/// The fast zoom flag an R13/R14 DWG states for a viewport or VPORT. AutoCAD's own R14 file states 1 for every one of them
+/// (sample_AC1014.dwg: the six viewports #240 to #26B and the VPORT), also for the drawing its R2000 file (sample_AC1015.dwg)
+/// states 0 for the viewports (FASTZOOM is 1 and cannot be changed in AutoCAD since R2000, the status word has no use for it). Only
+/// a document read from an R13/R14 file states the flag itself, and keeps it.
+pub(crate) fn fast_zoom_at_r14(document: &CadDocument, stated: bool) -> bool {
+    use crate::types::DxfVersion::{AC1012, AC1014};
+    stated || !document.dwg_source_version.or(document.dxf_source_version).is_some_and(|source| matches!(source, AC1012 | AC1014))
+}
+
 pub(crate) fn record(v: &Viewport, document: &CadDocument) -> ExtendedDataRecord {
-    let from_r2000 = document.dwg_source_version.is_some_and(|source| source >= crate::types::DxfVersion::AC1015);
     // The status word of a viewport of an R2000 or later file, a DWG or a DXF, holds its UCS icon; the reader of an R14 file puts
     // the icon word there too (`restore_impl`). `ucs_icon_visible` of the viewport is the icon word of an R14 file only (a reader of
     // a later file leaves its default).
@@ -52,10 +60,10 @@ pub(crate) fn record(v: &Viewport, document: &CadDocument) -> ExtendedDataRecord
         X::Real(v.back_clip_z),
         X::Integer16((v.status.to_bits() & 0x1F) as i16),
         X::Integer16(v.circle_sides),
-        // A viewport of an R2000 or later DWG states its UCS icon in the status word and has no fast zoom (FASTZOOM is 1
+        // A viewport of an R2000 or later file states its UCS icon in the status word and has no fast zoom (FASTZOOM is 1
         // in AutoCAD since R2000); AutoCAD's own R14 file of such a drawing states 1 for the fast zoom and the status's
         // icon bits in the icon word (sample_AC1014.dwg from sample_AC1015.dwg: 1, and 1 or 3).
-        X::Integer16((v.status.fast_zoom || from_r2000) as i16),
+        X::Integer16(fast_zoom_at_r14(document, v.status.fast_zoom) as i16),
         X::Integer16(icon_visible as i16 | ((icon_at_origin as i16) << 1)),
         X::Integer16(v.status.snap_on as i16),
         X::Integer16(v.status.grid_on as i16),
