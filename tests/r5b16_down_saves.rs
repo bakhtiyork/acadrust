@@ -131,6 +131,11 @@ fn a_viewport_and_vport_of_an_r14_file_state_fast_zoom_as_autocads_r14_file() {
     let mut made = viewport_drawing(DxfVersion::AC1032);
     made.dwg_source_version = None;
     assert_eq!(fast_zoom(&write_and_read(&made, DxfVersion::AC1014)), (true, true));
+    // a document read from an R14 DXF states its own flag as well (review of R5b-16: the DXF source was not tested)
+    let mut from_r14_dxf = viewport_drawing(DxfVersion::AC1032);
+    from_r14_dxf.dwg_source_version = None;
+    from_r14_dxf.dxf_source_version = Some(DxfVersion::AC1014);
+    assert_eq!(fast_zoom(&write_and_read(&from_r14_dxf, DxfVersion::AC1014)), (false, false), "an R14 DXF source keeps its flag");
     // an R14 file keeps what it holds, and an edit after the read wins
     let r14 = write_and_read(&viewport_drawing(DxfVersion::AC1032), DxfVersion::AC1014);
     assert_eq!(r14.dwg_source_version, Some(DxfVersion::AC1014));
