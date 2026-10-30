@@ -178,6 +178,58 @@ fn an_r14_record_the_samples_do_not_explain_stays_as_the_file_had_it() {
     assert_eq!(model_pairs(&r14, drawing.angular), Some(vec![(271, X::Integer16(5))]));
     // ... and the view of the read file shows the same, with the 271 of the style not added on top
     assert_eq!(view_pairs(&r14, drawing.angular).unwrap().as_slice(), [(271, Value::from(5))]);
+    // written to R14 again, the file states them as read (no 271 of the style, no conversion of the name)
+    let again = write_and_read(&r14, DxfVersion::AC1014);
+    for handle in [drawing.aligned, drawing.angular] {
+        assert_eq!(model_pairs(&again, handle), model_pairs(&r14, handle));
+        assert_eq!(view_pairs(&again, handle), view_pairs(&r14, handle));
+    }
+}
+
+/// An edit after an R14 read wins: a block the reader left as the file had it gets the R14 form of what the caller put there, and a
+/// dimension added after the read gets the R14 form like any other (R5b-19 review: both were written in the R2000 form).
+#[test]
+fn an_edit_after_an_r14_read_and_a_new_dimension_get_the_r14_form() {
+    let mut drawing = drawing();
+    let angular = drawing.document.get_entity_mut(drawing.angular).unwrap().common_mut();
+    angular.extended_data.add_record(dstyle(vec![(271, X::Integer16(5))]));
+    let mut r14 = write_and_read(&drawing.document, DxfVersion::AC1014);
+    assert_eq!(model_pairs(&r14, drawing.angular), Some(vec![(271, X::Integer16(5))]), "left as the file had it");
+
+    // the caller removes the override: the angular dimension states the style's DIMADEC as R14 does
+    r14.get_entity_mut(drawing.angular).unwrap().common_mut().extended_data = Default::default();
+    // ... and adds an aligned dimension with the arrowhead overrides in the model's (R2000) form
+    let mut added = DimensionAligned::new(Vector3::new(0.0, 5.0, 0.0), Vector3::new(10.0, 5.0, 0.0));
+    added.base.style_name = "ISO-25".into();
+    added.base.common.extended_data.add_record(dstyle(vec![(343, X::Handle(drawing.arrow)), (344, X::Handle(drawing.arrow))]));
+    let added = r14.add_entity(EntityType::Dimension(Box::new(Dimension::Aligned(added)))).unwrap();
+
+    let edited = write_and_read(&r14, DxfVersion::AC1014);
+    assert_eq!(view_pairs(&edited, drawing.angular).unwrap().as_slice(), [(271, Value::from(0))], "the edit, in the R14 form");
+    assert_eq!(
+        view_pairs(&edited, added).unwrap().as_slice(),
+        [(6, Value::from("ARCHTICK")), (7, Value::from("ARCHTICK"))],
+        "the new dimension names the arrowhead block"
+    );
+    assert_eq!(model_pairs(&edited, added), Some(vec![(343, X::Handle(drawing.arrow)), (344, X::Handle(drawing.arrow))]));
+}
+
+/// An arrowhead handle whose block record no longer exists has no R14 name: the block is written as the model holds it (no name is
+/// invented) and an R14 read keeps it as it was written.
+#[test]
+fn an_arrowhead_handle_without_a_block_record_is_kept_as_the_model_holds_it() {
+    let drawing = drawing();
+    let mut r14 = write_and_read(&drawing.document, DxfVersion::AC1014);
+    let gone = Handle::new(0x7FFF0);
+    assert!(r14.block_records.iter().all(|block| block.handle != gone));
+    let pairs = vec![(173, X::Integer16(1)), (343, X::Handle(gone))];
+    let aligned = r14.get_entity_mut(drawing.aligned).unwrap().common_mut();
+    aligned.extended_data = Default::default();
+    aligned.extended_data.add_record(dstyle(pairs.clone()));
+    let again = write_and_read(&r14, DxfVersion::AC1014);
+    assert_eq!(model_pairs(&again, drawing.aligned), Some(pairs.clone()));
+    let up = write_and_read(&again, DxfVersion::AC1015);
+    assert_eq!(model_pairs(&up, drawing.aligned), Some(pairs));
 }
 
 // ── AnnotativeData of a text ───────────────────────────────────────────────────────────────────────────────────────────────
@@ -289,6 +341,29 @@ fn an_mtext_with_a_character_the_code_page_lacks_states_the_round_trip_record_be
     // a text the code page has needs none
     let (plain, text) = mtext_drawing("caf\u{e9} one line");
     assert_eq!(mtext_record(&write_and_read(&plain, DxfVersion::AC1015), text), None);
+}
+
+/// A text with a paragraph break and a character the code page lacks: the file states `\P` and `\U+XXXX`, the record the checksum of
+/// that spelling and the original; the reader gives the model the line feed and the character back and takes the record out (R5b-19
+/// review: the record was left in the model and the text kept `\P`).
+#[test]
+fn an_mtext_with_a_paragraph_break_and_a_character_the_code_page_lacks_comes_back_on_read() {
+    let original = "a\n\u{2205}5";
+    let checksum: f64 = "a\\P\\U+22055".encode_utf16().enumerate().map(|(index, unit)| (index as f64 + 1.0) * f64::from(unit)).sum();
+    let (document, text) = mtext_drawing(original);
+    for version in [DxfVersion::AC1014, DxfVersion::AC1015] {
+        let read = write_and_read(&document, version);
+        assert_eq!(mtext_value(&read, text), original, "{version:?}");
+        let (key, stated, _) = mtext_record(&read, text).expect("the record in the view");
+        assert_eq!((key.as_str(), stated), ("ACAD_MTEXT_RT", checksum), "{version:?}");
+        assert!(
+            !read.objects.values().any(|object| matches!(object, acadrust::objects::ObjectType::XRecord(record) if record.name.starts_with("ACAD_MTEXT"))),
+            "{version:?}: the applied record is taken out of the model"
+        );
+        let again = write_and_read(&read, version);
+        assert_eq!(mtext_value(&again, text), original, "{version:?} again");
+        assert_eq!(mtext_record(&again, text), mtext_record(&read, text), "{version:?} again");
+    }
 }
 
 /// AutoCAD's R2000 file states the stacked fraction `{\H1x;\S1#4;}` of the MTEXT #662 as `\S1/4;` and the original in the record

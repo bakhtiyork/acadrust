@@ -1579,10 +1579,11 @@ pub struct CadDocument {
     pub(crate) consumed_xdata: HashMap<Handle, Vec<(usize, crate::xdata::ExtendedDataRecord)>>,
 
     /// The dimensions and leaders of a drawing read from R13 / R14 whose `DSTYLE` extended data `io::dwg::dimension_overrides`
-    /// restored to the form of R2000 and later (the model holds that form; the R14 writer and the ACadSharp view state the R14
-    /// form again for exactly these). Not serialized.
+    /// did not restore to the form of R2000 and later (the samples do not explain the block), with the `(group code, value)` pairs
+    /// the file stated: the R14 writers and the ACadSharp view state those pairs as read while the entity still holds them, and
+    /// the R14 form of every other dimension and leader (restored, edited or new). Not serialized.
     #[doc(hidden)]
-    pub(crate) r14_dimension_overrides: std::collections::HashSet<Handle>,
+    pub(crate) r14_dimension_overrides_as_read: HashMap<Handle, Vec<(i16, crate::xdata::XDataValue)>>,
 
     /// The round-trip record objects (`ACAD_XREC_ROUNDTRIP` and the chains of `io::dwg::autocad_records`) a reader took out of the
     /// model when it restored the native values they state: the changes it made, which the ACadSharp view and the writers undo
@@ -1845,7 +1846,7 @@ impl CadDocument {
             dgn_ls_components: HashMap::new(),
             eed_by_handle: HashMap::new(),
             consumed_xdata: HashMap::new(),
-            r14_dimension_overrides: std::collections::HashSet::new(),
+            r14_dimension_overrides_as_read: HashMap::new(),
             consumed_records: Default::default(),
             object_xdata: HashMap::new(),
             xdic_by_handle: HashMap::new(),

@@ -12,11 +12,19 @@
 //! | leader arrowhead | the style's DIMLDRBLK (none for ISO-25): no extended data (#512) | `5` `1000 ""`: R14 has no DIMLDRBLK, the leader states its arrowhead as DIMBLK (#512) |
 //!
 //! The native model holds the R2000 form (the form of the format that has the fields). A reader of an R13 / R14 file restores it
-//! when [`to_r14`] states the block it read exactly (the entity is remembered in `CadDocument::r14_dimension_overrides`); the
-//! writers of R13 / R14 and the ACadSharp view of such a file state the R14 form again from the model, so a file read and written
-//! at R14 is unchanged, an R14 file written for a later version carries no stale R14 record and a down-save to R14 carries
-//! what AutoCAD's does. Anything the samples do not show is left as the file had it: a name no block record has, a 271 on a
-//! dimension that is not angular, a 270 that is not the derived unit.
+//! when [`to_r14`] states the block it read exactly; the writers of R13 / R14 and the ACadSharp view of such a file state the R14
+//! form again from the model, so a file read and written at R14 is unchanged, an R14 file written for a later version carries no
+//! stale R14 record and a down-save to R14 carries what AutoCAD's does. Anything the samples do not show is left as the file had
+//! it: a name no block record has, a 271 on a dimension that is not angular, a 270 that is not the derived unit. Such a block is
+//! remembered with the pairs read (`CadDocument::r14_dimension_overrides_as_read`) and stated as read while the entity holds them;
+//! an entity edited after the read, or added, gets the R14 form of what it holds (an edit after the read wins).
+//!
+//! Evidence: the only AutoCAD files of R14 or earlier with `DSTYLE` data on entities are sample_AC1014.dwg and AutoCAD's R12 DXF
+//! twins sample_AC1009_ascii.dxf / sample_AC1009_binary.dxf (the six entities #512 #515 #516 #51F #522 #527 of one drawing, one
+//! dimension style ISO-25); the corpus's R12 to R14 files (nextgis arc_R14.dwg, line_R14.dwg, arc_R12.dxf; cadviewer ce.dxf) have
+//! no dimension or leader. Every derivation below is from that one drawing: the R14 name of arrowheads other than `_BoxBlank` and
+//! `_ArchTick`, DIMUNIT for units other than decimal and architectural stacked, the leader's `5` for a style with a DIMLDRBLK, and
+//! the position of `5` / `271` among other overrides (appended) are UNVERIFIED.
 #[cfg(feature = "acadsharp-compat")]
 use std::borrow::Cow;
 
@@ -254,40 +262,46 @@ fn acad_handle(document: &CadDocument) -> Option<u64> {
     document.app_ids.get(APPLICATION).map(|app| app.handle.value())
 }
 
-/// Restore the R2000 form of the `DSTYLE` block of every dimension and leader of a drawing read from R13 / R14.
+/// Restore the R2000 form of the `DSTYLE` block of every dimension and leader of a drawing read from R13 / R14; a block [`from_r14`]
+/// does not restore is remembered with the pairs read. Run once per read: a second run would take the restored blocks for blocks the
+/// samples do not explain (the DWG reader states its post-read passes twice; this one is called from the first only).
 pub(crate) fn restore_document(document: &mut CadDocument) {
     if document.version > DxfVersion::AC1014 {
         return;
     }
     let application = acad_handle(document);
     let mut changes: Vec<(usize, ExtendedData)> = Vec::new();
+    let mut as_read: Vec<(Handle, Pairs)> = Vec::new();
     for (index, entity) in document.entities.iter().enumerate() {
         let Some((kind, style)) = kind_and_style(document, entity) else { continue };
         let data = &entity.common().extended_data;
         let Some((position, pairs)) = current(data) else { continue };
-        let Some(restored) = from_r14(document, kind, style, &pairs) else { continue };
-        changes.push((index, with_pairs(data, application, position, &restored)));
+        match from_r14(document, kind, style, &pairs) {
+            Some(restored) if restored != pairs => changes.push((index, with_pairs(data, application, position, &restored))),
+            Some(_) => {}
+            None => as_read.push((entity.common().handle, pairs)),
+        }
     }
     for (index, data) in changes {
-        let entity = std::sync::Arc::make_mut(&mut document.entities[index]);
-        document.r14_dimension_overrides.insert(entity.common().handle);
-        entity.common_mut().extended_data = data;
+        std::sync::Arc::make_mut(&mut document.entities[index]).common_mut().extended_data = data;
     }
+    document.r14_dimension_overrides_as_read.extend(as_read);
 }
 
 /// Whether the drawing was read from a file of R14 or earlier (a DWG or a DXF: AutoCAD's R12 DXF holds the R14 form).
+#[cfg(feature = "acadsharp-compat")]
 fn read_at_r14(document: &CadDocument) -> bool {
     document.dwg_source_version.or(document.dxf_source_version).is_some_and(|version| version <= DxfVersion::AC1014)
 }
 
 /// The extended data of `entity` as an R13 / R14 file states it, when that differs from `data` (its extended data in the model):
-/// every entity that is not from an R13 / R14 file, and the entities of one whose block was restored.
+/// none for a block the reader of an R13 / R14 file left as the file had it, while the entity holds it unchanged.
 pub(crate) fn r14_form(document: &CadDocument, entity: &EntityType, data: &ExtendedData) -> Option<ExtendedData> {
     let (kind, style) = kind_and_style(document, entity)?;
-    if read_at_r14(document) && !document.r14_dimension_overrides.contains(&entity.common().handle) {
+    let (position, pairs) = current(data)?;
+    if document.r14_dimension_overrides_as_read.get(&entity.common().handle).is_some_and(|read| *read == pairs) {
         return None;
     }
-    let (position, pairs) = current(data)?;
     let stated = to_r14(document, kind, style, &pairs)?;
     (stated != pairs).then(|| with_pairs(data, acad_handle(document), position, &stated))
 }
@@ -295,7 +309,7 @@ pub(crate) fn r14_form(document: &CadDocument, entity: &EntityType, data: &Exten
 /// [`r14_form`] for the ACadSharp view of a drawing read from R13 / R14.
 #[cfg(feature = "acadsharp-compat")]
 pub(crate) fn view_data<'a>(document: &CadDocument, handle: Handle, data: &'a ExtendedData) -> Cow<'a, ExtendedData> {
-    if !read_at_r14(document) || !document.r14_dimension_overrides.contains(&handle) {
+    if !read_at_r14(document) {
         return Cow::Borrowed(data);
     }
     match document.get_entity(handle).and_then(|entity| r14_form(document, entity, data)) {
@@ -404,6 +418,8 @@ mod tests {
     fn a_block_that_is_not_the_shape_autocad_writes_is_not_touched() {
         let open = vec![X::String("DSTYLE".into()), X::ControlString("{".into()), X::Integer16(271)];
         assert!(block_range(&open).is_err());
+        let nested = vec![X::String("DSTYLE".into()), X::ControlString("{".into()), X::Integer16(271), X::ControlString("{".into())];
+        assert!(block_range(&nested).is_err(), "a block whose next control string is not the closing brace");
         let odd = vec![X::String("DSTYLE".into()), X::ControlString("{".into()), X::Integer16(271), X::ControlString("}".into())];
         assert!(block_pairs(&odd).is_none());
         assert_eq!(block_range(&[X::String("OTHER".into())]), Ok(None));

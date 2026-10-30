@@ -2518,10 +2518,10 @@ fn restore_mtext(document: &mut CadDocument, found: &std::collections::HashMap<H
             applied.push(*record);
         } else if let Some(file) = crate::io::dxf::code_page::escape_unmappable(&text.value, encoding.clone()) {
             // The characters the code page lacks, spelled as the file spells them: the checksum is of that spelling, the record text
-            // the text (the readers decode the escapes of both; #64B of sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg);
-            // the text stays.
-            if original == text.value && mtext_checksum(&file) == checksum {
-                restored.push((*owner, text.value.clone(), file));
+            // the original (the readers decode the escapes of both; #64B of sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg,
+            // whose original is the text itself; a text with a paragraph break too gets its line feed back as in the branch above).
+            if mtext_checksum(&file) == checksum {
+                restored.push((*owner, original, file));
                 applied.push(*record);
             }
         }

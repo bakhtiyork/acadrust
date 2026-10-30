@@ -1731,7 +1731,6 @@ impl<R: Read + Seek> DwgReader<R> {
         decode_field_xdata(&mut document);
         decode_block_units_xdata(&mut document);
         crate::io::dwg::autocad_conversions::restore_document(&mut document);
-        crate::io::dwg::dimension_overrides::restore_document(&mut document);
         crate::objects::restore_visual_style_roundtrip(&mut document);
         crate::io::dwg::autocad_records::restore_document(&mut document);
         crate::objects::restore_table_style_roundtrip(&mut document);
