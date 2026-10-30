@@ -166,6 +166,8 @@ impl<'a> DwgObjectWriter<'a> {
     fn entity_preamble(&mut self, type_code: i16, c: &EntityCommon) {
         self.pending_layer_handle = c.layer_handle;
         let xdata = self.round_trip_xdata(type_code, c);
+        let xdata = self.dimension_override_xdata(type_code, c, xdata);
+        let xdata = self.text_annotative_xdata(type_code, xdata);
         self.write_common_entity_data(
             type_code,
             c.handle,

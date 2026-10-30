@@ -1849,7 +1849,8 @@ fn scan(document: &CadDocument, want_blocks: bool, want_multilines: bool, want_m
             }
         }
         if want_mtexts {
-            if let Some((record, entries)) = dictionary.get(MTEXT_RT).and_then(|record| Some((record, record_entries(document, record)?))) {
+            let record = dictionary.get(MTEXT_RT).or_else(|| dictionary.get(MTEXT_2008_RT));
+            if let Some((record, entries)) = record.and_then(|record| Some((record, record_entries(document, record)?))) {
                 found.mtexts.insert(dictionary.owner, (record, entries.to_vec()));
             }
         }
@@ -1877,7 +1878,7 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
             take_chain(document, record);
         }
     }
-    let found = scan(document, !block_data_holds(version), !mlatt_holds(version), !mtext_rt_holds(version));
+    let found = scan(document, !block_data_holds(version), !mlatt_holds(version), !mtext_text_holds(version));
     for record in restore_block_data(document, &found.blocks) {
         take_chain(document, record);
     }
@@ -2387,21 +2388,94 @@ fn extnames_wanted(document: &CadDocument) -> Vec<(Handle, String, String)> {
 // ---------------------------------------------------------------------------------------------------------------------
 
 const MTEXT_RT: &str = "ACAD_MTEXT_RT";
+/// R2004's key of the same record, for the text with a character the code page lacks (`\U+2205` in sample_AC1018.dwg, #64B: the record
+/// has the shape of `ACAD_MTEXT_RT`); R2004 holds the paragraph breaks itself, so it states no record for those.
+const MTEXT_2008_RT: &str = "ACAD_MTEXT_2008_RT";
+
+fn mtext_rt_key(version: DxfVersion) -> &'static str {
+    if mtext_rt_holds(version) { MTEXT_2008_RT } else { MTEXT_RT }
+}
+
+/// Whether a drawing of `version` holds its text as Unicode (R2007 and later): before it a character the code page lacks is spelled
+/// `\U+XXXX`.
+pub(crate) fn mtext_text_holds(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1021
+}
+
+fn dxf_r2004(version: DxfVersion) -> bool {
+    version <= DxfVersion::AC1018
+}
 const MTEXT_RT_CHUNK: usize = 250;
 
 pub(crate) fn mtext_rt_holds(version: DxfVersion) -> bool {
     version >= DxfVersion::AC1018
 }
 
-/// The text a file before R2004 states for `original` (the paragraph breaks as `\P`); `None` when it states the original itself.
-fn mtext_file_text(original: &str) -> Option<String> {
-    original.contains('\n').then(|| original.replace('\n', "\\P"))
+/// The text a file before R2004 states for `original`: the paragraph breaks as `\P`, the characters the code page lacks as `\U+XXXX`
+/// (sample_AC1014.dwg and sample_AC1015.dwg, the MTEXT #64B: `\U+220545,6` for `∅45,6`), and in R2000 the stacked fraction
+/// `{\H1x;\S1#4;}` as `\S1/4;` (sample_AC1015.dwg, #662; R14 has no such text and R2004 keeps the original); `None` when it states the
+/// original itself.
+fn mtext_file_text(document: &CadDocument, original: &str, version: DxfVersion) -> Option<String> {
+    let mut text = std::borrow::Cow::Borrowed(original);
+    if version == DxfVersion::AC1015 {
+        if let Some(converted) = r2000_stacked_fractions(&text) {
+            text = std::borrow::Cow::Owned(converted);
+        }
+    }
+    if !mtext_rt_holds(version) && text.contains('\n') {
+        text = std::borrow::Cow::Owned(text.replace('\n', "\\P"));
+    }
+    if !mtext_text_holds(version) {
+        if let Some(escaped) = crate::io::dxf::code_page::escape_unmappable(&text, document_encoding(document)) {
+            text = std::borrow::Cow::Owned(escaped);
+        }
+    }
+    (text != original).then(|| text.into_owned())
+}
+
+fn document_encoding(document: &CadDocument) -> crate::io::dxf::code_page::LegacyEncoding {
+    let index = crate::io::dxf::code_page::dwg_code_page_index(&document.header.code_page);
+    crate::io::dxf::code_page::encoding_from_dwg_code_page(index)
+}
+
+/// `{\H1x;\S<a>#<b>;}` as `\S<a>/<b>;` (the stacked fraction R2000 spells with the slash); `None` when the text has none. The numerator and
+/// denominator hold none of `;`, `#`, `/`, `\`, `{`, `}`.
+fn r2000_stacked_fractions(text: &str) -> Option<String> {
+    const HEAD: &str = "{\\H1x;\\S";
+    if !text.contains(HEAD) {
+        return None;
+    }
+    let plain = |part: &str| !part.is_empty() && !part.contains([';', '#', '/', '\\', '{', '}']);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut changed = false;
+    while let Some(at) = rest.find(HEAD) {
+        let after = &rest[at + HEAD.len()..];
+        let stacked = after.find(";}").and_then(|end| after[..end].split_once('#').map(|(a, b)| (a, b, end)));
+        match stacked {
+            Some((numerator, denominator, end)) if plain(numerator) && plain(denominator) => {
+                out.push_str(&rest[..at]);
+                out.push_str(&format!("\\S{numerator}/{denominator};"));
+                rest = &after[end + 2..];
+                changed = true;
+            }
+            _ => {
+                out.push_str(&rest[..at + HEAD.len()]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    changed.then_some(out)
 }
 
 fn mtext_checksum(text: &str) -> f64 {
     crate::entities::table::cell_text_checksum(text)
 }
 
+/// The record of an MTEXT: the checksum of the text the file states and the original text (a character the code page lacks is
+/// spelled `\U+XXXX` in the file by the string encoding, as in the file text itself: AutoCAD's records of #64B in sample_AC1014.dwg and
+/// sample_AC1015.dwg state the escaped text, which the readers decode).
 fn mtext_rt_entries(original: &str, file: &str) -> Vec<XRecordEntry> {
     let mut entries = vec![XRecordEntry::double(40, mtext_checksum(file))];
     let characters: Vec<char> = original.chars().collect();
@@ -2431,6 +2505,7 @@ fn mtext_rt_original(entries: &[XRecordEntry]) -> Option<(f64, String)> {
 fn restore_mtext(document: &mut CadDocument, found: &std::collections::HashMap<Handle, (Handle, Vec<XRecordEntry>)>) -> Vec<Handle> {
     let mut applied = Vec::new();
     let mut restored = Vec::new();
+    let encoding = document_encoding(document);
     // In the order of the owners: the records are taken out in this order (a hash map's order changes from run to run).
     let mut owners: Vec<&Handle> = found.keys().collect();
     owners.sort();
@@ -2441,6 +2516,14 @@ fn restore_mtext(document: &mut CadDocument, found: &std::collections::HashMap<H
         if mtext_checksum(&text.value) == checksum {
             restored.push((*owner, original, text.value.clone()));
             applied.push(*record);
+        } else if let Some(file) = crate::io::dxf::code_page::escape_unmappable(&text.value, encoding.clone()) {
+            // The characters the code page lacks, spelled as the file spells them: the checksum is of that spelling, the record text
+            // the original (the readers decode the escapes of both; #64B of sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg,
+            // whose original is the text itself; a text with a paragraph break too gets its line feed back as in the branch above).
+            if mtext_checksum(&file) == checksum {
+                restored.push((*owner, original, file));
+                applied.push(*record);
+            }
         }
     }
     for (owner, original, file) in restored {
@@ -2460,11 +2543,16 @@ fn state_mtext(document: &mut CadDocument, ext: &mut Ext, owner: Handle, wanted:
                 text.value = file;
             }
             let extension = ext.ensure(document, owner);
-            set_record(document, extension, MTEXT_RT, Some(entries), true, version);
+            // the version's own key; the other one is a stale record of another version's conversion
+            let key = mtext_rt_key(version);
+            let stale = if key == MTEXT_RT { MTEXT_2008_RT } else { MTEXT_RT };
+            set_record(document, extension, stale, None, true, version);
+            set_record(document, extension, key, Some(entries), true, version);
         }
         None => {
             if let Some(extension) = ext.of(document, owner) {
                 set_record(document, extension, MTEXT_RT, None, true, version);
+                set_record(document, extension, MTEXT_2008_RT, None, true, version);
             }
         }
     }
@@ -2476,7 +2564,7 @@ fn state_mtext(document: &mut CadDocument, ext: &mut Ext, owner: Handle, wanted:
 pub(crate) fn mtext_file_value<'a>(document: &CadDocument, owner: Handle, value: &'a str) -> std::borrow::Cow<'a, str> {
     match document.consumed_records.mtext.get(&owner) {
         Some((original, file)) if original == value => std::borrow::Cow::Owned(file.clone()),
-        Some(_) => mtext_file_text(value).map_or(std::borrow::Cow::Borrowed(value), std::borrow::Cow::Owned),
+        Some(_) => mtext_file_text(document, value, document.version).map_or(std::borrow::Cow::Borrowed(value), std::borrow::Cow::Owned),
         None => std::borrow::Cow::Borrowed(value),
     }
 }
@@ -2579,10 +2667,6 @@ pub(crate) fn consume_gradient(document: &mut CadDocument, hatch: Handle) {
 type Predicate = fn(DxfVersion) -> bool;
 
 fn layout_dxf(version: DxfVersion) -> bool {
-    version <= DxfVersion::AC1015
-}
-
-fn dxf_r2000(version: DxfVersion) -> bool {
     version <= DxfVersion::AC1015
 }
 
@@ -2954,17 +3038,19 @@ fn prepare_records_for_write(document: &mut std::borrow::Cow<'_, CadDocument>, v
         .map(|(owner, _)| owner)
         .collect();
     // The MTEXT before R2004: the paragraph breaks as `\\P` and the original in `ACAD_MTEXT_RT` (R2000 DXF too: its twin holds the record).
-    let mtext_jobs: Vec<(Handle, Option<(String, Vec<XRecordEntry>)>)> = if needs(mtext_rt_holds, dxf_r2000) {
+    let mtext_jobs: Vec<(Handle, Option<(String, Vec<XRecordEntry>)>)> = if needs(mtext_text_holds, dxf_r2004) {
         document
             .entities()
             .filter_map(|entity| {
                 let crate::entities::EntityType::MText(text) = entity else { return None };
                 let owner = text.common.handle;
                 let consumed = document.consumed_records.mtext.get(&owner);
-                let restored = consumed.filter(|(original, _)| *original == text.value);
+                // The spelling the file had stays only for a file of the same version (the drawing's `version` is the target's here).
+                let same_version = document.dwg_source_version.or(document.dxf_source_version) == Some(version);
+                let restored = consumed.filter(|(original, _)| *original == text.value && same_version);
                 let wanted = match restored {
                     Some((original, file)) => Some((file.clone(), mtext_rt_entries(original, file))),
-                    None => mtext_file_text(&text.value).map(|file| {
+                    None => mtext_file_text(document, &text.value, version).map(|file| {
                         let entries = mtext_rt_entries(&text.value, &file);
                         (file, entries)
                     }),
@@ -2974,13 +3060,13 @@ fn prepare_records_for_write(document: &mut std::borrow::Cow<'_, CadDocument>, v
                     && ext
                         .of(document, owner)
                         .and_then(|extension| dictionary_at(document, extension))
-                        .and_then(|dictionary| dictionary.get(MTEXT_RT))
+                        .and_then(|dictionary| dictionary.get(MTEXT_RT).or_else(|| dictionary.get(MTEXT_2008_RT)))
                         .and_then(|record| record_entries(document, record))
                         .is_some_and(|entries| mtext_rt_original(entries).is_some());
                 (wanted.is_some() || ours).then_some((owner, wanted))
             })
             .collect()
-    } else if mtext_rt_holds(version) {
+    } else if mtext_text_holds(version) {
         // A version that holds the text itself: the record the reader applied (it is put back above) goes, as AutoCAD's up-save drops it.
         document
             .consumed_records
@@ -2989,7 +3075,7 @@ fn prepare_records_for_write(document: &mut std::borrow::Cow<'_, CadDocument>, v
             .filter(|owner| {
                 ext.of(document, **owner)
                     .and_then(|extension| dictionary_at(document, extension))
-                    .and_then(|dictionary| dictionary.get(MTEXT_RT))
+                    .and_then(|dictionary| dictionary.get(MTEXT_RT).or_else(|| dictionary.get(MTEXT_2008_RT)))
                     .and_then(|record| record_entries(document, record))
                     .is_some_and(|entries| mtext_rt_original(entries).is_some())
             })
@@ -3119,10 +3205,11 @@ pub(crate) fn ucs_holds(version: DxfVersion) -> bool {
 }
 
 /// The name R14 states for an arrowhead block (DIMBLK): AutoCAD's own R14 file states `BOXBLANK` for the block `_BoxBlank` both in the
-/// header and in the dimension style (sample_AC1014.dwg, G5-RC-S012). The sample shows this one arrowhead only; another standard
-/// arrowhead is stated under the name of its block as before (UNVERIFIED how R14 spells it).
+/// header and in the dimension style (sample_AC1014.dwg, G5-RC-S012) and `ARCHTICK` for `_ArchTick` in the `DSTYLE` extended data of
+/// the aligned dimension #527 (R5b-19). The sample shows these two arrowheads only; another standard arrowhead is stated under the
+/// name of its block as before (UNVERIFIED how R14 spells it).
 pub(crate) fn r14_arrow_name(block: &str) -> Option<&'static str> {
-    const NAMES: [(&str, &str); 1] = [("_BoxBlank", "BOXBLANK")];
+    const NAMES: [(&str, &str); 2] = [("_BoxBlank", "BOXBLANK"), ("_ArchTick", "ARCHTICK")];
     NAMES.iter().find(|(name, _)| name.eq_ignore_ascii_case(block)).map(|(_, r14)| *r14)
 }
 

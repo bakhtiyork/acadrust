@@ -330,7 +330,8 @@ pub(super) fn extended_data(
     _object_handle: Handle,
     data: &ExtendedData,
 ) -> Value {
-    project(doc, Some(data), &[], None, consumed(doc, _object_handle))
+    let data = crate::io::dwg::dimension_overrides::view_data(doc, _object_handle, data);
+    project(doc, Some(&data), &[], None, consumed(doc, _object_handle))
 }
 
 /// Project non-entity XDATA and raw EED stored in the document side maps.

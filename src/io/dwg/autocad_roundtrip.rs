@@ -738,6 +738,46 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
     }
 }
 
+// ── AnnotativeData of a text ─────────────────────────────────────────────────────────────────────────────────────────
+
+const ANNOTATIVE: &str = "AcadAnnotative";
+const ANNOTATIVE_DATA: &str = "AnnotativeData";
+
+/// Whether a drawing of `version` states the second flag of the `AcadAnnotative` `AnnotativeData` block of a text. The block is
+/// `1000 AnnotativeData 1002 { 1070 1 1070 <flag> 1002 }`; AutoCAD's R2010 and later files (sample_AC1024.dwg, sample_AC1027.dwg,
+/// sample_AC1032.dwg and their DXF twins) state 1 for two of the four annotative texts (the two with the style custom_text_style) and
+/// 0 for the other two; every file before R2010 (sample_AC1015.dwg, sample_AC1018.dwg, sample_AC1021.dwg, their DXF twins and
+/// sample_AC1009_ascii.dxf) states 0 for all four. Nothing else in the texts tells the two kinds apart (same height, layer, scale
+/// list and annotative dictionary), so a drawing written for R2010 or later keeps the flag its text holds and gets none derived.
+pub(crate) fn states_text_annotative_flag(version: DxfVersion) -> bool {
+    version >= DxfVersion::AC1024
+}
+
+/// `xdata` with the second flag of the `AnnotativeData` block of the `AcadAnnotative` record set to 0; `None` when the text has no such
+/// block or the flag is 0 already. The verbatim block of the application is dropped so the writer states the record.
+pub(crate) fn with_annotative_flag_cleared(xdata: &ExtendedData, application: Option<u64>) -> Option<ExtendedData> {
+    let record = xdata.records().iter().position(|record| record.application_name.eq_ignore_ascii_case(ANNOTATIVE))?;
+    let values = &xdata.records()[record].values;
+    let at = values.iter().position(|value| matches!(value, X::String(name) if name.trim_end_matches('\0') == ANNOTATIVE_DATA))?;
+    let flag = match values.get(at..at + 5)? {
+        [_, X::ControlString(open), X::Integer16(_), X::Integer16(flag), X::ControlString(close)]
+            if open.trim_end_matches('\0') == "{" && close.trim_end_matches('\0') == "}" =>
+        {
+            *flag
+        }
+        _ => return None,
+    };
+    if flag == 0 {
+        return None;
+    }
+    let mut result = xdata.clone();
+    result.records_mut()[record].values[at + 3] = X::Integer16(0);
+    if let Some(application) = application {
+        result.raw_dwg_eed.retain(|(app, _)| *app != application);
+    }
+    Some(result)
+}
+
 /// A document as a DXF of `version` states it: the MTEXT blocks of the versions that hold them. The `RT*` records are not
 /// stated: AutoCAD adds them when it saves a DWG for an older release, and its DXF files of R2000 and R2004 hold none
 /// (sample_AC1015_ascii.dxf: the point #29A states colour 230 and nothing else; neither that file nor
@@ -746,19 +786,30 @@ pub(crate) fn restore_document(document: &mut CadDocument) {
 /// has no group for them. The DXF reader still restores the values from a file that has the records (`restore_document`).
 pub(crate) fn prepare_for_dxf(document: &mut std::borrow::Cow<'_, CadDocument>, version: DxfVersion) {
     use crate::entities::EntityType;
-    if !states_mtext_columns(version) {
+    let columns = states_mtext_columns(version);
+    let annotative = !states_text_annotative_flag(version);
+    if !columns && !annotative {
         return;
     }
     let application = document.app_ids.get(APPLICATION).map(|app| app.handle.value());
+    let annotative_application = document.app_ids.get(ANNOTATIVE).map(|app| app.handle.value());
     let mut changes: Vec<(crate::types::Handle, ExtendedData)> = Vec::new();
     for entity in document.entities() {
-        if let EntityType::MText(text) = entity {
-            let blocks = mtext_blocks(text, version);
-            if !blocks.is_empty() {
-                if let Some(merged) = with_mtext_blocks(&text.common.extended_data, blocks, application) {
-                    changes.push((text.common.handle, merged));
+        match entity {
+            EntityType::MText(text) if columns => {
+                let blocks = mtext_blocks(text, version);
+                if !blocks.is_empty() {
+                    if let Some(merged) = with_mtext_blocks(&text.common.extended_data, blocks, application) {
+                        changes.push((text.common.handle, merged));
+                    }
                 }
             }
+            EntityType::Text(text) if annotative => {
+                if let Some(cleared) = with_annotative_flag_cleared(&text.common.extended_data, annotative_application) {
+                    changes.push((text.common.handle, cleared));
+                }
+            }
+            _ => {}
         }
     }
     if changes.is_empty() {

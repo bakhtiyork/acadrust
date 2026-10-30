@@ -351,6 +351,28 @@ pub fn encode_legacy_string(text: &str, encoding: impl Into<LegacyEncoding>) -> 
     out
 }
 
+/// `text` with the characters a legacy DWG code page cannot represent spelled as CIF `\U+XXXX` escapes, as [`encode_legacy_string`]
+/// writes them; `None` when the code page represents every character.
+pub fn escape_unmappable(text: &str, encoding: impl Into<LegacyEncoding>) -> Option<String> {
+    let encoding = encoding.into();
+    if text.is_ascii() || !encoding.encode(text).2 {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len() + 6);
+    let mut buf = [0u8; 4];
+    for ch in text.chars() {
+        if encoding.encode(ch.encode_utf8(&mut buf)).2 {
+            let mut units = [0u16; 2];
+            for unit in ch.encode_utf16(&mut units) {
+                out.push_str(&format!("\\U+{unit:04X}"));
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Some(out)
+}
+
 /// Decode AutoCAD CIF `\U+XXXX` escapes (exactly four hex digits) into
 /// Unicode characters.
 ///
