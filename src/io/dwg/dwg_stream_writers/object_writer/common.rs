@@ -997,18 +997,19 @@ impl<'a> DwgObjectWriter<'a> {
     /// The xref flags of a table entry that models only the dependent bit. The "referenced" bit (64 of the DXF
     /// group 70) is kept from the entry's source flags: it is stored from R2000 to R2004 and not afterwards.
     ///
-    /// R5b-18: a DWG before R2007 states the bit for every record of the tables the samples show it on (`write_referenced_flags`).
+    /// R5b-18: a DWG of R14 to R2004 states the bit for every record of the tables the samples show it on (`write_referenced_flags`).
     pub fn write_xref_flags_with_source(&mut self, source_flags: i16, xref_dep: bool) {
         self.write_referenced_flags(source_flags & 64 != 0, false, xref_dep);
     }
 
     /// The xref flags of a record of the application, layer, text style, line type, dimension style, view and VPORT tables. AutoCAD
-    /// states the "referenced" bit (64 of the DXF group 70) on every record of these tables in its files before R2007 (sample_AC1014.dwg,
-    /// sample_AC1015.dwg, sample_AC1018.dwg: all 44, 42 and 42 applications, 20 layers, 6 text styles, 8 line types, 6 dimension styles,
-    /// the view and the VPORT) and on none in R2010 and later (the format stores it from R13 to R2004 only), whatever the drawing it
-    /// was saved from; the bit of the source stays where the version has no use for it.
+    /// states the "referenced" bit (64 of the DXF group 70) on every record of these tables in its files of R14, R2000 and R2004
+    /// (sample_AC1014.dwg, sample_AC1015.dwg, sample_AC1018.dwg: all 44, 42 and 42 applications, 21 layers, 6 text styles, 8 line types,
+    /// 6 dimension styles, the view and the VPORT; every record of these tables in the 23 R14 to R2004 DWG files of the corpus too) and on
+    /// none in R2010 and later (the format stores it from R13 to R2004 only), whatever the drawing it was saved from. An R13 file keeps
+    /// the bit of the source (no R13 DWG shows the rule), as does a version with no use for it.
     pub fn write_referenced_flags(&mut self, stated: bool, xref_resolved: bool, xref_dependent: bool) {
-        let referenced = stated || !self.version.r2007_plus();
+        let referenced = stated || (self.dxf_version >= crate::types::DxfVersion::AC1014 && !self.version.r2007_plus());
         self.write_xref_table_flags(referenced, xref_resolved, xref_dependent);
     }
 

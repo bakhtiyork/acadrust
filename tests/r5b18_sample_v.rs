@@ -64,6 +64,15 @@ fn a_viewport_read_from_r14_drops_the_mview_record_and_fast_zoom_in_a_dwg_of_r20
         assert!(!viewport(&later).status.fast_zoom, "{version:?}: fast zoom 0");
         assert_eq!((viewport(&later).width, viewport(&later).height), (160.0, 100.0), "{version:?}: the fields stay");
     }
+    // an R14 file written as R14 keeps both
+    let same = write_and_read(&r14, DxfVersion::AC1014);
+    assert!(has_mview(viewport(&same)) && viewport(&same).status.fast_zoom, "R14 -> R14 keeps the MVIEW record and fast zoom 1");
+    // a document read from an R14 DXF file drops the group at R2000 too
+    let mut dxf = r14.clone();
+    dxf.dwg_source_version = None;
+    dxf.dxf_source_version = Some(DxfVersion::AC1014);
+    let later = write_and_read(&dxf, DxfVersion::AC1015);
+    assert!(!has_mview(viewport(&later)) && !viewport(&later).status.fast_zoom, "an R14 DXF source: no MVIEW record, fast zoom 0");
     // R14 again: both come back
     let again = write_and_read(&write_and_read(&r14, DxfVersion::AC1018), DxfVersion::AC1014);
     assert!(has_mview(viewport(&again)), "R14 -> R2004 -> R14 states the MVIEW record again");
@@ -112,13 +121,15 @@ fn referenced(document: &CadDocument) -> Vec<(&'static str, bool)> {
     ]
 }
 
-/// AutoCAD's files before R2007 state bit 64 (referenced) on every record of these tables (sample_AC1014.dwg, sample_AC1015.dwg and
+/// AutoCAD's files of R14 to R2004 state bit 64 (referenced) on every record of these tables (sample_AC1014.dwg, sample_AC1015.dwg and
 /// sample_AC1018.dwg) and its R2010 and later files on none (sample_AC1024.dwg, sample_AC1027.dwg, sample_AC1032.dwg), whatever the
-/// drawing was saved from: a save from R2010 states the bit at R14, R2000 and R2004.
+/// drawing was saved from: a save from R2010 states the bit at R14, R2000 and R2004. No R13 file shows the rule: R13 keeps the source's bit.
 #[test]
 fn the_records_of_a_dwg_before_r2007_state_the_referenced_bit() {
     let source = CadDocument::with_version(DxfVersion::AC1032);
     assert!(referenced(&source).iter().all(|(_, bit)| !bit), "{:?}", referenced(&source));
+    let r13 = write_and_read(&source, DxfVersion::AC1012);
+    assert!(referenced(&r13).iter().all(|(_, bit)| !bit), "AC1012: {:?}", referenced(&r13));
     for version in [DxfVersion::AC1014, DxfVersion::AC1015, DxfVersion::AC1018] {
         let read = write_and_read(&source, version);
         assert!(referenced(&read).iter().all(|(_, bit)| *bit), "{version:?}: {:?}", referenced(&read));
