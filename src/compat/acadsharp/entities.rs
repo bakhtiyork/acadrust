@@ -206,6 +206,30 @@ fn legacy_round_trip_version(doc: &CadDocument) -> Option<crate::types::DxfVersi
     .then_some(version)
 }
 
+/// The colour of an entity as ACadSharp reads it (what the SVG writer and `Entity.GetActiveColor` see): a drawing of
+/// R14, R2000 or R2004 that AutoCAD saved from a later version holds the nearest index in the entity record.
+pub(crate) fn view_entity_color(doc: &CadDocument, common: &EntityCommon) -> crate::types::Color {
+    let legacy_color = legacy_round_trip_version(doc)
+        .filter(|version| !crate::io::dwg::autocad_roundtrip::stores_true_color(*version))
+        .and_then(|_| crate::io::dwg::autocad_roundtrip::aci_index(common));
+    if let Some(index) = legacy_color {
+        crate::types::Color::Index(index)
+    } else if super::registration::source_document(doc) {
+        crate::svg::acadsharp_entity_color(common)
+    } else {
+        common.color
+    }
+}
+
+/// The line weight of an entity as ACadSharp reads it: those drawings state none in the entity record.
+pub(crate) fn view_entity_line_weight(doc: &CadDocument, common: &EntityCommon) -> crate::types::LineWeight {
+    if legacy_round_trip_version(doc).is_some_and(|version| !crate::io::dwg::autocad_roundtrip::stores_line_weight(version)) {
+        crate::types::LineWeight::ByLayer
+    } else {
+        common.line_weight
+    }
+}
+
 pub(super) fn common(
     doc: &CadDocument,
     common: &EntityCommon,
@@ -2404,50 +2428,13 @@ fn text_source_tag<'a>(
 /// following ASCII byte together.
 fn dwg_legacy_replacement(doc: &CadDocument, value: Value) -> Value {
     match value {
-        Value::String(text)
-            if doc.dwg_source_version.is_some()
-                && doc.version < crate::types::DxfVersion::AC1021
-                && text.contains('\u{FFFD}') =>
-        {
-            let mut replaced = String::with_capacity(text.len());
-            let mut chars = text.chars().peekable();
-            while let Some(c) = chars.next() {
-                if c == '\u{FFFD}' {
-                    replaced.push('?');
-                    if chars.peek().is_some_and(char::is_ascii) {
-                        chars.next();
-                    }
-                } else {
-                    replaced.push(c);
-                }
-            }
-            Value::String(replaced)
-        }
+        Value::String(text) => Value::String(crate::svg::dwg_legacy_replacement(doc, text)),
         other => other,
     }
 }
 
 fn text_source_value(value: &str, source: Option<&crate::entities::text::TextSource>) -> Value {
-    if let Some(source) = source.filter(|s| s.decoded_value.as_deref() == Some(value)) {
-        // .NET's default encoding is UTF-8; preserve native legacy fallback and
-        // reproduce replacement decoding only with original undeclared bytes.
-        let raw = source
-            .undecoded_bytes
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).into_owned())
-            .or_else(|| source.value.clone());
-        if let Some(raw) = raw {
-            return Value::String(if source.dxf {
-                raw.replace("^J", "\n")
-                    .replace("^M", "\r")
-                    .replace("^I", "\t")
-                    .replace("^ ", "^")
-            } else {
-                raw
-            });
-        }
-    }
-    Value::String(value.into())
+    Value::String(crate::svg::text_source_value(value, source))
 }
 
 fn attribute_definition_props(

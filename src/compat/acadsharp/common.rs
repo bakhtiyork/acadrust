@@ -17,22 +17,7 @@ pub(super) fn appearance_color(value: Color) -> Value {
 }
 
 pub(super) fn entity_color(common: &EntityCommon) -> Value {
-    let mut value = common.color;
-    if let Some((word, _)) = common.dwg_color_source {
-        if word & 0x4000 != 0 {
-            // The oracle retains the book reference but leaves Color ByBlock.
-            value = Color::ByBlock;
-        } else if word & 0x8000 != 0 {
-            // Its ENC reader treats every complex color as RGB, including
-            // method-encoded ByLayer and ACI values understood by native Rust.
-            value = match value {
-                Color::ByLayer | Color::ByBlock => Color::from_rgb(0, 0, 0),
-                Color::Index(i) => Color::from_rgb(0, 0, i),
-                other => other,
-            };
-        }
-    }
-    appearance_color(value)
+    appearance_color(crate::svg::acadsharp_entity_color(common))
 }
 
 pub(super) fn entity_transparency(common: &EntityCommon) -> Value {

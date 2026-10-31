@@ -219,6 +219,7 @@ pub const EXCLUDED_FIELDS_WHEN: &[(&str, &str, &str, &str)] = &[(
 pub const EXCLUDED_DOCUMENT_FIELDS: &[(&str, &str)] = &[
     ("maintenance_version", "dwg-image: byte 0x0B of the DWG file header (DXF carries it as $ACADMAINTVER, a header variable)"),
     ("source_app_id_order", "provenance: 'reader provenance for compatibility projections'"),
+    ("source_block_record_order", "provenance: 'reader provenance for the SVG writer block record order'"),
     ("legacy_dxf_tables", "provenance: 'source symbol tables in file order ... R12 compatibility'"),
     ("legacy_dxf_blocks", "provenance: 'source BLOCK/ENDBLK pairs in decode order'"),
     ("source_explicit_handle_max", "provenance: 'maximum explicit source identity seen by the DXF reader'"),
@@ -761,6 +762,7 @@ pub fn write_native_dump(doc: &CadDocument, out: &mut dyn Write) -> io::Result<(
         dim_styles,
         app_ids,
         source_app_id_order: _,
+        source_block_record_order: _,
         legacy_dxf_tables: _,
         legacy_dxf_blocks: _,
         source_explicit_handle_max: _,

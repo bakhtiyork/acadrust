@@ -1,7 +1,10 @@
-use acadrust::compat::acadsharp::{new_document, read_document_file, write_document, write_file};
+use acadrust::compat::acadsharp::{
+    block_name as acadsharp_block_name, new_document, read_document_file, view_document, write_document, write_file,
+};
 use acadrust::io::dwg::DwgWriter;
 use acadrust::io::dxf::DxfWriter;
 use acadrust::types::DxfVersion;
+use acadrust::CadDocument;
 use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
@@ -65,6 +68,115 @@ fn write_dxf(args: &[std::ffi::OsString]) -> i32 {
             1
         }
     }
+}
+
+/// `write-svg <in.dwg|in.dxf> <outdir> [--config test]`: failsafe read as `write-dxf` does, then write the model
+/// space (`model.svg`), every paper-space layout (`layout-NN.svg`) and every block record (`block-NNNN.svg`) with
+/// the SVG writer, and `index.tsv` with one line per output: `<file>\t<kind>\t<name>\t<status>`. The status is
+/// `ok` or `!<C# exception type>`; a failed write leaves no `.svg`. `--config test` uses the configuration of
+/// ACadSharp's `IOTestsBase` (`DefaultLineWeight` 0.15, `LineWeightRatio` 50). Exit 0 when the read succeeded
+/// (even if some writes failed), 1 when it failed (stderr `read failed: ...`), 2 on a usage error.
+fn write_svg(args: &[std::ffi::OsString]) -> i32 {
+    use acadrust::svg::{SvgConfiguration, SvgError, SvgWriter};
+    let usage = || {
+        eprintln!("usage: acad-dump write-svg <in.dwg|in.dxf> <outdir> [--config test]");
+        2
+    };
+    let mut test = false;
+    let mut paths = Vec::new();
+    let mut i = 2;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--config" && i + 1 < args.len() {
+            i += 1;
+            if args[i] != "test" {
+                return usage();
+            }
+            test = true;
+        } else if arg.to_string_lossy().starts_with("--") {
+            return usage();
+        } else {
+            paths.push(arg);
+        }
+        i += 1;
+    }
+    if paths.len() != 2 {
+        return usage();
+    }
+    let native = match read_document_file(Path::new(paths[0])) {
+        Ok(document) => document,
+        Err(error) => {
+            eprintln!("read failed: {error}");
+            return 1;
+        }
+    };
+    // ACadSharp reads what the reader of the fork took out of the model into round-trip records.
+    let viewed = view_document(&native);
+    let document: &CadDocument = viewed.as_ref();
+    let mut configuration = if test { SvgConfiguration::test() } else { SvgConfiguration::default() };
+    // The tool reproduces ACadSharp's output byte for byte, so it reads the document as ACadSharp does.
+    configuration.acadsharp_view = true;
+    let output = Path::new(paths[1]);
+    if let Err(error) = std::fs::create_dir_all(output) {
+        eprintln!("write failed: {error}");
+        return 1;
+    }
+    let mut index = String::new();
+
+    enum Target<'a> {
+        Model,
+        Layout(&'a acadrust::objects::Layout),
+        Block(&'a acadrust::tables::BlockRecord),
+    }
+    let mut write = |filename: String, kind: &str, name: &str, target: Target| {
+        let path = output.join(&filename);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<(), SvgError> {
+            let file = std::fs::File::create(&path)?;
+            let mut buffered = BufWriter::with_capacity(256 * 1024, file);
+            {
+                let mut writer = SvgWriter::new(&mut buffered, document).with_configuration(configuration.clone());
+                match target {
+                    Target::Model => writer.write()?,
+                    Target::Layout(layout) => writer.write_layout(layout)?,
+                    Target::Block(record) => writer.write_block_record(record)?,
+                }
+            }
+            buffered.flush()?;
+            Ok(())
+        }));
+        let status = match outcome {
+            Ok(Ok(())) => "ok".to_owned(),
+            Ok(Err(error)) => {
+                let _ = std::fs::remove_file(&path);
+                format!("!{}", error.csharp_exception())
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(&path);
+                "!Panic".to_owned()
+            }
+        };
+        index.push_str(&format!("{filename}\t{kind}\t{name}\t{status}\n"));
+    };
+
+    let model_name = acadrust::svg::model_space_name(document);
+    write("model.svg".to_owned(), "model", &model_name, Target::Model);
+    let probe = SvgWriter::new(std::io::sink(), document).with_configuration(configuration.clone());
+    for (n, layout) in probe.paper_space_layouts().into_iter().enumerate() {
+        write(format!("layout-{n:02}.svg"), "layout", &layout.name, Target::Layout(layout));
+    }
+    for (n, record) in acadrust::svg::acadsharp_block_records(document).into_iter().enumerate() {
+        write(
+            format!("block-{n:04}.svg"),
+            "block",
+            &acadsharp_block_name(document, record),
+            Target::Block(record),
+        );
+    }
+    if let Err(error) = std::fs::write(output.join("index.tsv"), index) {
+        eprintln!("write failed: {error}");
+        return 1;
+    }
+    0
 }
 
 /// Julian date of the pinned instants (2000-01-01 00:00:00), as `--pin` of AcadDump writes it.
@@ -250,6 +362,9 @@ fn run() -> Result<(), String> {
     }
     if args.len() > 1 && args[1] == "write-dxf" {
         std::process::exit(write_dxf(&args));
+    }
+    if args.len() > 1 && args[1] == "write-svg" {
+        std::process::exit(write_svg(&args));
     }
     if args.len() != 4 || args[1] != "dump" {
         return Err("usage: acad-dump dump <file.dwg|file.dxf|--new-document> <out.json>".into());

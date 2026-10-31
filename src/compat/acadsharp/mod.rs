@@ -41,6 +41,8 @@ mod type_names;
 mod xdata;
 
 pub use new_document::new_document;
+pub(crate) use entities::{view_entity_color, view_entity_line_weight};
+pub(crate) use tables::{view_entity_handles, view_layer_color, view_layer_line_weight};
 
 pub const UNMAPPED: &str = "!unmapped";
 pub const SCHEMA: &str = include_str!("schema.tsv");
@@ -297,6 +299,17 @@ pub fn write_file(path: &Path, writer: &mut impl std::io::Write) -> serde_json::
         Ok(doc) => write_reader_document(&doc, &file, &reader, writer),
         Err(error) => serde_json::to_writer(writer, &error_dump(&file, &reader, &error)),
     }
+}
+
+/// The document with what its reader took out of the model put back, which is what ACadSharp reads (the document itself
+/// when the reader took nothing). `acad-dump write-svg` writes this view.
+pub fn view_document(doc: &CadDocument) -> std::borrow::Cow<'_, CadDocument> {
+    crate::io::dwg::autocad_records::reinstated(doc)
+}
+
+/// The name ACadSharp gives a block record (used by `acad-dump write-svg` for its index).
+pub fn block_name<'a>(doc: &'a CadDocument, record: &'a crate::tables::BlockRecord) -> &'a str {
+    tables::block_name(doc, record)
 }
 
 /// Failsafe read of a `.dwg` or `.dxf` file as the dump commands do (used by `acad-dump write-dxf`).

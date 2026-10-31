@@ -1189,6 +1189,15 @@ impl DwgDocumentBuilder {
                             ParsedEntry::Vx(_, _) => {}
                             ParsedEntry::BlockControl(m, p, entries) => {
                                 block_control_entries = entries.clone();
+                                document.source_block_record_order = Some(
+                                    entries
+                                        .iter()
+                                        .copied()
+                                        .chain([*m, *p])
+                                        .filter(|h| *h != 0)
+                                        .map(Handle::from)
+                                        .collect(),
+                                );
                                 // Seed the authoritative active model/paper space
                                 // handles (used by the block-name dedup below).
                                 if *m != 0 {
