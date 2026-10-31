@@ -215,7 +215,7 @@ pub(crate) fn view_entity_color(doc: &CadDocument, common: &EntityCommon) -> cra
     if let Some(index) = legacy_color {
         crate::types::Color::Index(index)
     } else if super::registration::source_document(doc) {
-        crate::svg::acadsharp_entity_color(common)
+        super::view::source_entity_color(common)
     } else {
         common.color
     }
@@ -250,21 +250,17 @@ pub(super) fn common(
         let application = doc.app_ids.get("ACAD").map(|app| app.handle.value());
         crate::io::dwg::autocad_roundtrip::with_groups(&common.extended_data, values, application)
     });
-    let legacy_color = legacy
-        .filter(|version| !crate::io::dwg::autocad_roundtrip::stores_true_color(*version))
-        .and_then(|_| crate::io::dwg::autocad_roundtrip::aci_index(common));
     // Before R2004 the entity record has no colour-book reference (the restored one names the object of the record's name).
     let legacy_book = legacy.is_some_and(|version| !crate::io::dwg::autocad_roundtrip::stores_true_color(version));
+    let read_color = view_entity_color(doc, common);
     vec![
         ("BookColor", optional_handle(if legacy_book { None } else { common.color_book_handle })),
         (
             "Color",
-            if let Some(index) = legacy_color {
-                color(crate::types::Color::Index(index))
-            } else if super::registration::source_document(doc) {
-                super::common::entity_color(common)
+            if super::registration::source_document(doc) {
+                super::common::appearance_color(read_color)
             } else {
-                color(common.color)
+                color(read_color)
             },
         ),
         (
@@ -296,13 +292,7 @@ pub(super) fn common(
         ("LineTypeScale", number(common.linetype_scale)),
         (
             "LineWeight",
-            enum_value(
-                if legacy.is_some_and(|version| !crate::io::dwg::autocad_roundtrip::stores_line_weight(version)) {
-                    crate::types::LineWeight::ByLayer.value()
-                } else {
-                    common.line_weight.value()
-                } as i64,
-            ),
+            enum_value(view_entity_line_weight(doc, common).value() as i64),
         ),
         (
             "Material",
@@ -2428,13 +2418,13 @@ fn text_source_tag<'a>(
 /// following ASCII byte together.
 fn dwg_legacy_replacement(doc: &CadDocument, value: Value) -> Value {
     match value {
-        Value::String(text) => Value::String(crate::svg::dwg_legacy_replacement(doc, text)),
+        Value::String(text) => Value::String(super::view::legacy_replacement(doc, text)),
         other => other,
     }
 }
 
 fn text_source_value(value: &str, source: Option<&crate::entities::text::TextSource>) -> Value {
-    Value::String(crate::svg::text_source_value(value, source))
+    Value::String(super::view::text_value(value, source))
 }
 
 fn attribute_definition_props(
@@ -2464,17 +2454,7 @@ fn attribute_definition_props(
         ("Flags", enum_value(value.flags.to_bits() as i64)),
         (
             "Height",
-            number(
-                if value
-                    .source
-                    .as_deref()
-                    .is_some_and(|s| s.dxf && !s.has_height)
-                {
-                    1.0
-                } else {
-                    value.height
-                },
-            ),
+            number(super::view::attribute_height(value.height, value.source.as_deref())),
         ),
         (
             "HorizontalAlignment",
@@ -2554,17 +2534,7 @@ fn attribute_entity_props(
         ("Flags", enum_value(value.flags.to_bits() as i64)),
         (
             "Height",
-            number(
-                if value
-                    .source
-                    .as_deref()
-                    .is_some_and(|s| s.dxf && !s.has_height)
-                {
-                    1.0
-                } else {
-                    value.height
-                },
-            ),
+            number(super::view::attribute_height(value.height, value.source.as_deref())),
         ),
         (
             "HorizontalAlignment",
@@ -2995,7 +2965,7 @@ fn hatch_path(doc: &CadDocument, path: &crate::entities::BoundaryPath) -> Value 
                 array(
                     path.edges
                         .iter()
-                        .map(|edge| hatch_edge(edge, doc.dwg_source_version.is_some())),
+                        .map(|edge| hatch_edge(edge, doc)),
                 ),
             ),
             ("Entities", handles(entities)),
@@ -3004,7 +2974,7 @@ fn hatch_path(doc: &CadDocument, path: &crate::entities::BoundaryPath) -> Value 
     )
 }
 
-fn hatch_edge(edge: &crate::entities::BoundaryEdge, dwg: bool) -> Value {
+fn hatch_edge(edge: &crate::entities::BoundaryEdge, doc: &CadDocument) -> Value {
     match edge {
         crate::entities::BoundaryEdge::Line(value) => inline(
             "Hatch.BoundaryPath.Line",
@@ -3044,11 +3014,7 @@ fn hatch_edge(edge: &crate::entities::BoundaryEdge, dwg: bool) -> Value {
                 (
                     "ControlPoints",
                     points3(value.control_points.iter().copied().map(|mut point| {
-                        // The DWG reference reader uses zero for an absent
-                        // non-rational weight; native splines correctly use one.
-                        if dwg && !value.rational {
-                            point.z = 0.0;
-                        }
+                        point.z = super::view::hatch_spline_weight(doc, value, point.z);
                         point
                     })),
                 ),

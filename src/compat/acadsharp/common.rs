@@ -16,10 +16,6 @@ pub(super) fn appearance_color(value: Color) -> Value {
     result
 }
 
-pub(super) fn entity_color(common: &EntityCommon) -> Value {
-    appearance_color(crate::svg::acadsharp_entity_color(common))
-}
-
 pub(super) fn entity_transparency(common: &EntityCommon) -> Value {
     if let Some((word, packed)) = common.dwg_color_source {
         if word == 0 && common.transparency == Transparency::ByLayer {
@@ -248,6 +244,7 @@ mod tests {
         let mut common = EntityCommon::new();
         common.color = Color::from_rgb(10, 20, 30);
         common.dwg_color_source = Some((0xC000, 0));
+        let entity_color = |common: &EntityCommon| appearance_color(super::super::view::source_entity_color(common));
         assert_eq!(entity_color(&common), color(Color::ByBlock));
         assert_eq!(common.color, Color::from_rgb(10, 20, 30));
 

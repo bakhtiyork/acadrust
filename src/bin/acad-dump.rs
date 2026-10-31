@@ -1,5 +1,6 @@
 use acadrust::compat::acadsharp::{
-    block_name as acadsharp_block_name, new_document, read_document_file, view_document, write_document, write_file,
+    block_name as acadsharp_block_name, block_records as acadsharp_block_records, model_space_name, new_document,
+    read_document_file, view_document, write_document, write_file,
 };
 use acadrust::io::dwg::DwgWriter;
 use acadrust::io::dxf::DxfWriter;
@@ -158,17 +159,16 @@ fn write_svg(args: &[std::ffi::OsString]) -> i32 {
         index.push_str(&format!("{filename}\t{kind}\t{name}\t{status}\n"));
     };
 
-    let model_name = acadrust::svg::model_space_name(document);
-    write("model.svg".to_owned(), "model", &model_name, Target::Model);
+    write("model.svg".to_owned(), "model", model_space_name(document), Target::Model);
     let probe = SvgWriter::new(std::io::sink(), document).with_configuration(configuration.clone());
     for (n, layout) in probe.paper_space_layouts().into_iter().enumerate() {
         write(format!("layout-{n:02}.svg"), "layout", &layout.name, Target::Layout(layout));
     }
-    for (n, record) in acadrust::svg::acadsharp_block_records(document).into_iter().enumerate() {
+    for (n, record) in acadsharp_block_records(document).into_iter().enumerate() {
         write(
             format!("block-{n:04}.svg"),
             "block",
-            &acadsharp_block_name(document, record),
+            acadsharp_block_name(document, record),
             Target::Block(record),
         );
     }

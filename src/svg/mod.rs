@@ -33,9 +33,12 @@
 //! # Ok(()) }
 //! ```
 //!
-//! The output is byte for byte what ACadSharp writes (the pattern ids of hatches excepted: ACadSharp
-//! derives them from object identity hashes, which differ from run to run). Where ACadSharp throws,
-//! the writer returns an [`SvgError`] whose [`SvgError::csharp_exception`] names the C# exception type.
+//! The writer follows ACadSharp's element by element and draws the native model. With the `acadsharp-compat`
+//! feature, `SvgConfiguration::acadsharp_view` reads the document as ACadSharp reads the same file instead (its
+//! text spellings, colours, palette, R12 reading...), and the output is byte for byte what ACadSharp writes (the
+//! pattern ids of hatches excepted: ACadSharp derives them from object identity hashes, which differ from run to
+//! run; the port numbers the same objects in order of first use). Where ACadSharp throws, the writer returns an
+//! [`SvgError`] whose [`SvgError::csharp_exception`] names the C# exception type.
 
 mod configuration;
 mod converter;
@@ -44,8 +47,6 @@ mod document_builder;
 mod error;
 mod geometry;
 mod model;
-pub(crate) mod mtext_plain_text;
-pub(crate) mod palette;
 mod xml_text_writer;
 mod xml_writer;
 
@@ -64,8 +65,6 @@ use crate::document::CadDocument;
 use crate::objects::Layout;
 use crate::tables::BlockRecord;
 use model::Model;
-#[cfg(feature = "acadsharp-compat")]
-pub(crate) use model::acadsharp_entity_color;
 use std::io::Write;
 
 /// Writer to create SVG from a [`BlockRecord`] or a [`Layout`] (ACadSharp `SvgWriter`).
@@ -82,7 +81,7 @@ impl<'a, W: Write> SvgWriter<'a, W> {
     pub fn new(out: W, document: &'a CadDocument) -> Self {
         SvgWriter {
             out,
-            model: Model::new(document, false),
+            model: Model::new(document),
             configuration: SvgConfiguration::default(),
             notifications: Vec::new(),
         }
@@ -90,9 +89,13 @@ impl<'a, W: Write> SvgWriter<'a, W> {
 
     /// Replaces the configuration.
     pub fn with_configuration(mut self, configuration: SvgConfiguration) -> Self {
-        self.model.view = configuration.acadsharp_view;
         self.configuration = configuration;
         self
+    }
+
+    /// The document as the current configuration reads it.
+    fn model(&self) -> Model<'a> {
+        self.model.with_view(&self.configuration)
     }
 
     /// The notifications raised so far (entities the writer does not implement).
@@ -131,7 +134,7 @@ impl<'a, W: Write> SvgWriter<'a, W> {
 
     /// The paper-space layouts of the document, in the order of `CadDocument.Layouts`.
     pub fn paper_space_layouts(&self) -> Vec<&'a Layout> {
-        self.model
+        self.model()
             .layouts()
             .into_iter()
             .filter(|l| !l.name.eq_ignore_ascii_case("Model"))
@@ -142,72 +145,4 @@ impl<'a, W: Write> SvgWriter<'a, W> {
     pub fn into_inner(self) -> W {
         self.out
     }
-}
-
-/// The name of the model-space block record (`doc.ModelSpace.Name`).
-pub fn model_space_name(document: &CadDocument) -> String {
-    Model::new(document, false)
-        .model_space()
-        .map(|b| b.name.clone())
-        .unwrap_or_default()
-}
-
-/// The block records in the order of ACadSharp's `CadDocument.BlockRecords`: for a DWG the BLOCK_CONTROL
-/// object's list followed by the model and paper space records, otherwise the table order.
-pub fn acadsharp_block_records(document: &CadDocument) -> Vec<&BlockRecord> {
-    let Some(order) = &document.source_block_record_order else {
-        return document.block_records.iter().collect();
-    };
-    let mut seen = std::collections::HashSet::new();
-    order
-        .iter()
-        .filter(|h| seen.insert(**h))
-        .filter_map(|h| document.block_records.iter().find(|b| b.handle == *h))
-        .collect()
-}
-
-/// The text ACadSharp reads for a TEXT or attribute value: the file's spelling (`\U+00B0` escapes rather than the
-/// decoded character) while the native value is still the decoded form of that spelling.
-pub(crate) fn text_source_value(value: &str, source: Option<&crate::entities::text::TextSource>) -> String {
-    if let Some(source) = source.filter(|s| s.decoded_value.as_deref() == Some(value)) {
-        // .NET's default encoding is UTF-8; preserve native legacy fallback and
-        // reproduce replacement decoding only with original undeclared bytes.
-        let raw = source
-            .undecoded_bytes
-            .as_ref()
-            .map(|b| String::from_utf8_lossy(b).into_owned())
-            .or_else(|| source.value.clone());
-        if let Some(raw) = raw {
-            return if source.dxf {
-                raw.replace("^J", "\n")
-                    .replace("^M", "\r")
-                    .replace("^I", "\t")
-                    .replace("^ ", "^")
-            } else {
-                raw
-            };
-        }
-    }
-    value.into()
-}
-
-/// A DWG before R2007 decodes text with .NET's DBCS decoders, which substitute one `?` for an undecodable lead byte
-/// and the ASCII byte that follows it.
-pub(crate) fn dwg_legacy_replacement(doc: &CadDocument, text: String) -> String {
-    if doc.dwg_source_version.is_some() && doc.version < crate::types::DxfVersion::AC1021 && text.contains('\u{FFFD}') {
-        let mut replaced = String::with_capacity(text.len());
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\u{FFFD}' {
-                replaced.push('?');
-                if chars.peek().is_some_and(char::is_ascii) {
-                    chars.next();
-                }
-            } else {
-                replaced.push(c);
-            }
-        }
-        return replaced;
-    }
-    text
 }

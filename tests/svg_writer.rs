@@ -1,32 +1,22 @@
 //! The SVG writer against ACadSharp's: the port of `SvgWriterTests` and a byte-for-byte replay of the
 //! outputs of ACadSharp's `SvgWriter` for svg/export_sample.dwg, through `acad-dump write-svg`.
 //!
-//! The sample and the C# outputs (CadKit `Tests/CadCoreTests/Fixtures`) are not copied into this
-//! repository because the licence of the sample is not recorded. Point `CADKIT_FIXTURES` at that
-//! directory (default: `../../CadKit/Tests/CadCoreTests/Fixtures` beside the worktrees). Without it
-//! the tests print `SKIPPED` on stderr and end; run with `--nocapture` to see it.
+//! The sample (ACadSharp's, MIT) and the C# outputs are in tests/fixtures/svg (see its README.md).
 #![cfg(feature = "acadsharp-compat")]
 
 use acadrust::compat::acadsharp::{read_document_file, view_document};
 use acadrust::svg::{SvgConfiguration, SvgWriter};
 use flate2::read::DeflateDecoder;
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn fixtures() -> Option<PathBuf> {
-    let dir = std::env::var_os("CADKIT_FIXTURES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../CadKit/Tests/CadCoreTests/Fixtures"));
-    if dir.join("samples/svg/export_sample.dwg").is_file() && dir.join("svg/export_sample/index.tsv").is_file() {
-        Some(dir)
-    } else {
-        eprintln!(
-            "SKIPPED: the SVG fixtures are not at {} (set CADKIT_FIXTURES to CadKit's Tests/CadCoreTests/Fixtures)",
-            dir.display()
-        );
-        None
-    }
+fn fixtures() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/svg")
+}
+
+fn sample() -> PathBuf {
+    fixtures().join("export_sample.dwg")
 }
 
 fn test_configuration() -> SvgConfiguration {
@@ -38,8 +28,7 @@ fn test_configuration() -> SvgConfiguration {
 /// `SvgWriterTests.WriteLayouts`: every paper-space layout of export_sample.dwg is written.
 #[test]
 fn write_layouts() {
-    let Some(dir) = fixtures() else { return };
-    let native = read_document_file(&dir.join("samples/svg/export_sample.dwg")).expect("read export_sample.dwg");
+    let native = read_document_file(&sample()).expect("read export_sample.dwg");
     let viewed = view_document(&native);
     let document = viewed.as_ref();
     let probe = SvgWriter::new(std::io::sink(), document).with_configuration(test_configuration());
@@ -61,8 +50,7 @@ fn write_layouts() {
 /// `SvgWriterTests.WriteModel`.
 #[test]
 fn write_model() {
-    let Some(dir) = fixtures() else { return };
-    let native = read_document_file(&dir.join("samples/svg/export_sample.dwg")).expect("read export_sample.dwg");
+    let native = read_document_file(&sample()).expect("read export_sample.dwg");
     let viewed = view_document(&native);
     let mut out = Vec::new();
     let notifications = {
@@ -74,7 +62,7 @@ fn write_model() {
     assert!(notifications.iter().all(|n| n.message.ends_with("Entity not implemented.")));
 }
 
-fn inflate(path: &std::path::Path) -> Vec<u8> {
+fn inflate(path: &Path) -> Vec<u8> {
     let raw = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let mut out = Vec::new();
     DeflateDecoder::new(&raw[..]).read_to_end(&mut out).expect("raw deflate");
@@ -176,18 +164,17 @@ fn canonicalisation_replaces_only_hatch_ids() {
 /// `index.tsv`); the fork's tool must write the same bytes after the hatch id canonicalisation.
 #[test]
 fn export_sample_matches_the_csharp_outputs_byte_for_byte() {
-    let Some(dir) = fixtures() else { return };
     let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("svg-export-sample");
     let _ = std::fs::remove_dir_all(&scratch);
     let status = Command::new(env!("CARGO_BIN_EXE_acad-dump"))
         .arg("write-svg")
-        .arg(dir.join("samples/svg/export_sample.dwg"))
+        .arg(sample())
         .arg(&scratch)
         .args(["--config", "test"])
         .status()
         .expect("run acad-dump");
     assert!(status.success());
-    let fixture = dir.join("svg/export_sample");
+    let fixture = fixtures().join("export_sample");
     assert_eq!(
         std::fs::read(scratch.join("index.tsv")).unwrap(),
         std::fs::read(fixture.join("index.tsv")).unwrap(),
@@ -205,4 +192,43 @@ fn export_sample_matches_the_csharp_outputs_byte_for_byte() {
         compared += 1;
     }
     assert_eq!(compared, 41, "41 SVG outputs");
+}
+
+/// The status and the number of entity comments of every output of `document`, in the order of `write-svg`.
+fn outputs(document: &acadrust::CadDocument, configuration: SvgConfiguration) -> Vec<Result<usize, &'static str>> {
+    enum Target<'a> {
+        Model,
+        Layout(&'a acadrust::objects::Layout),
+        Block(&'a acadrust::tables::BlockRecord),
+    }
+    let probe = SvgWriter::new(std::io::sink(), document).with_configuration(configuration.clone());
+    let targets = std::iter::once(Target::Model)
+        .chain(probe.paper_space_layouts().into_iter().map(Target::Layout))
+        .chain(acadrust::compat::acadsharp::block_records(document).into_iter().map(Target::Block));
+    targets
+        .map(|target| {
+            let mut out = Vec::new();
+            let mut writer = SvgWriter::new(&mut out, document).with_configuration(configuration.clone());
+            let result = match target {
+                Target::Model => writer.write(),
+                Target::Layout(layout) => writer.write_layout(layout),
+                Target::Block(record) => writer.write_block_record(record),
+            };
+            result
+                .map(|_| out.windows(4).filter(|w| w == b"<!--").count())
+                .map_err(|e| e.csharp_exception())
+        })
+        .collect()
+}
+
+/// The default configuration reads the native model: every output of export_sample.dwg that the ACadSharp view writes
+/// is written natively too, with the same entities (one comment per entity).
+#[test]
+fn the_native_default_writes_every_output_with_the_same_entities() {
+    let native = read_document_file(&sample()).expect("read export_sample.dwg");
+    let viewed = view_document(&native);
+    let view = outputs(viewed.as_ref(), test_configuration());
+    assert_eq!(view.len(), 41);
+    assert!(view.iter().all(Result::is_ok));
+    assert_eq!(outputs(&native, SvgConfiguration::test()), view);
 }

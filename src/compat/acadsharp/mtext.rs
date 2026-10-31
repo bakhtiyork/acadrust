@@ -4,12 +4,6 @@
 use super::*;
 use crate::entities::{MText, MTextColumnData};
 
-fn value(text: &MText) -> String {
-    // An edit to the public value supersedes the original spelling.
-    text.unchanged_source_value()
-        .map_or_else(|| text.value.clone(), str::to_string)
-}
-
 fn background_color(c: Color) -> Value {
     let mut result = color(c);
     if let Color::Rgb { r, g, b } = c {
@@ -99,9 +93,7 @@ pub(super) fn properties(doc: &CadDocument, text: &MText) -> Vec<(&'static str, 
             ("Width", number(columns.width)),
         ],
     );
-    let value = value(text);
-    // The text ACadSharp reads of an MTEXT whose paragraph breaks the reader restored from `ACAD_MTEXT_RT` (R14, R2000).
-    let value = crate::io::dwg::autocad_records::mtext_file_value(doc, text.common.handle, &value).into_owned();
+    let value = super::view::mtext_value(doc, text);
     vec![
         ("AlignmentPoint", vec3(direction)),
         ("AttachmentPoint", json!(text.attachment_point as i16)),

@@ -37,8 +37,11 @@ pub struct SvgConfiguration {
     /// Points used for arcs and bulges.
     pub arc_points: i32,
     /// Not in ACadSharp. Read the document the way ACadSharp reads the same file where that differs from the
-    /// native model (text spellings, block record units, a hatch spline edge's missing weights), so the output is
-    /// byte for byte what ACadSharp writes. Off by default: the native values are the correct ones.
+    /// native model, through the rules of the ACadSharp dump (`compat::acadsharp`): text spellings, colours and line
+    /// weights, block record units and entity lists, a hatch spline edge's missing weights, the R12 DXF reading, and
+    /// ACadSharp's ACI palette and MTEXT plain text, so the output is byte for byte what ACadSharp writes. Off by
+    /// default: the native values are the correct ones.
+    #[cfg(feature = "acadsharp-compat")]
     pub acadsharp_view: bool,
 }
 
@@ -49,6 +52,7 @@ impl Default for SvgConfiguration {
             default_line_weight: 0.01,
             point_radius: 0.1,
             arc_points: 256,
+            #[cfg(feature = "acadsharp-compat")]
             acadsharp_view: false,
         }
     }

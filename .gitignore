@@ -23,6 +23,7 @@ Thumbs.db
 *.dxb
 *.dwg
 !/tests/fixtures/r12/cad-created/*.dxf
+!/tests/fixtures/svg/*.dwg
 *.dwl
 *.dwl2
 *.dmp

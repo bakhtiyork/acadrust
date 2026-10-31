@@ -26,11 +26,10 @@ use super::configuration::{line_weight_mm, SvgConfiguration};
 use super::converter::{
     double_to_string, to_pixel_size, to_svg, to_svg_units, xy_to_svg, xyz_to_pixel, UnitsType,
 };
-use super::csmath::{is_zero, rad_to_deg, BoundingBox, Transform, Xyz, EPSILON};
+use super::csmath::{rad_to_deg, BoundingBox, Transform, Xyz};
 use super::error::SvgError;
 use super::geometry::EllipseGeometry;
 use super::model::{Item, LayoutView, Model};
-use super::palette::INDEX_RGB;
 use super::xml_text_writer::{Formatting, XmlTextWriter};
 use crate::entities::{
     AttachmentPoint, Dimension, EntityCommon, EntityType, Hatch, TextHorizontalAlignment,
@@ -66,7 +65,10 @@ pub struct SvgXmlWriter<'a, W: Write> {
     units: UnitsType,
     notifications: Vec<SvgNotification>,
     nesting: usize,
-    hash_counter: u32,
+    /// The numbers that stand for ACadSharp's `object.GetHashCode()` in the pattern ids: one per hatch pattern and
+    /// pattern line object (by address), numbered in order of first use, so a hatch written twice (a block inserted
+    /// twice) repeats its ids as in C# and the output is the same from run to run.
+    identity_hashes: std::collections::HashMap<usize, usize>,
 }
 
 impl<'a, W: Write> SvgXmlWriter<'a, W> {
@@ -75,13 +77,13 @@ impl<'a, W: Write> SvgXmlWriter<'a, W> {
         xml.formatting = Formatting::Indented;
         SvgXmlWriter {
             xml,
-            model,
+            model: model.with_view(&configuration),
             configuration,
             layout: None,
             units: UnitsType::UNITLESS,
             notifications: Vec::new(),
             nesting: 0,
-            hash_counter: 0,
+            identity_hashes: std::collections::HashMap::new(),
         }
     }
 
@@ -201,8 +203,26 @@ impl<'a, W: Write> SvgXmlWriter<'a, W> {
         } else {
             color
         };
-        let (r, g, b) = color_rgb(color);
+        let (r, g, b) = self.color_rgb(color);
         format!("rgb({r},{g},{b})")
+    }
+
+    /// `Color.R`, `G`, `B`: the stored true colour, or the RGB of the index (ACadSharp's palette in the view, the
+    /// fork's ACI table otherwise). An unresolved ByLayer, ByBlock or ByEntity colour prints black natively; C#
+    /// truncates the index to a byte (256 and 0 are entry 0, black; 257 is entry 1, red).
+    fn color_rgb(&self, color: Color) -> (u8, u8, u8) {
+        #[cfg(feature = "acadsharp-compat")]
+        if self.model.view {
+            let index = match color {
+                Color::Rgb { r, g, b } => return (r, g, b),
+                Color::ByLayer | Color::ByBlock => 0,
+                Color::None => 1,
+                Color::Index(i) => usize::from(i),
+            };
+            let [r, g, b] = crate::compat::acadsharp::view::INDEX_RGB[index];
+            return (r, g, b);
+        }
+        color.rgb().unwrap_or((0, 0, 0))
     }
 
     /// The members of a block record's collection, each written with `transform` (or the identity).
@@ -245,6 +265,7 @@ impl<'a, W: Write> SvgXmlWriter<'a, W> {
             EntityType::LwPolyline(_)
             | EntityType::Polyline2D(_)
             | EntityType::Polyline3D(_)
+            | EntityType::Polyline(_)
             | EntityType::PolyfaceMesh(_)
             | EntityType::PolygonMesh(_) => self.write_polyline(e, transform),
             EntityType::Text(_)
@@ -450,9 +471,10 @@ impl<'a, W: Write> SvgXmlWriter<'a, W> {
         self.xml.write_end_element()
     }
 
-    fn next_hash(&mut self) -> u32 {
-        self.hash_counter += 1;
-        self.hash_counter
+    /// `object.GetHashCode()` of `object`, which is told apart by its address.
+    fn identity_hash<T>(&mut self, object: &T) -> usize {
+        let next = self.identity_hashes.len() + 1;
+        *self.identity_hashes.entry(object as *const T as usize).or_insert(next)
     }
 
     fn write_pattern_header_id(&mut self, id: &str) -> Result<(), SvgError> {
@@ -462,13 +484,9 @@ impl<'a, W: Write> SvgXmlWriter<'a, W> {
     }
 
     fn write_pattern_header(&mut self, hatch: &Hatch) -> Result<String, SvgError> {
-        let id = format!("{}_{}", self.next_hash(), hatch.pattern.name);
+        let id = format!("{}_{}", self.identity_hash(&hatch.pattern), hatch.pattern.name);
         self.write_pattern_header_id(&id)?;
         Ok(id)
-    }
-
-    fn hatch_color(&self, hatch: &Hatch) -> Color {
-        hatch.common.color
     }
 
     fn write_solid_pattern(&mut self, hatch: &Hatch) -> Result<String, SvgError> {
@@ -478,7 +496,8 @@ impl<'a, W: Write> SvgXmlWriter<'a, W> {
         self.xml.write_start_element("rect")?;
         self.xml.write_attribute_string("width", "100%")?;
         self.xml.write_attribute_string("height", "100%")?;
-        let fill = self.color_svg(self.hatch_color(hatch));
+        // `hatch.Color`, not the active colour.
+        let fill = self.color_svg(self.model.own_color(&hatch.common));
         self.xml.write_attribute_string("fill", &fill)?;
         self.xml.write_end_element()?;
         self.xml.write_end_element()?;
@@ -491,7 +510,7 @@ impl<'a, W: Write> SvgXmlWriter<'a, W> {
         }
         let mut patterns: Vec<(String, BoundingBox)> = Vec::new();
         for item in &hatch.pattern.lines {
-            let id = format!("{}_line", self.next_hash());
+            let id = format!("{}_line", self.identity_hash(item));
             let line_offset = {
                 let cos = (0.0 - item.angle).cos();
                 let sin = (0.0 - item.angle).sin();
@@ -682,10 +701,9 @@ impl<'a, W: Write> SvgXmlWriter<'a, W> {
                 };
                 self.xml.write_attribute_string("alignment-baseline", baseline)?;
                 self.xml.write_attribute_string("text-anchor", anchor)?;
-                let plain = super::mtext_plain_text::plain_text(&t.value);
-                if plain.starts_with("!throws:") {
-                    return Err(SvgError::out_of_range("Index and length must refer to a location within the string."));
-                }
+                let plain = self.model.plain_text(&t.value).ok_or_else(|| {
+                    SvgError::out_of_range("Index and length must refer to a location within the string.")
+                })?;
                 for line in split_plain_lines(&plain) {
                     self.xml.write_start_element("tspan")?;
                     self.write_attr_f64("x", 0.0)?;
@@ -767,25 +785,6 @@ pub(crate) fn paper_units(units: i16) -> UnitsType {
     }
 }
 
-/// `Color.GetRgb()` of ACadSharp.
-fn color_rgb(color: Color) -> (u8, u8, u8) {
-    match color {
-        Color::Rgb { r, g, b } => (r, g, b),
-        Color::ByLayer | Color::ByBlock => {
-            let [r, g, b] = INDEX_RGB[0];
-            (r, g, b)
-        }
-        Color::None => {
-            let [r, g, b] = INDEX_RGB[1];
-            (r, g, b)
-        }
-        Color::Index(i) => {
-            let [r, g, b] = INDEX_RGB[i as usize];
-            (r, g, b)
-        }
-    }
-}
-
 /// `Path.GetFileNameWithoutExtension` with `/` as the directory separator.
 fn file_name_without_extension(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or("");
@@ -821,9 +820,4 @@ fn split_plain_lines(text: &str) -> Vec<&str> {
     }
     lines.push(&text[start..]);
     lines
-}
-
-#[allow(dead_code)]
-fn unused(_: f64) -> bool {
-    is_zero(0.0, EPSILON)
 }

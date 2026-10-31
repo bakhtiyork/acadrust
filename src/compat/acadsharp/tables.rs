@@ -174,20 +174,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ),
                     (
                         "Color",
-                        json!(color(
-                            // The DWG layer reader turns ByBlock/ByLayer into
-                            // Color.Default (index 7).
-                            if source_dwg(doc)
-                                && matches!(
-                                    v.color,
-                                    crate::types::Color::ByBlock | crate::types::Color::ByLayer
-                                )
-                            {
-                                crate::types::Color::Index(7)
-                            } else {
-                                crate::io::dwg::autocad_records::unrestored_layer_color(doc, v).unwrap_or(v.color)
-                            }
-                        ))
+                        json!(color(view_layer_color(doc, v)))
                     ),
                     ("IsOn", json!(!v.flags.off)),
                     (
@@ -200,7 +187,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ),
                     (
                         "LineWeight",
-                        json!(crate::io::dwg::autocad_records::unrestored_layer_plot(doc).map_or(v.line_weight, |(_, weight)| weight).value()),
+                        json!(view_layer_line_weight(doc, v).value()),
                     ),
                     (
                         "Material",
@@ -390,15 +377,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ("Preview", block_preview(doc, v)),
                     (
                         "Units",
-                        json!(
-                            if (source_dwg(doc) && doc.version < crate::types::DxfVersion::AC1021)
-                                || v.dxf_present.is_some_and(|p| p & 32 == 0)
-                            {
-                                0
-                            } else {
-                                v.units
-                            }
-                        ),
+                        json!(super::view::record_units(doc, v)),
                     ),
                     (
                         "Viewports",

@@ -38,11 +38,10 @@ mod tables;
 mod table_dimstyle;
 mod table_viewports;
 mod type_names;
+pub(crate) mod view;
 mod xdata;
 
 pub use new_document::new_document;
-pub(crate) use entities::{view_entity_color, view_entity_line_weight};
-pub(crate) use tables::{view_entity_handles, view_layer_color, view_layer_line_weight};
 
 pub const UNMAPPED: &str = "!unmapped";
 pub const SCHEMA: &str = include_str!("schema.tsv");
@@ -310,6 +309,27 @@ pub fn view_document(doc: &CadDocument) -> std::borrow::Cow<'_, CadDocument> {
 /// The name ACadSharp gives a block record (used by `acad-dump write-svg` for its index).
 pub fn block_name<'a>(doc: &'a CadDocument, record: &'a crate::tables::BlockRecord) -> &'a str {
     tables::block_name(doc, record)
+}
+
+/// The block records in the order of ACadSharp's `CadDocument.BlockRecords` (used by `acad-dump write-svg`): for a DWG
+/// the BLOCK_CONTROL object's list followed by the model and paper space records (ACadSharp adds those two last),
+/// otherwise the table order.
+pub fn block_records(doc: &CadDocument) -> Vec<&crate::tables::BlockRecord> {
+    let Some(order) = &doc.source_block_record_order else {
+        return doc.block_records.iter().collect();
+    };
+    let records: std::collections::HashMap<_, _> = doc.block_records.iter().map(|b| (b.handle, b)).collect();
+    let mut seen = std::collections::HashSet::new();
+    order.iter().filter(|h| seen.insert(**h)).filter_map(|h| records.get(h).copied()).collect()
+}
+
+/// The name ACadSharp gives the model-space block record (`doc.ModelSpace.Name`), empty without one.
+pub fn model_space_name(doc: &CadDocument) -> &str {
+    doc.block_records
+        .iter()
+        .find(|b| b.handle == doc.header.model_space_block_handle)
+        .or_else(|| doc.block_records.get("*Model_Space"))
+        .map_or("", |record| tables::block_name(doc, record))
 }
 
 /// Failsafe read of a `.dwg` or `.dxf` file as the dump commands do (used by `acad-dump write-dxf`).

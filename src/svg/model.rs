@@ -36,7 +36,10 @@ use crate::entities::{
 };
 use crate::objects::{Layout, ObjectType};
 use crate::tables::{BlockRecord, LineType, TextStyle};
-use crate::types::{Color, Vector2, Vector3};
+use crate::types::{Color, Handle, Vector2, Vector3};
+#[cfg(feature = "acadsharp-compat")]
+use crate::compat::acadsharp::view;
+use std::collections::HashMap;
 
 pub(crate) fn v3(v: Vector3) -> Xyz {
     Xyz::new(v.x, v.y, v.z)
@@ -46,25 +49,6 @@ pub(crate) fn v2(v: Vector2) -> Xy {
     Xy::new(v.x, v.y)
 }
 
-/// The colour of an entity as ACadSharp reads it from a source file. A colour-book colour of a DWG leaves
-/// `Color` ByBlock (the reference is kept apart), and ACadSharp's ENC reader treats every other complex colour
-/// as RGB, including the method-encoded ByLayer and ACI values.
-pub(crate) fn acadsharp_entity_color(common: &EntityCommon) -> Color {
-    let mut value = common.color;
-    if let Some((word, _)) = common.dwg_color_source {
-        if word & 0x4000 != 0 {
-            value = Color::ByBlock;
-        } else if word & 0x8000 != 0 {
-            value = match value {
-                Color::ByLayer | Color::ByBlock => Color::from_rgb(0, 0, 0),
-                Color::Index(i) => Color::from_rgb(0, 0, i),
-                other => other,
-            };
-        }
-    }
-    value
-}
-
 /// A recursion guard for block references that contain themselves (ACadSharp would overflow the stack).
 const MAX_DEPTH: usize = 256;
 
@@ -72,16 +56,21 @@ const MAX_DEPTH: usize = 256;
 #[derive(Clone)]
 pub struct Model<'a> {
     pub doc: &'a CadDocument,
-    /// Read the document as ACadSharp does (`SvgConfiguration::acadsharp_view`).
+    /// Read the document as ACadSharp does (`SvgConfiguration::acadsharp_view`; always off without the
+    /// `acadsharp-compat` feature, whose rules the view applies).
     pub view: bool,
     cache: std::rc::Rc<ModelCache<'a>>,
 }
 
-/// Lookups built on first use.
+/// Lookups by handle, built on first use (the tables themselves are keyed by name).
 #[derive(Default)]
 struct ModelCache<'a> {
-    /// The BLOCK marker entity of each block record, by record handle.
-    markers: std::cell::OnceCell<std::collections::HashMap<crate::types::Handle, &'a EntityType>>,
+    /// The BLOCK marker entities: by their own handle, and the first one in entity order that names each record as
+    /// its owner.
+    markers: std::cell::OnceCell<(HashMap<Handle, &'a EntityType>, HashMap<Handle, &'a EntityType>)>,
+    blocks: std::cell::OnceCell<HashMap<Handle, &'a BlockRecord>>,
+    layers: std::cell::OnceCell<HashMap<Handle, &'a crate::tables::Layer>>,
+    line_types: std::cell::OnceCell<HashMap<Handle, &'a LineType>>,
 }
 
 /// The pieces of a layout (a `Layout` / `PlotSettings`) that the writer reads.
@@ -146,15 +135,6 @@ pub(crate) struct TextView<'a> {
     pub value: String,
 }
 
-/// A DXF attribute without a height reads as 1 in ACadSharp.
-fn attribute_height(height: f64, source: Option<&crate::entities::text::TextSource>) -> f64 {
-    if source.is_some_and(|s| s.dxf && !s.has_height) {
-        1.0
-    } else {
-        height
-    }
-}
-
 fn horizontal_of(value: i64) -> TextHorizontalAlignment {
     match value {
         1 => TextHorizontalAlignment::Center,
@@ -180,16 +160,32 @@ pub(crate) enum PolylineKind<'a> {
     Lw(&'a crate::entities::LwPolyline),
     Polyline2D(&'a crate::entities::Polyline2D),
     Polyline3D(&'a crate::entities::Polyline3D),
+    /// The native 3D polyline of the API (the readers build `Polyline3D`); ACadSharp reads it back as one.
+    Polyline(&'a crate::entities::Polyline),
     Polyface(&'a crate::entities::PolyfaceMesh),
     PolygonMesh(&'a crate::entities::PolygonMeshEntity),
 }
 
 impl<'a> Model<'a> {
-    pub fn new(doc: &'a CadDocument, view: bool) -> Self {
+    pub fn new(doc: &'a CadDocument) -> Self {
         Model {
             doc,
-            view,
+            view: false,
             cache: std::rc::Rc::new(ModelCache::default()),
+        }
+    }
+
+    /// The model with the view of `configuration` (sharing the lookups).
+    pub fn with_view(&self, configuration: &super::SvgConfiguration) -> Self {
+        #[cfg(not(feature = "acadsharp-compat"))]
+        let _ = configuration;
+        Model {
+            doc: self.doc,
+            #[cfg(feature = "acadsharp-compat")]
+            view: configuration.acadsharp_view,
+            #[cfg(not(feature = "acadsharp-compat"))]
+            view: false,
+            cache: self.cache.clone(),
         }
     }
 
@@ -197,74 +193,59 @@ impl<'a> Model<'a> {
         self.doc.block_records.get(name)
     }
 
-    pub fn block_by_handle(&self, handle: crate::types::Handle) -> Option<&'a BlockRecord> {
-        self.doc.block_records.iter().find(|b| b.handle == handle)
+    pub fn block_by_handle(&self, handle: Handle) -> Option<&'a BlockRecord> {
+        let doc = self.doc;
+        let blocks = self.cache.blocks.get_or_init(|| first_by_handle(doc.block_records.iter().map(|b| (b.handle, b))));
+        blocks.get(&handle).copied()
     }
 
-    /// `BlockRecord.Units`: ACadSharp reads the units of a DWG block record only from R2007 on, and of a DXF only
-    /// when the record states them.
+    /// `BlockRecord.Units`.
     pub fn record_units(&self, record: &BlockRecord) -> i16 {
-        if self.view
-            && ((self.doc.dwg_source_version.is_some() && self.doc.version < crate::types::DxfVersion::AC1021)
-                || record.dxf_present.is_some_and(|p| p & 32 == 0))
-        {
-            0
-        } else {
-            record.units
+        #[cfg(feature = "acadsharp-compat")]
+        if self.view {
+            return view::record_units(self.doc, record);
         }
+        record.units
     }
 
-    /// `BlockRecord.Entities`. ACadSharp registers only the entities the record itself lists.
+    /// `BlockRecord.Entities`.
     pub fn entities_of(&self, record: &'a BlockRecord) -> Vec<&'a EntityType> {
         #[cfg(feature = "acadsharp-compat")]
-        let handles: Vec<crate::types::Handle> = if self.view {
-            crate::compat::acadsharp::view_entity_handles(self.doc, record).to_vec()
-        } else {
-            record.entity_handles.clone()
-        };
-        #[cfg(not(feature = "acadsharp-compat"))]
-        let handles: Vec<crate::types::Handle> = record.entity_handles.clone();
-        let r12 = self.r12_dxf();
+        if self.view {
+            return self.view_entities_of(record);
+        }
+        record.entity_handles.iter().filter_map(|h| self.doc.get_entity(*h)).collect()
+    }
+
+    /// `BlockRecord.Entities` as ACadSharp reads them: only the entities the record itself lists, and for an R12 DXF
+    /// without the dimensions its reader rejects, with the ownerless ENTITIES viewports in the model space.
+    #[cfg(feature = "acadsharp-compat")]
+    fn view_entities_of(&self, record: &'a BlockRecord) -> Vec<&'a EntityType> {
+        let handles = view::entity_handles(self.doc, record);
+        let entities = handles.iter().filter_map(|h| self.doc.get_entity(*h));
+        if !self.r12_dxf() {
+            return entities.collect();
+        }
         let model_space = self.doc.header.model_space_block_handle;
-        let ownerless = |v: &crate::entities::Viewport| {
-            self.doc
-                .source_entity_owners
-                .as_ref()
-                .and_then(|owners| owners.get(&v.common.handle))
-                .is_some_and(|owner| owner.is_null())
+        let ownerless = |e: &EntityType| {
+            matches!(e, EntityType::Viewport(_)) && view::ownerless_entities_record(self.doc, e.common().handle)
         };
+        let mut result: Vec<&'a EntityType> = entities
+            .filter(|e| !view::rejects_legacy_dimension(e) && (record.handle == model_space || !ownerless(e)))
+            .collect();
         // An ENTITIES record without a stated owner enters the model space, after the records it lists.
-        let mut adopted: Vec<&'a EntityType> = Vec::new();
-        if r12 && record.handle == model_space {
+        if record.handle == model_space {
             for other in self.doc.block_records.iter().filter(|b| b.handle != model_space) {
                 for h in &other.entity_handles {
-                    if let Some(e @ EntityType::Viewport(v)) = self.doc.get_entity(*h) {
-                        if ownerless(v) && !handles.contains(h) {
-                            adopted.push(e);
+                    if let Some(e) = self.doc.get_entity(*h).filter(|e| ownerless(e)) {
+                        if !handles.contains(h) {
+                            result.push(e);
                         }
                     }
                 }
             }
         }
-        handles
-            .iter()
-            .filter_map(|h| self.doc.get_entity(*h))
-            .filter(|e| {
-                if !r12 {
-                    return true;
-                }
-                match e {
-                    // The reader of ACadSharp rejects a diameter dimension with user positioned text.
-                    EntityType::Dimension(d) => {
-                        !(matches!(d.as_ref(), Dimension::Diameter(_)) && d.base().text_user_positioned)
-                    }
-                    // An ENTITIES record without a stated owner enters the model space.
-                    EntityType::Viewport(v) => !ownerless(v) || record.handle == model_space,
-                    _ => true,
-                }
-            })
-            .chain(adopted)
-            .collect()
+        result
     }
 
     /// `BlockRecord.Entities` with the children ACadSharp's R12 reader adds to the collection.
@@ -283,11 +264,13 @@ impl<'a> Model<'a> {
         items
     }
 
-    /// An R12 DXF: ACadSharp reads no layouts and builds `Polyline2D` from every kind of POLYLINE.
+    /// The view of an R12 DXF: ACadSharp reads no layouts and builds `Polyline2D` from every kind of POLYLINE.
     fn r12_dxf(&self) -> bool {
-        self.view
-            && self.doc.dwg_source_version.is_none()
-            && matches!(self.doc.version, crate::types::DxfVersion::AC1009 | crate::types::DxfVersion::Unknown)
+        #[cfg(feature = "acadsharp-compat")]
+        if self.view {
+            return view::legacy_dxf(self.doc);
+        }
+        false
     }
 
     /// The layouts in `CadDocument.Layouts` order (the entries of the ACAD_LAYOUT dictionary).
@@ -348,20 +331,24 @@ impl<'a> Model<'a> {
     }
 
     fn layer_of(&self, common: &EntityCommon) -> Option<&'a crate::tables::Layer> {
+        let doc = self.doc;
+        let layers = self.cache.layers.get_or_init(|| first_by_handle(doc.layers.iter().map(|l| (l.handle, l))));
         common
             .layer_handle
             .filter(|h| !h.is_null())
-            .and_then(|h| self.doc.layers.iter().find(|l| l.handle == h))
+            .and_then(|h| layers.get(&h).copied())
             .or_else(|| self.doc.layers.get(&common.layer))
             .or_else(|| self.doc.layers.get("0"))
     }
 
     /// The line type object of an entity (`Entity.LineType`): the stored handle, else the name (empty is ByLayer).
     fn own_line_type(&self, common: &EntityCommon) -> Option<&'a LineType> {
+        let doc = self.doc;
+        let line_types = self.cache.line_types.get_or_init(|| first_by_handle(doc.line_types.iter().map(|l| (l.handle, l))));
         common
             .linetype_handle
             .filter(|h| !h.is_null())
-            .and_then(|h| self.doc.line_types.iter().find(|l| l.handle == h))
+            .and_then(|h| line_types.get(&h).copied())
             .or_else(|| {
                 let name = if common.linetype.is_empty() { "ByLayer" } else { common.linetype.as_str() };
                 self.doc.line_types.get(name)
@@ -370,20 +357,18 @@ impl<'a> Model<'a> {
 
     /// `BlockRecord.BlockEntity`: the BLOCK entity the record names, else the one that names it as owner.
     fn marker_entity(&self, record: &BlockRecord) -> Option<&'a EntityType> {
-        let markers = self.cache.markers.get_or_init(|| {
-            let mut map = std::collections::HashMap::new();
-            for e in &self.doc.entities {
+        let doc = self.doc;
+        let (by_handle, by_owner) = self.cache.markers.get_or_init(|| {
+            let (mut by_handle, mut by_owner) = (HashMap::new(), HashMap::new());
+            for e in &doc.entities {
                 if let EntityType::Block(b) = e.as_ref() {
-                    map.entry(b.common.handle).or_insert(&**e);
+                    by_handle.entry(b.common.handle).or_insert(&**e);
+                    by_owner.entry(b.common.owner_handle).or_insert(&**e);
                 }
             }
-            map
+            (by_handle, by_owner)
         });
-        let by_handle = markers.get(&record.block_entity_handle);
-        let found = by_handle.or_else(|| {
-            markers.values().find(|e| matches!(e, EntityType::Block(b) if b.common.owner_handle == record.handle))
-        });
-        found.copied()
+        by_handle.get(&record.block_entity_handle).or_else(|| by_owner.get(&record.handle)).copied()
     }
 
     fn marker_of(&self, record: &'a BlockRecord) -> Option<&'a EntityCommon> {
@@ -398,20 +383,19 @@ impl<'a> Model<'a> {
         self.marker_of(record)
     }
 
-    fn own_color(&self, common: &EntityCommon) -> Color {
-        if !self.view {
-            return common.color;
-        }
+    /// `Entity.Color`.
+    pub(crate) fn own_color(&self, common: &EntityCommon) -> Color {
         #[cfg(feature = "acadsharp-compat")]
-        return crate::compat::acadsharp::view_entity_color(self.doc, common);
-        #[cfg(not(feature = "acadsharp-compat"))]
-        acadsharp_entity_color(common)
+        if self.view {
+            return view::entity_color(self.doc, common);
+        }
+        common.color
     }
 
     fn layer_color(&self, layer: &crate::tables::Layer) -> Color {
         #[cfg(feature = "acadsharp-compat")]
         if self.view {
-            return crate::compat::acadsharp::view_layer_color(self.doc, layer);
+            return view::layer_color(self.doc, layer);
         }
         layer.color
     }
@@ -419,7 +403,7 @@ impl<'a> Model<'a> {
     fn layer_line_weight(&self, layer: &crate::tables::Layer) -> i16 {
         #[cfg(feature = "acadsharp-compat")]
         if self.view {
-            return crate::compat::acadsharp::view_layer_line_weight(self.doc, layer).value();
+            return view::layer_line_weight(self.doc, layer).value();
         }
         layer.line_weight.value()
     }
@@ -427,7 +411,7 @@ impl<'a> Model<'a> {
     fn own_line_weight(&self, common: &EntityCommon) -> crate::types::LineWeight {
         #[cfg(feature = "acadsharp-compat")]
         if self.view {
-            return crate::compat::acadsharp::view_entity_line_weight(self.doc, common);
+            return view::entity_line_weight(self.doc, common);
         }
         common.line_weight
     }
@@ -553,7 +537,6 @@ impl<'a> Model<'a> {
     }
 
     pub(crate) fn attribute_view(&self, t: &'a crate::entities::AttributeEntity) -> TextView<'a> {
-        let view = self.view;
         TextView {
             is_line_text: true,
             horizontal: horizontal_of(i64::from(t.horizontal_alignment.to_value())),
@@ -561,27 +544,34 @@ impl<'a> Model<'a> {
             alignment_point: v3(t.alignment_point),
             insert_point: v3(t.insertion_point),
             rotation: t.rotation,
-            height: if view { attribute_height(t.height, t.source.as_deref()) } else { t.height },
+            height: self.attribute_height(t.height, t.source.as_deref()),
             style_name: &t.text_style,
-            value: if view {
-                super::text_source_value(&t.value, t.source.as_deref())
-            } else {
-                t.value.clone()
-            },
+            value: self.text_value(&t.value, t.source.as_deref()),
         }
+    }
+
+    /// The height of an attribute or attribute definition.
+    fn attribute_height(&self, height: f64, source: Option<&crate::entities::text::TextSource>) -> f64 {
+        #[cfg(feature = "acadsharp-compat")]
+        if self.view {
+            return view::attribute_height(height, source);
+        }
+        let _ = source;
+        height
+    }
+
+    /// The value of a TEXT or an attribute.
+    fn text_value(&self, value: &str, source: Option<&crate::entities::text::TextSource>) -> String {
+        #[cfg(feature = "acadsharp-compat")]
+        if self.view {
+            return view::text_value(value, source);
+        }
+        let _ = source;
+        value.to_owned()
     }
 
     /// The `IText` view of a text entity (`Text`, `MText`, `AttributeDefinition`, `AttributeEntity`).
     pub(crate) fn text_view(&self, e: &'a EntityType) -> TextView<'a> {
-        let doc = self.doc;
-        let view = self.view;
-        let text_value = move |value: &str, source: Option<&crate::entities::text::TextSource>| {
-            if view {
-                super::text_source_value(value, source)
-            } else {
-                value.to_owned()
-            }
-        };
         match e {
             EntityType::Text(t) => TextView {
                 is_line_text: true,
@@ -592,11 +582,7 @@ impl<'a> Model<'a> {
                 rotation: t.rotation,
                 height: t.height,
                 style_name: &t.style,
-                value: if view {
-                    super::dwg_legacy_replacement(doc, text_value(&t.value, t.source.as_deref()))
-                } else {
-                    t.value.clone()
-                },
+                value: self.line_text_value(t),
             },
             EntityType::AttributeDefinition(t) => TextView {
                 is_line_text: true,
@@ -605,9 +591,9 @@ impl<'a> Model<'a> {
                 alignment_point: v3(t.alignment_point),
                 insert_point: v3(t.insertion_point),
                 rotation: t.rotation,
-                height: if view { attribute_height(t.height, t.source.as_deref()) } else { t.height },
+                height: self.attribute_height(t.height, t.source.as_deref()),
                 style_name: &t.text_style,
-                value: text_value(&t.default_value, t.source.as_deref()),
+                value: self.text_value(&t.default_value, t.source.as_deref()),
             },
             EntityType::AttributeEntity(t) => self.attribute_view(t),
             EntityType::MText(t) => TextView {
@@ -619,18 +605,38 @@ impl<'a> Model<'a> {
                 rotation: t.rotation,
                 height: t.height,
                 style_name: &t.style,
-                value: if view {
-                    let value = t.unchanged_source_value().map_or_else(|| t.value.clone(), str::to_string);
-                    // A drawing before R2004 states the original text of an MTEXT in AutoCAD's round-trip record.
-                    #[cfg(feature = "acadsharp-compat")]
-                    let value = crate::io::dwg::autocad_records::mtext_file_value(doc, t.common.handle, &value).into_owned();
-                    value
-                } else {
-                    t.value.clone()
-                },
+                value: self.mtext_value(t),
             },
             _ => unreachable!("not a text entity"),
         }
+    }
+
+    /// The value of a TEXT.
+    fn line_text_value(&self, t: &crate::entities::Text) -> String {
+        #[cfg(feature = "acadsharp-compat")]
+        if self.view {
+            return view::legacy_replacement(self.doc, view::text_value(&t.value, t.source.as_deref()));
+        }
+        t.value.clone()
+    }
+
+    /// The value of an MTEXT.
+    fn mtext_value(&self, t: &crate::entities::MText) -> String {
+        #[cfg(feature = "acadsharp-compat")]
+        if self.view {
+            return view::mtext_value(self.doc, t);
+        }
+        t.value.clone()
+    }
+
+    /// `MText.GetPlainTextLines()` joined by LF: ACadSharp's text processor in the view (`None` where it throws),
+    /// else the native MTEXT parser.
+    pub(crate) fn plain_text(&self, value: &str) -> Option<String> {
+        #[cfg(feature = "acadsharp-compat")]
+        if self.view {
+            return view::plain_text(value);
+        }
+        Some(crate::entities::mtext_format::parse_mtext(value, false).to_plain_text())
     }
 
     /// The `IPolyline` view of an entity, if it is one.
@@ -639,6 +645,7 @@ impl<'a> Model<'a> {
             EntityType::LwPolyline(p) => Some(PolylineKind::Lw(p)),
             EntityType::Polyline2D(p) => Some(PolylineKind::Polyline2D(p)),
             EntityType::Polyline3D(p) => Some(PolylineKind::Polyline3D(p)),
+            EntityType::Polyline(p) => Some(PolylineKind::Polyline(p)),
             EntityType::PolyfaceMesh(p) => Some(PolylineKind::Polyface(p)),
             EntityType::PolygonMesh(p) => Some(PolylineKind::PolygonMesh(p)),
             _ => None,
@@ -775,7 +782,12 @@ impl<'a> Model<'a> {
                 b
             }
             E::Dimension(d) => Self::dimension_box(d),
-            E::LwPolyline(_) | E::Polyline2D(_) | E::Polyline3D(_) | E::PolyfaceMesh(_) | E::PolygonMesh(_) => {
+            E::LwPolyline(_)
+            | E::Polyline2D(_)
+            | E::Polyline3D(_)
+            | E::Polyline(_)
+            | E::PolyfaceMesh(_)
+            | E::PolygonMesh(_) => {
                 let kind = Self::polyline_kind(e).expect("polyline");
                 let vertices = self.polyline_vertices(&kind);
                 if vertices.iter().any(|v| v.bulge != 0.0) {
@@ -789,7 +801,6 @@ impl<'a> Model<'a> {
                     BoundingBox::from_points(vertices.iter().map(|v| v.location))
                 }
             }
-            E::Polyline(_) => BoundingBox::NULL,
             E::Unknown(u) if u.dxf_name == "AEC_WALL" => {
                 return Err(SvgError::not_implemented("The method or operation is not implemented."))
             }
@@ -899,8 +910,6 @@ impl<'a> Model<'a> {
     }
 
     pub(crate) fn spline_entity_geometry(s: &crate::entities::Spline) -> SplineGeometry {
-        let flags = s.dxf_flags;
-        let _ = flags;
         SplineGeometry {
             control_points: s.control_points.iter().map(|p| v3(*p)).collect(),
             weights: s.weights.clone(),
@@ -913,13 +922,11 @@ impl<'a> Model<'a> {
 
     /// `Hatch.BoundaryPath.Arc.ToEntity()`.
     pub(crate) fn hatch_arc(a: &crate::entities::CircularArcEdge) -> Result<ArcGeometry, SvgError> {
-        let two_pi = std::f64::consts::PI * 2.0;
         let (start, end) = if a.counter_clockwise {
             (a.start_angle, a.end_angle)
         } else {
             (2.0 * std::f64::consts::PI - a.end_angle, 2.0 * std::f64::consts::PI - a.start_angle)
         };
-        let _ = two_pi;
         if a.radius <= 0.0 {
             return Err(SvgError::out_of_range(format!(
                 "The radius must be greater than 0. (Parameter 'value')\nActual value was {}.",
@@ -984,11 +991,7 @@ impl<'a> Model<'a> {
                     let geometry = SplineGeometry {
                         control_points: s.control_points.iter().map(|p| Xyz::new(p.x, p.y, 0.0)).collect(),
                         // The DWG reader of ACadSharp reads an absent non-rational weight as zero.
-                        weights: s
-                            .control_points
-                            .iter()
-                            .map(|p| if self.view && self.doc.dwg_source_version.is_some() && !s.rational { 0.0 } else { p.z })
-                            .collect(),
+                        weights: s.control_points.iter().map(|p| self.hatch_spline_weight(s, p.z)).collect(),
                         knots: s.knots.clone(),
                         degree: s.degree,
                         is_closed: true,
@@ -999,6 +1002,16 @@ impl<'a> Model<'a> {
             }
         }
         Ok(pts)
+    }
+
+    /// The weight of a control point of a hatch spline edge (stored as its z).
+    fn hatch_spline_weight(&self, edge: &crate::entities::SplineEdge, weight: f64) -> f64 {
+        #[cfg(feature = "acadsharp-compat")]
+        if self.view {
+            return view::hatch_spline_weight(self.doc, edge, weight);
+        }
+        let _ = edge;
+        weight
     }
 
     /// The vertices of an `IPolyline` (`IVertex.Location`, `IVertex.Bulge`).
@@ -1025,6 +1038,14 @@ impl<'a> Model<'a> {
                 .iter()
                 .map(|v| VertexPoint {
                     location: v3(v.position),
+                    bulge: 0.0,
+                })
+                .collect(),
+            PolylineKind::Polyline(p) => p
+                .vertices
+                .iter()
+                .map(|v| VertexPoint {
+                    location: v3(v.location),
                     bulge: 0.0,
                 })
                 .collect(),
@@ -1062,6 +1083,7 @@ impl<'a> Model<'a> {
             PolylineKind::Lw(p) => p.is_closed,
             PolylineKind::Polyline2D(p) => p.flags.bits() & 33 != 0,
             PolylineKind::Polyline3D(p) => p.is_closed(),
+            PolylineKind::Polyline(p) => p.is_closed(),
             PolylineKind::Polyface(p) => p.flags.bits() & 33 != 0,
             PolylineKind::PolygonMesh(p) => p.flags.bits() & 33 != 0,
         }
@@ -1071,8 +1093,15 @@ impl<'a> Model<'a> {
     pub(crate) fn polyline_xy_points(&self, kind: &PolylineKind<'_>, precision: i32) -> Result<Vec<Xyz>, SvgError> {
         polyline_points_with_arcs(&self.polyline_vertices(kind), Self::polyline_closed(kind), precision, 2)
     }
+}
 
-    
+/// A lookup by handle that keeps the first entry of a duplicated handle, as the table scans it replaces did.
+fn first_by_handle<T>(entries: impl Iterator<Item = (Handle, T)>) -> HashMap<Handle, T> {
+    let mut map = HashMap::new();
+    for (handle, entry) in entries {
+        map.entry(handle).or_insert(entry);
+    }
+    map
 }
 
 fn nan_min(acc: f64, v: f64) -> f64 {

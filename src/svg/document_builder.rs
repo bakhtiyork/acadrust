@@ -48,7 +48,7 @@ pub struct SvgDocumentBuilder<'a, W: Write> {
 
 impl<'a, W: Write> SvgDocumentBuilder<'a, W> {
     pub fn new(out: W, document: &'a crate::document::CadDocument, configuration: SvgConfiguration) -> Self {
-        let model = Model::new(document, configuration.acadsharp_view);
+        let model = Model::new(document).with_view(&configuration);
         SvgDocumentBuilder {
             writer: SvgXmlWriter::new(out, model.clone(), configuration.clone()),
             line_type_writers: HashMap::new(),

@@ -299,9 +299,9 @@ fn escape(value: &str, attribute: bool) -> String {
             '<' => result.push_str("&lt;"),
             '>' => result.push_str("&gt;"),
             '"' if attribute => result.push_str("&quot;"),
-            '\t' | '\n' | '\r' if attribute => {
-                result.push_str(&format!("&#x{:X};", ch as u32));
-            }
+            // In an attribute value a line break is written as a character reference; a tab stays (.NET 10:
+            // `WriteAttributeString("t", "a\tb\nc")` writes `t="a<TAB>b&#xA;c"`).
+            '\n' | '\r' if attribute => result.push_str(&format!("&#x{:X};", ch as u32)),
             '\t' | '\n' | '\r' => result.push(ch),
             c if (c as u32) < 0x20 => result.push_str(&format!("&#x{:X};", c as u32)),
             '\u{FFFE}' | '\u{FFFF}' => result.push_str(&format!("&#x{:X};", ch as u32)),
