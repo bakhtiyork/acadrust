@@ -16,6 +16,8 @@
 //!   [`ReadStats`] returned by [`DxfReader::read_with_stats`] and
 //!   [`DwgReader::read_with_stats`].
 //! - **Automatic code-page handling** for older drawings.
+//! - **SVG export** of the model space, a layout or a block record with
+//!   [`svg::SvgWriter`], a port of ACadSharp's SVG writer.
 //! - Optional Serde serialization and 3D import support.
 //!
 //! ## Feature Flags
@@ -178,6 +180,7 @@ pub mod notification;
 pub mod objects;
 pub mod plot_style;
 pub mod sheet_set;
+pub mod svg;
 pub mod tables;
 pub mod types;
 pub mod vba;

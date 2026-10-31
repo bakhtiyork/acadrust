@@ -38,9 +38,14 @@
 /// helper is a separate malformed case: `\f`/`\F` at a nonzero offset throws
 /// `ArgumentOutOfRangeException`, represented here by the canonical sentinel.
 pub(super) fn plain_text(text: &str) -> String {
+    try_plain_text(text).unwrap_or_else(|| "!throws:ArgumentOutOfRangeException".to_owned())
+}
+
+/// [`plain_text`], or `None` where ACadSharp throws `ArgumentOutOfRangeException`.
+pub(super) fn try_plain_text(text: &str) -> Option<String> {
     let chars: Vec<char> = text.chars().collect();
     if chars.is_empty() {
-        return text.to_owned();
+        return Some(text.to_owned());
     }
 
     let mut result = String::with_capacity(text.len());
@@ -60,7 +65,7 @@ pub(super) fn plain_text(text: &str) -> String {
                 Some('f' | 'F') => match skip_control(&chars, index) {
                     Some(end) => index = end,
                     None if index == 0 => index = chars.len(),
-                    None => return "!throws:ArgumentOutOfRangeException".to_owned(),
+                    None => return None,
                 },
                 Some('A' | 'c' | 'C' | 'h' | 'H' | 'p') => {
                     index = skip_control(&chars, index).unwrap_or(chars.len());
@@ -91,7 +96,7 @@ pub(super) fn plain_text(text: &str) -> String {
         }
     }
 
-    result
+    Some(result)
 }
 
 /// Find the end of a recognized ACadSharp formatting control at its first `;`.

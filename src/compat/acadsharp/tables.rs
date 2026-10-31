@@ -174,20 +174,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ),
                     (
                         "Color",
-                        json!(color(
-                            // The DWG layer reader turns ByBlock/ByLayer into
-                            // Color.Default (index 7).
-                            if source_dwg(doc)
-                                && matches!(
-                                    v.color,
-                                    crate::types::Color::ByBlock | crate::types::Color::ByLayer
-                                )
-                            {
-                                crate::types::Color::Index(7)
-                            } else {
-                                crate::io::dwg::autocad_records::unrestored_layer_color(doc, v).unwrap_or(v.color)
-                            }
-                        ))
+                        json!(color(view_layer_color(doc, v)))
                     ),
                     ("IsOn", json!(!v.flags.off)),
                     (
@@ -200,7 +187,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ),
                     (
                         "LineWeight",
-                        json!(crate::io::dwg::autocad_records::unrestored_layer_plot(doc).map_or(v.line_weight, |(_, weight)| weight).value()),
+                        json!(view_layer_line_weight(doc, v).value()),
                     ),
                     (
                         "Material",
@@ -390,15 +377,7 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
                     ("Preview", block_preview(doc, v)),
                     (
                         "Units",
-                        json!(
-                            if (source_dwg(doc) && doc.version < crate::types::DxfVersion::AC1021)
-                                || v.dxf_present.is_some_and(|p| p & 32 == 0)
-                            {
-                                0
-                            } else {
-                                v.units
-                            }
-                        ),
+                        json!(super::view::record_units(doc, v)),
                     ),
                     (
                         "Viewports",
@@ -640,6 +619,21 @@ pub(super) fn records(doc: &CadDocument) -> Vec<Box<dyn Fn() -> Value + '_>> {
     records
 }
 
+/// The colour of a layer as ACadSharp reads it.
+pub(crate) fn view_layer_color(doc: &CadDocument, layer: &crate::tables::Layer) -> crate::types::Color {
+    // The DWG layer reader turns ByBlock/ByLayer into Color.Default (index 7).
+    if source_dwg(doc) && matches!(layer.color, crate::types::Color::ByBlock | crate::types::Color::ByLayer) {
+        crate::types::Color::Index(7)
+    } else {
+        crate::io::dwg::autocad_records::unrestored_layer_color(doc, layer).unwrap_or(layer.color)
+    }
+}
+
+/// The line weight of a layer as ACadSharp reads it.
+pub(crate) fn view_layer_line_weight(doc: &CadDocument, layer: &crate::tables::Layer) -> crate::types::LineWeight {
+    crate::io::dwg::autocad_records::unrestored_layer_plot(doc).map_or(layer.line_weight, |(_, weight)| weight)
+}
+
 pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
     out.extend(records(doc).into_iter().map(|render| render()));
 }
@@ -648,7 +642,7 @@ pub(super) fn collect(doc: &CadDocument, out: &mut Vec<Value>) {
 /// (R2004+ owned-object list, R13-R2000 first/last chain). An entity that merely names the block as its owner but
 /// is absent from that list is never added to the block, so ACadSharp does not register it. The native record
 /// keeps owner-derived members too; documents that were not read from a DWG have no source list.
-pub(super) fn view_entity_handles<'a>(
+pub(crate) fn view_entity_handles<'a>(
     doc: &'a CadDocument,
     b: &'a crate::tables::BlockRecord,
 ) -> std::borrow::Cow<'a, [crate::types::Handle]> {

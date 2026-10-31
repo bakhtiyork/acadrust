@@ -405,15 +405,9 @@ pub(super) fn apply(doc: &CadDocument, header: &mut Value, records: &mut Vec<Val
         }
         // The DXF reader's exact enum switch rejects non-linear dimension
         // types carrying the user-positioned-text bit (native data stays).
-        if ty == "DimensionDiameter" && doc.get_entity(Handle::new(id(&value["handle"]))).is_some_and(|entity| matches!(entity, crate::entities::EntityType::Dimension(d) if d.base().text_user_positioned)) { continue; }
+        if ty == "DimensionDiameter" && doc.get_entity(Handle::new(id(&value["handle"]))).is_some_and(super::view::rejects_legacy_dimension) { continue; }
         let mut value = value.clone();
-        if ty == "Viewport"
-            && doc
-                .source_entity_owners
-                .as_ref()
-                .and_then(|owners| owners.get(&Handle::new(id(&value["handle"]))))
-                .is_some_and(|owner| owner.is_null())
-        {
+        if ty == "Viewport" && super::view::ownerless_entities_record(doc, Handle::new(id(&value["handle"]))) {
             // Ownerless ENTITIES records enter ModelSpace even if group 67
             // would place them in native PaperSpace. BLOCKS records are absent
             // from this provenance map and retain their block membership.

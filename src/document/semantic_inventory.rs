@@ -174,6 +174,7 @@ impl<'a> SemanticInventoryV1<'a> {
             dim_styles,
             app_ids,
             source_app_id_order: _, // Reader provenance; native table semantics are above.
+            source_block_record_order: _, // Reader provenance for the SVG writer's BlockRecords order.
             legacy_dxf_tables: _,
             legacy_dxf_blocks: _,
             source_explicit_handle_max: _,

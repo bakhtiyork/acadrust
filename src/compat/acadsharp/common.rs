@@ -16,25 +16,6 @@ pub(super) fn appearance_color(value: Color) -> Value {
     result
 }
 
-pub(super) fn entity_color(common: &EntityCommon) -> Value {
-    let mut value = common.color;
-    if let Some((word, _)) = common.dwg_color_source {
-        if word & 0x4000 != 0 {
-            // The oracle retains the book reference but leaves Color ByBlock.
-            value = Color::ByBlock;
-        } else if word & 0x8000 != 0 {
-            // Its ENC reader treats every complex color as RGB, including
-            // method-encoded ByLayer and ACI values understood by native Rust.
-            value = match value {
-                Color::ByLayer | Color::ByBlock => Color::from_rgb(0, 0, 0),
-                Color::Index(i) => Color::from_rgb(0, 0, i),
-                other => other,
-            };
-        }
-    }
-    appearance_color(value)
-}
-
 pub(super) fn entity_transparency(common: &EntityCommon) -> Value {
     if let Some((word, packed)) = common.dwg_color_source {
         if word == 0 && common.transparency == Transparency::ByLayer {
@@ -263,6 +244,7 @@ mod tests {
         let mut common = EntityCommon::new();
         common.color = Color::from_rgb(10, 20, 30);
         common.dwg_color_source = Some((0xC000, 0));
+        let entity_color = |common: &EntityCommon| appearance_color(super::super::view::source_entity_color(common));
         assert_eq!(entity_color(&common), color(Color::ByBlock));
         assert_eq!(common.color, Color::from_rgb(10, 20, 30));
 

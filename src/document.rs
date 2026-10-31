@@ -1444,6 +1444,12 @@ pub struct CadDocument {
     #[cfg_attr(feature = "serde", serde(default))]
     pub(crate) source_app_id_order: Option<Vec<String>>,
 
+    /// Block record handles in the order a DWG's BLOCK_CONTROL object lists them, followed by the model and
+    /// paper space records (ACadSharp adds those two last). This is reader provenance for the SVG writer's
+    /// enumeration of `BlockRecords`; native table semantics continue to come from `block_records`.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub(crate) source_block_record_order: Option<Vec<Handle>>,
+
     /// Source symbol tables in file order, including empty tables. R12
     /// compatibility uses this to reproduce ACadSharp's template sequence.
     #[cfg_attr(feature = "serde", serde(default))]
@@ -1821,6 +1827,7 @@ impl CadDocument {
             dim_styles: Table::new(),
             app_ids: Table::new(),
             source_app_id_order: None,
+            source_block_record_order: None,
             legacy_dxf_tables: None,
             legacy_dxf_blocks: None,
             source_explicit_handle_max: None,

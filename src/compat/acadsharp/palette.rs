@@ -1,6 +1,6 @@
 // RGB lookup data used by ACadSharp Color.GetRgb, including its palette quirks.
 // These are observable values, not acadrust's different ACI display palette.
-pub(super) const INDEX_RGB: [[u8; 3]; 256] = [
+pub(crate) const INDEX_RGB: [[u8; 3]; 256] = [
     [0, 0, 0],
     [255, 0, 0],
     [255, 255, 0],
