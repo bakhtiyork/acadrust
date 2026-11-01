@@ -303,8 +303,13 @@ fn read_constraint_common(
         0
     };
     let connection_count = cursor.i32(90).max(0).min(100_000);
-    let mut connections = Vec::with_capacity(connection_count as usize);
+    // Not reserved: the count is the file's claim, the loop below ends with the record.
+    let mut connections = Vec::new();
     for _ in 0..connection_count {
+        // At the end of the record every read is a default: the declared count of a damaged file ends there.
+        if cursor.peek_code().is_none() {
+            break;
+        }
         connections.push(cursor.i32(90));
     }
     if !status_before {
@@ -323,8 +328,13 @@ fn read_constraint_common(
 fn read_constraint_root(cursor: &mut AssocCursor<'_>) -> AssocConstraintNode {
     let node_id = cursor.i32(90);
     let connection_count = cursor.i32(90).max(0).min(100_000);
-    let mut connections = Vec::with_capacity(connection_count as usize);
+    // Not reserved: the count is the file's claim, the loop below ends with the record.
+    let mut connections = Vec::new();
     for _ in 0..connection_count {
+        // At the end of the record every read is a default: the declared count of a damaged file ends there.
+        if cursor.peek_code().is_none() {
+            break;
+        }
         connections.push(cursor.i32(90));
     }
     AssocConstraintNode {
@@ -1386,6 +1396,9 @@ impl<'a> SectionReader<'a> {
                     if has_registry {
                         let mut registry = Vec::with_capacity(registered_count as usize);
                         for _ in 0..registered_count {
+                            if cursor.peek_code().is_none() {
+                                break;
+                            }
                             registry.push((cursor.text(1), cursor.i32(90)));
                         }
                         for (class_name, registry_node_id) in registry {
@@ -1400,6 +1413,9 @@ impl<'a> SectionReader<'a> {
                     } else {
                         cursor.position = after_root;
                         for _ in 1..node_count {
+                            if cursor.peek_code().is_none() {
+                                break;
+                            }
                             nodes.push(read_constraint_common(&mut cursor, dxf_version));
                         }
                     }

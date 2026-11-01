@@ -62,7 +62,9 @@ pub fn read_classes_with_encoding(
     }
 
     // ── Read section size (RL at offset 16) ──
-    let section_size = i32::from_le_bytes([data[16], data[17], data[18], data[19]]) as usize;
+    // A negative size (damaged data) would wrap to a huge usize and overflow the sums below.
+    let section_size = usize::try_from(i32::from_le_bytes([data[16], data[17], data[18], data[19]]))
+        .map_err(|_| DxfError::Parse("Classes section size is negative".to_string()))?;
 
     // Section data starts after sentinel (16) + size field (4).
     // Extra 4 zero bytes when: (AC1024+ && maintenance > 3) || AC1032+

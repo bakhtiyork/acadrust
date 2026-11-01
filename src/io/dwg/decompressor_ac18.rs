@@ -26,7 +26,9 @@
 /// # Returns
 /// Decompressed data, truncated to `decompressed_size`.
 pub fn decompress_ac18(source: &[u8], decompressed_size: usize) -> Vec<u8> {
-    let mut output = Vec::with_capacity(decompressed_size);
+    // The size is the file's claim (a damaged one asks for terabytes): reserve what the source can plausibly expand to
+    // and let the output grow past that when the data really is that long.
+    let mut output = Vec::with_capacity(decompressed_size.min(source.len().saturating_mul(32).max(4096)));
     let mut si = 0; // source index
 
     if source.is_empty() || decompressed_size == 0 {

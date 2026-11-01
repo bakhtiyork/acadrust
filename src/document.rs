@@ -2579,11 +2579,43 @@ impl CadDocument {
         if self.header.handle_seed > self.next_handle {
             self.next_handle = self.header.handle_seed;
         }
-        let handle = Handle::new(self.next_handle);
-        self.next_handle += 1;
+        let handle = self.issue_handle();
         // Keep HANDSEED in sync — DWG header requires this to be ≥ next_handle
         self.header.handle_seed = self.next_handle;
         handle
+    }
+
+    /// The handle at the counter, advancing it: the counter stays above every handle in use, so the handle is free.
+    fn issue_handle(&mut self) -> Handle {
+        self.relocate_exhausted_allocator(&[], 1);
+        let handle = Handle::new(self.next_handle);
+        self.next_handle = self.next_handle.saturating_add(1);
+        handle
+    }
+
+    /// A counter with fewer than `needed` handles above it (a damaged file holds a handle at or near the top of the
+    /// handle space, u64::MAX, where the `+ 1` after it saturates) moves to the start of the longest run of handles
+    /// that no record (and none of `pending`, records not yet stored) holds, so no handle is issued twice. ACadSharp's
+    /// unchecked `ulong` seed wraps to 0 there, and its next allocation collides with a record (the document throws on
+    /// the duplicate key).
+    fn relocate_exhausted_allocator(&mut self, pending: &[u64], needed: u64) {
+        if u64::MAX - self.next_handle >= needed {
+            return;
+        }
+        let mut used = pending.to_vec();
+        used.push(0);
+        self.for_each_record_handle(|h| used.push(h));
+        used.sort_unstable();
+        used.dedup();
+        let last = used[used.len() - 1];
+        let (mut start, mut length) = (last.wrapping_add(1), u64::MAX - last);
+        for pair in used.windows(2) {
+            if pair[1] - pair[0] - 1 > length {
+                start = pair[0] + 1;
+                length = pair[1] - pair[0] - 1;
+            }
+        }
+        self.next_handle = start;
     }
 
     /// Advance the allocator above every stored record identity.
@@ -2593,9 +2625,17 @@ impl CadDocument {
     /// prevents freshly assigned handles from colliding with parsed records.
     pub(crate) fn synchronize_handle_allocator(&mut self) {
         let mut next_handle = self.next_handle;
+        self.for_each_record_handle(|h| next_handle = next_handle.max(h.saturating_add(1)));
+        self.next_handle = next_handle;
+        self.header.handle_seed = self.header.handle_seed.max(next_handle);
+    }
+
+    /// Calls `f` with every stored record identity (table controls and entries, block records and their BLOCK/ENDBLK
+    /// markers and members, entities and their sub-entities, objects).
+    fn for_each_record_handle(&self, mut f: impl FnMut(u64)) {
         macro_rules! include_handle {
             ($handle:expr) => {{
-                next_handle = next_handle.max($handle.value().saturating_add(1));
+                f($handle.value());
             }};
         }
         macro_rules! include_table {
@@ -2635,9 +2675,6 @@ impl CadDocument {
         for object in self.objects.values() {
             include_handle!(object.intrinsic_handle());
         }
-
-        self.next_handle = next_handle;
-        self.header.handle_seed = self.header.handle_seed.max(next_handle);
     }
 
     /// Get the next handle value (without allocating)
@@ -3700,7 +3737,7 @@ impl CadDocument {
             // future allocations (e.g., vertex sub-entities) don't
             // collide with it.
             if h.value() >= self.next_handle {
-                self.next_handle = h.value() + 1;
+                self.next_handle = h.value().saturating_add(1);
                 self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             h
@@ -3785,7 +3822,7 @@ impl CadDocument {
         } else {
             let handle = entity.common().handle;
             if handle.value() >= self.next_handle {
-                self.next_handle = handle.value() + 1;
+                self.next_handle = handle.value().saturating_add(1);
                 self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             handle
@@ -3802,17 +3839,27 @@ impl CadDocument {
         }
 
         let mut next_handle = self.next_handle.max(self.header.handle_seed);
-        for entity in entities.iter_mut() {
-            entity.for_each_child_handle(|h| {
+        for i in 0..entities.len() {
+            entities[i].for_each_child_handle(|h| {
                 next_handle = next_handle.max(h.value().saturating_add(1));
             });
-            let handle = entity.common().handle;
+            let handle = entities[i].common().handle;
             if handle.is_null() {
+                if next_handle == u64::MAX {
+                    let mut pending = Vec::new();
+                    for entity in entities.iter() {
+                        pending.push(entity.common().handle.value());
+                        entity.for_each_child_handle(|h| pending.push(h.value()));
+                    }
+                    self.next_handle = next_handle;
+                    self.relocate_exhausted_allocator(&pending, 1);
+                    next_handle = self.next_handle;
+                }
                 let handle = Handle::new(next_handle);
-                next_handle += 1;
-                Arc::make_mut(entity).as_entity_mut().set_handle(handle);
+                next_handle = next_handle.saturating_add(1);
+                Arc::make_mut(&mut entities[i]).as_entity_mut().set_handle(handle);
             } else {
-                next_handle = next_handle.max(handle.value() + 1);
+                next_handle = next_handle.max(handle.value().saturating_add(1));
             }
         }
 
@@ -3892,7 +3939,7 @@ impl CadDocument {
         }
         self.record_entity_before(handle, None);
         if handle.value() >= self.next_handle {
-            self.next_handle = handle.value() + 1;
+            self.next_handle = handle.value().saturating_add(1);
             self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
         }
         let idx = self.entities.len();
@@ -4026,7 +4073,7 @@ impl CadDocument {
         } else {
             let h = entity.common().handle;
             if h.value() >= self.next_handle {
-                self.next_handle = h.value() + 1;
+                self.next_handle = h.value().saturating_add(1);
                 self.header.handle_seed = self.header.handle_seed.max(self.next_handle);
             }
             h
@@ -5206,7 +5253,7 @@ impl CadDocument {
         for entity in self.entities.iter() {
             let h = entity.common().handle.value();
             if h >= max_handle {
-                max_handle = h + 1;
+                max_handle = h.saturating_add(1);
             }
         }
 
@@ -5214,7 +5261,7 @@ impl CadDocument {
         for (handle, _) in &self.objects {
             let h = handle.value();
             if h >= max_handle {
-                max_handle = h + 1;
+                max_handle = h.saturating_add(1);
             }
         }
 
@@ -5222,12 +5269,12 @@ impl CadDocument {
         for br in self.block_records.iter() {
             let h = br.handle.value();
             if h >= max_handle {
-                max_handle = h + 1;
+                max_handle = h.saturating_add(1);
             }
             for eh in &br.entity_handles {
                 let h = eh.value();
                 if h >= max_handle {
-                    max_handle = h + 1;
+                    max_handle = h.saturating_add(1);
                 }
             }
         }
@@ -5239,7 +5286,7 @@ impl CadDocument {
                 for e in $tbl.iter() {
                     let h = e.handle().value();
                     if h >= max_handle {
-                        max_handle = h + 1;
+                        max_handle = h.saturating_add(1);
                     }
                 }
             };
@@ -5393,62 +5440,52 @@ impl CadDocument {
 
         // Reassign any table control handle that collides with a used handle
         if used_handles.contains(&self.vports.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.vports.set_handle(h);
             self.header.vport_control_handle = h;
         }
         if used_handles.contains(&self.line_types.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.line_types.set_handle(h);
             self.header.linetype_control_handle = h;
         }
         if used_handles.contains(&self.layers.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.layers.set_handle(h);
             self.header.layer_control_handle = h;
         }
         if used_handles.contains(&self.text_styles.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.text_styles.set_handle(h);
             self.header.style_control_handle = h;
         }
         if used_handles.contains(&self.views.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.views.set_handle(h);
             self.header.view_control_handle = h;
         }
         if used_handles.contains(&self.ucss.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.ucss.set_handle(h);
             self.header.ucs_control_handle = h;
         }
         if used_handles.contains(&self.app_ids.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.app_ids.set_handle(h);
             self.header.appid_control_handle = h;
         }
         if used_handles.contains(&self.dim_styles.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.dim_styles.set_handle(h);
             self.header.dimstyle_control_handle = h;
         }
         if used_handles.contains(&self.block_records.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.block_records.set_handle(h);
             self.header.block_control_handle = h;
         }
         if used_handles.contains(&self.vx_table.handle().value()) {
-            let h = Handle::new(self.next_handle);
-            self.next_handle += 1;
+            let h = self.issue_handle();
             self.vx_table.set_handle(h);
             self.header.vpent_hdr_control_handle = h;
         }
@@ -5473,6 +5510,7 @@ impl CadDocument {
                 used_handles.insert(handle.value());
             }
         }
+        self.relocate_exhausted_allocator(&[], 2 * self.block_records.len() as u64);
         for br in self.block_records.iter_mut() {
             if br.block_entity_handle.is_null()
                 || used_handles.contains(&br.block_entity_handle.value())
@@ -5506,8 +5544,7 @@ impl CadDocument {
         obj_handles.sort_by_key(|handle| handle.value());
         for old_h in obj_handles {
             if non_object_used.contains(&old_h.value()) {
-                let new_h = Handle::new(self.next_handle);
-                self.next_handle += 1;
+                let new_h = self.issue_handle();
                 remap.push((old_h, new_h));
             }
         }

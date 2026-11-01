@@ -307,7 +307,10 @@ impl DwgObjectReader {
                 // So: handle_start = total_data_bits - handle_bits
                 data_start_bits = temp.position_in_bits();
                 let total_data_bits = (size as i64) * 8;
-                handle_start = total_data_bits - handle_bits;
+                // handle_bits is the record's number (up to 2^63 in a damaged one).
+                handle_start = total_data_bits
+                    .checked_sub(handle_bits)
+                    .ok_or_else(|| DxfError::Parse("Invalid DWG object handle-stream boundary".into()))?;
                 flag_position = handle_start - 1;
             }
 
@@ -920,6 +923,16 @@ fn invisible_flag(raw: i16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R7 review: the R2010+ handle-stream size is the record's modular char (up to 2^63 in a damaged record), and
+    /// `record bits - handle bits` overflowed. The record is an error.
+    #[test]
+    fn handle_stream_size_of_2_pow_63_is_an_error() {
+        let reader = DwgObjectReader::new(Vec::new(), DxfVersion::AC1032, HashMap::new()).unwrap();
+        let record: Arc<[u8]> = Arc::from(vec![0u8; 16]);
+        assert!(reader.read_merged_record(Arc::clone(&record), i64::MIN).is_err());
+        assert!(reader.read_merged_record(record, 8).is_ok());
+    }
 
     #[test]
     fn only_bit_zero_of_the_invisibility_word_hides_an_entity() {

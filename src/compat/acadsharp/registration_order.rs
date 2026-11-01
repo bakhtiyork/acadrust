@@ -227,7 +227,7 @@ fn apply_update_collection_dictionaries(doc: &CadDocument, reader: &str, records
             continue;
         }
         while occupied.contains(&next) {
-            next = next.saturating_add(1);
+            next = next.wrapping_add(1);
         }
         let target = next;
         next = next.saturating_add(1);
@@ -395,7 +395,7 @@ fn apply_default_dimension_style(doc: &CadDocument, reader: &str, records: &mut 
             continue;
         }
         while occupied.contains(&next) {
-            next = next.saturating_add(1);
+            next = next.wrapping_add(1);
         }
         occupied.insert(next);
         record["handle"] = Value::String(format!("#{next:X}"));

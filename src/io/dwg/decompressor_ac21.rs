@@ -13,6 +13,28 @@
 //! - `0x2_`: Extended match (16-bit offset, variable length)
 //! - `0x3_`–`0xF_`: Compact match (length from nibble, short offset)
 
+use crate::error::DxfError;
+
+/// The error of a stream that reads or writes outside its buffers (damaged or hostile data). ACadSharp's
+/// decompressor throws `IndexOutOfRangeException` there; the read ends in an error, never in a panic.
+fn out_of_range() -> DxfError {
+    DxfError::Parse("AC1021 compressed data is truncated or addresses bytes outside its buffer".to_string())
+}
+
+/// `true` when `count` bytes starting at `start` lie inside a buffer of `len` bytes.
+#[inline(always)]
+fn fits(len: usize, start: usize, count: usize) -> bool {
+    start.checked_add(count).is_some_and(|end| end <= len)
+}
+
+/// The byte of the compressed stream at `*index`, advancing the index.
+#[inline(always)]
+fn next_byte(src: &[u8], index: &mut u32) -> Result<u32, DxfError> {
+    let value = src.get(*index as usize).ok_or_else(out_of_range)?;
+    *index = index.saturating_add(1);
+    Ok(u32::from(*value))
+}
+
 /// Decompress AC1021 LZ77 compressed data.
 ///
 /// # Arguments
@@ -20,7 +42,16 @@
 /// * `initial_offset` - Starting offset within source
 /// * `length` - Number of compressed bytes to process
 /// * `buffer` - Output buffer (must be pre-allocated to decompressed size)
-pub fn decompress_ac21(source: &[u8], initial_offset: u32, length: u32, buffer: &mut [u8]) {
+///
+/// # Errors
+/// A stream that reads past `source` or writes past `buffer` ends in an error (the buffer then holds what was
+/// decoded before it).
+pub fn decompress_ac21(
+    source: &[u8],
+    initial_offset: u32,
+    length: u32,
+    buffer: &mut [u8],
+) -> Result<(), DxfError> {
     // AC1021 literal copies have a minimum length of 8 and process in chunks of
     // up to 32 bytes.  When the decompressed output is smaller than 32 bytes the
     // internal copy routines (copy_n_reordered / copy_literal) may write past the
@@ -29,40 +60,44 @@ pub fn decompress_ac21(source: &[u8], initial_offset: u32, length: u32, buffer: 
     const MIN_SAFE: usize = 32;
     if buffer.len() < MIN_SAFE {
         let mut padded = vec![0u8; MIN_SAFE];
-        decompress_ac21_inner(source, initial_offset, length, &mut padded);
+        let result = decompress_ac21_inner(source, initial_offset, length, &mut padded);
         buffer.copy_from_slice(&padded[..buffer.len()]);
+        result
     } else {
-        decompress_ac21_inner(source, initial_offset, length, buffer);
+        decompress_ac21_inner(source, initial_offset, length, buffer)
     }
 }
 
 /// Inner decompression loop — caller guarantees `buffer.len() >= 32`.
-fn decompress_ac21_inner(source: &[u8], initial_offset: u32, length: u32, buffer: &mut [u8]) {
+fn decompress_ac21_inner(
+    source: &[u8],
+    initial_offset: u32,
+    length: u32,
+    buffer: &mut [u8],
+) -> Result<(), DxfError> {
     let mut source_offset: u32 = 0;
     let mut match_length: u32 = 0;
     let mut source_index = initial_offset;
-    let mut op_code: u32 = source[source_index as usize] as u32;
+    let mut op_code: u32 = next_byte(source, &mut source_index)?;
 
     let mut dest_index: u32 = 0;
-    let end_index = source_index + length;
-
-    source_index += 1;
+    let end_index = initial_offset.checked_add(length).ok_or_else(out_of_range)?;
 
     if source_index >= end_index {
-        return;
+        return Ok(());
     }
 
     // Handle initial opcode with upper nibble == 0x20
     if (op_code & 0xF0) == 0x20 {
-        source_index += 3;
-        match_length = source[source_index as usize - 1] as u32;
+        source_index = source_index.saturating_add(3);
+        match_length = u32::from(*source.get(source_index as usize - 1).ok_or_else(out_of_range)?);
         match_length &= 0x07;
     }
 
     while source_index < end_index {
         // Copy literal bytes
         if match_length == 0 {
-            read_literal_length(source, &mut source_index, &mut op_code, &mut match_length);
+            read_literal_length(source, &mut source_index, &mut op_code, &mut match_length)?;
         }
 
         copy_literal(
@@ -71,7 +106,7 @@ fn decompress_ac21_inner(source: &[u8], initial_offset: u32, length: u32, buffer
             buffer,
             &mut dest_index,
             match_length,
-        );
+        )?;
 
         if source_index >= end_index {
             break;
@@ -87,8 +122,9 @@ fn decompress_ac21_inner(source: &[u8], initial_offset: u32, length: u32, buffer
             &mut match_length,
             &mut op_code,
             &mut source_offset,
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// Copy literal bytes from source to destination using AC1021 byte reordering.
@@ -98,13 +134,22 @@ fn decompress_ac21_inner(source: &[u8], initial_offset: u32, length: u32, buffer
 ///
 /// For 32-byte chunks: groups of 8 bytes are reversed in order.
 /// For sub-32 chunks: each length (1–31) has a specific reordering pattern.
-fn copy_literal(src: &[u8], src_index: &mut u32, dst: &mut [u8], dst_index: &mut u32, length: u32) {
+fn copy_literal(
+    src: &[u8],
+    src_index: &mut u32,
+    dst: &mut [u8],
+    dst_index: &mut u32,
+    length: u32,
+) -> Result<(), DxfError> {
     let mut remaining = length;
 
     // Copy in chunks of 32 (with byte group reordering)
     while remaining >= 32 {
         let si = *src_index as usize;
         let di = *dst_index as usize;
+        if !fits(src.len(), si, 32) || !fits(dst.len(), di, 32) {
+            return Err(out_of_range());
+        }
 
         // Reverse the 4 groups of 8 bytes within the 32-byte block
         copy_4b(src, si + 24, dst, di);
@@ -124,13 +169,18 @@ fn copy_literal(src: &[u8], src_index: &mut u32, dst: &mut [u8], dst_index: &mut
     if remaining > 0 {
         let si = *src_index as usize;
         let di = *dst_index as usize;
+        if !fits(src.len(), si, remaining as usize) || !fits(dst.len(), di, remaining as usize) {
+            return Err(out_of_range());
+        }
         copy_n_reordered(src, si, dst, di, remaining as usize);
         *src_index += remaining;
         *dst_index += remaining;
     }
+    Ok(())
 }
 
 /// Process compressed back-reference chunks.
+#[allow(clippy::too_many_arguments)]
 fn copy_decompressed_chunks(
     src: &[u8],
     end_index: u32,
@@ -140,17 +190,16 @@ fn copy_decompressed_chunks(
     match_length: &mut u32,
     op_code: &mut u32,
     source_offset: &mut u32,
-) -> u32 {
+) -> Result<u32, DxfError> {
     *match_length = 0;
-    *op_code = src[*source_index as usize] as u32;
-    *source_index += 1;
+    *op_code = next_byte(src, source_index)?;
 
-    read_instructions(src, source_index, op_code, match_length, source_offset);
+    read_instructions(src, source_index, op_code, match_length, source_offset)?;
 
     loop {
         // Copy from already-decompressed data (back-reference)
         copy_back_reference(dst, dest_index, *match_length, *source_offset);
-        dest_index += *match_length;
+        dest_index = dest_index.saturating_add(*match_length);
 
         *match_length = *op_code & 0x07;
 
@@ -158,8 +207,7 @@ fn copy_decompressed_chunks(
             break;
         }
 
-        *op_code = src[*source_index as usize] as u32;
-        *source_index += 1;
+        *op_code = next_byte(src, source_index)?;
 
         if (*op_code >> 4) == 0 {
             break;
@@ -169,10 +217,10 @@ fn copy_decompressed_chunks(
             *op_code &= 15;
         }
 
-        read_instructions(src, source_index, op_code, match_length, source_offset);
+        read_instructions(src, source_index, op_code, match_length, source_offset)?;
     }
 
-    dest_index
+    Ok(dest_index)
 }
 
 /// Decode instruction opcodes to determine match length and back-reference offset.
@@ -182,43 +230,33 @@ fn read_instructions(
     op_code: &mut u32,
     length: &mut u32,
     source_offset: &mut u32,
-) {
+) -> Result<(), DxfError> {
     match *op_code >> 4 {
         0 => {
             *length = (*op_code & 0x0F) + 0x13;
-            *source_offset = buffer[*source_index as usize] as u32;
-            *source_index += 1;
-            *op_code = buffer[*source_index as usize] as u32;
-            *source_index += 1;
+            *source_offset = next_byte(buffer, source_index)?;
+            *op_code = next_byte(buffer, source_index)?;
             *length = (*op_code >> 3 & 0x10) + *length;
             *source_offset = ((*op_code & 0x78) << 5) + 1 + *source_offset;
         }
         1 => {
             *length = (*op_code & 0x0F) + 3;
-            *source_offset = buffer[*source_index as usize] as u32;
-            *source_index += 1;
-            *op_code = buffer[*source_index as usize] as u32;
-            *source_index += 1;
+            *source_offset = next_byte(buffer, source_index)?;
+            *op_code = next_byte(buffer, source_index)?;
             *source_offset = ((*op_code & 0xF8) << 5) + 1 + *source_offset;
         }
         2 => {
-            *source_offset = buffer[*source_index as usize] as u32;
-            *source_index += 1;
-            *source_offset =
-                ((buffer[*source_index as usize] as u32) << 8 & 0xFF00) | *source_offset;
-            *source_index += 1;
+            *source_offset = next_byte(buffer, source_index)?;
+            *source_offset = (next_byte(buffer, source_index)? << 8 & 0xFF00) | *source_offset;
             *length = *op_code & 7;
 
             if (*op_code & 8) == 0 {
-                *op_code = buffer[*source_index as usize] as u32;
-                *source_index += 1;
+                *op_code = next_byte(buffer, source_index)?;
                 *length = (*op_code & 0xF8) + *length;
             } else {
                 *source_offset += 1;
-                *length = ((buffer[*source_index as usize] as u32) << 3) + *length;
-                *source_index += 1;
-                *op_code = buffer[*source_index as usize] as u32;
-                *source_index += 1;
+                *length = (next_byte(buffer, source_index)? << 3) + *length;
+                *op_code = next_byte(buffer, source_index)?;
                 *length = ((*op_code & 0xF8) << 8) + *length + 0x100;
             }
         }
@@ -226,34 +264,38 @@ fn read_instructions(
             // Default: compact match (upper nibble 3–15)
             *length = *op_code >> 4;
             *source_offset = *op_code & 0x0F;
-            *op_code = buffer[*source_index as usize] as u32;
-            *source_index += 1;
+            *op_code = next_byte(buffer, source_index)?;
             *source_offset = ((*op_code & 0xF8) << 1) + *source_offset + 1;
         }
     }
+    Ok(())
 }
 
 /// Read the literal run length from the opcode stream.
-fn read_literal_length(buffer: &[u8], source_index: &mut u32, op_code: &mut u32, length: &mut u32) {
+fn read_literal_length(
+    buffer: &[u8],
+    source_index: &mut u32,
+    op_code: &mut u32,
+    length: &mut u32,
+) -> Result<(), DxfError> {
     *length = *op_code + 8;
     if *length == 0x17 {
-        let mut n = buffer[*source_index as usize] as u32;
-        *source_index += 1;
+        let mut n = next_byte(buffer, source_index)?;
         *length += n;
 
         if n == 0xFF {
             loop {
-                n = buffer[*source_index as usize] as u32;
-                *source_index += 1;
-                n |= (buffer[*source_index as usize] as u32) << 8;
-                *source_index += 1;
-                *length += n;
+                n = next_byte(buffer, source_index)?;
+                n |= next_byte(buffer, source_index)? << 8;
+                // A run of 0xFFFF groups can add up past u32 (damaged data); the copy then fails its range check.
+                *length = length.saturating_add(n);
                 if n != 0xFFFF {
                     break;
                 }
             }
         }
     }
+    Ok(())
 }
 
 /// Copy bytes from a back-reference in the output buffer.
@@ -262,7 +304,7 @@ fn copy_back_reference(dst: &mut [u8], dst_index: u32, length: u32, src_offset: 
         return;
     }
     let mut initial_index = dst_index - src_offset;
-    let max_index = initial_index + length;
+    let max_index = initial_index.saturating_add(length);
 
     let mut di = dst_index;
     while initial_index < max_index {
@@ -494,7 +536,7 @@ mod tests {
         let source = [0u8; 1];
         let mut buffer = [0u8; 16];
         // Single opcode byte, length = 0 → no output
-        decompress_ac21(&source, 0, 0, &mut buffer);
+        decompress_ac21(&source, 0, 0, &mut buffer).unwrap();
         assert!(buffer.iter().all(|&b| b == 0));
     }
 

@@ -194,8 +194,12 @@ fn order_listed<T>(items: &mut Vec<T>, order: &[u64], handle: impl Fn(&T) -> u64
 /// The child handles an R2004+ polyline lists, in drawing order. Records
 /// arrive in handle order, so a vertex inserted later would otherwise land
 /// at the end of the outline.
+///
+/// The count is the record's number: a count the record's remaining bits cannot hold (a damaged one) invalidates the
+/// record, as reading past its end does in ACadSharp.
 fn read_owned_vertex_handles(reader: &mut DwgMergedReader, owned_count: i32) -> Vec<u64> {
-    (0..owned_count.clamp(0, 1 << 24)).map(|_| reader.read_handle()).collect()
+    let count = reader.checked_count(i64::from(owned_count.max(0)));
+    (0..count).map(|_| reader.read_handle()).collect()
 }
 
 /// Pending polyline entities awaiting vertex assembly.
@@ -2750,11 +2754,12 @@ impl DwgDocumentBuilder {
             occupied: &mut std::collections::HashSet<Handle>,
             next_handle: &mut u64,
         ) -> Handle {
-            while occupied.contains(&Handle::new(*next_handle)) {
-                *next_handle += 1;
+            // A seed read from the file can be anywhere up to u64::MAX: wrap, and never issue the null handle.
+            while *next_handle == 0 || occupied.contains(&Handle::new(*next_handle)) {
+                *next_handle = next_handle.wrapping_add(1);
             }
             let handle = Handle::new(*next_handle);
-            *next_handle += 1;
+            *next_handle = next_handle.wrapping_add(1);
             occupied.insert(handle);
             handle
         }
@@ -4552,7 +4557,8 @@ impl DwgDocumentBuilder {
                         e.ambient_color = data.ambient_color;
                     }
                     // Read frozen layer handles
-                    for _ in 0..data.frozen_layer_count {
+                    // The count is the record's number: one the remaining bits cannot hold invalidates the record.
+                    for _ in 0..reader.checked_count(i64::from(data.frozen_layer_count.max(0))) {
                         let h = reader.read_handle();
                         if h != 0 {
                             e.frozen_layers.push(Handle::new(h));
@@ -7281,7 +7287,8 @@ impl DwgDocumentBuilder {
                                     let auto_height = reader.read_bit();
                                     let flow_reversed = reader.read_bit();
                                     let heights = if !auto_height && column_type == 2 {
-                                        (0..num_heights.max(0))
+                                        // A count the remaining bits cannot hold invalidates the record.
+                                        (0..reader.checked_count(i64::from(num_heights.max(0))))
                                             .map(|_| reader.read_bit_double())
                                             .collect()
                                     } else {
@@ -7400,7 +7407,9 @@ impl DwgDocumentBuilder {
                                         let flow_reversed = reader.read_bit();
                                         let heights =
                                             if !auto_height && column_type == 2 {
-                                                (0..num_heights.max(0))
+                                                (0..reader.checked_count(i64::from(
+                                                    num_heights.max(0),
+                                                )))
                                                     .map(|_| {
                                                         reader.read_bit_double()
                                                     })
@@ -9025,5 +9034,23 @@ mod block_marker_name_retention_tests {
         };
         assert_eq!(marker.name, "*U24");
         assert_eq!(marker.source_name.as_deref(), Some("*U25"));
+    }
+}
+
+#[cfg(test)]
+mod r7_count_tests {
+    use super::*;
+    use crate::types::DxfVersion;
+
+    /// R7 review: an R2004+ polyline's owned-vertex count is the record's number; 2^24 - 1 in a record of 32 bytes
+    /// read 16.7 million handles (134 MB per record). A count the record's bits cannot hold invalidates the record.
+    #[test]
+    fn owned_vertex_count_is_bounded_by_the_record() {
+        let mut reader = DwgMergedReader::new(vec![0u8; 32], DxfVersion::AC1032, 0);
+        assert!(read_owned_vertex_handles(&mut reader, (1 << 24) - 1).is_empty());
+        assert!(reader.has_error());
+        let mut reader = DwgMergedReader::new(vec![0u8; 32], DxfVersion::AC1032, 0);
+        assert_eq!(read_owned_vertex_handles(&mut reader, 3).len(), 3);
+        assert!(read_owned_vertex_handles(&mut reader, -1).is_empty());
     }
 }
