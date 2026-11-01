@@ -661,6 +661,13 @@ impl ClassDxfFields {
             .unwrap_or_default()
     }
 
+    /// `true` while a value of any of `codes` is left: a list item none of whose groups the file states is not read
+    /// (the declared count of a damaged file would otherwise push defaults: a nested pair of counts of 100,000 is ten
+    /// billion items from a few bytes).
+    fn any(&self, section: &str, codes: &[i32]) -> bool {
+        codes.iter().any(|code| self.has(section, *code))
+    }
+
     fn has(&self, section: &str, code: i32) -> bool {
         self.sections
             .get(section)
@@ -776,6 +783,9 @@ fn class_dxf_point_cloud_ramps(
         let class_version = fields.i16(section, 70);
         let mut colors = Vec::new();
         for _ in 0..fields.i32(section, 90).max(0).min(100_000) {
+            if !fields.any(section, &[91, 290]) {
+                break;
+            }
             let color = fields.i32(section, 91);
             colors.push(crate::objects::PointCloudRampColor {
                 color,
@@ -801,6 +811,9 @@ fn class_dxf_hatch_scale_context(fields: &mut ClassDxfFields) -> crate::objects:
         let offset = Vector2::new(fields.f64(section, 45), fields.f64(section, 46));
         let mut dash_lengths = Vec::new();
         for _ in 0..fields.i32(section, 79).max(0).min(10_000) {
+            if !fields.has(section, 49) {
+                break;
+            }
             dash_lengths.push(fields.f64(section, 49));
         }
         pattern_lines.push(crate::entities::HatchPatternLine {
@@ -6383,6 +6396,9 @@ impl<'a> SectionReader<'a> {
                     let handle = fields.handle(section, 340);
                     let mut entries = Vec::new();
                     for _ in 0..fields.i32(section, 91).max(0).min(100_000) {
+                        if !fields.any(section, &[350, 3]) {
+                            break;
+                        }
                         entries.push(ContextDataEntry {
                             item: fields.handle(section, 350),
                             name: fields.string(section, 3),
@@ -6472,7 +6488,20 @@ impl<'a> SectionReader<'a> {
                         })?;
                     let name = fields.string(section, 2);
                     let mut rows = Vec::new();
+                    // The group of this column's cells: a row the file states no value for is not read.
+                    let value_code = match cell_type {
+                        DataTableCellType::Integer => 93,
+                        DataTableCellType::Double => 40,
+                        DataTableCellType::Text => 3,
+                        DataTableCellType::Point => 10,
+                        DataTableCellType::ObjectId => 331,
+                        DataTableCellType::HardOwnerId => 360,
+                        _ => unreachable!("cell type checked above"),
+                    };
                     for _ in 0..row_count.max(0).min(100_000) {
+                        if !fields.has(section, value_code) {
+                            break;
+                        }
                         let mut value = DataTableValue::default();
                         match cell_type {
                             DataTableCellType::Integer => value.integer = fields.i32(section, 93),
@@ -6796,6 +6825,9 @@ impl<'a> SectionReader<'a> {
                     let sketch_version = fields.i32(section, 90);
                     let mut references = Vec::new();
                     for _ in 0..fields.i32(section, 90).max(0).min(100_000) {
+                        if !fields.any(section, &[330, 290]) {
+                            break;
+                        }
                         references.push(ViewRepSketchReference {
                             object: fields.handle(section, 330),
                             flag: fields.bool(section, 290),
@@ -6893,6 +6925,9 @@ impl<'a> SectionReader<'a> {
                     let path_count = fields.i16(section, 70).max(0).min(10_000) as usize;
                     let mut objects = Vec::with_capacity(path_count.saturating_add(1));
                     for _ in 0..=path_count {
+                        if !fields.has(section, 330) {
+                            break;
+                        }
                         objects.push(fields.handle(section, 330));
                     }
                     section_sketches.push(ViewRepObjectPath {
@@ -10081,7 +10116,8 @@ impl<'a> SectionReader<'a> {
                         // A NEGATIVE colour index is how DXF encodes an OFF
                         // layer — code 70 has no off bit (#314).
                         layer.flags.off = color_index < 0;
-                        layer.color = Color::from_index(color_index.abs());
+                        // i16::MIN has no absolute value (ACadSharp's Math.Abs throws there).
+                        layer.color = Color::from_index(color_index.saturating_abs());
                     }
                 }
                 // True color (code 420): packed 24-bit RGB, overrides the ACI
@@ -17939,11 +17975,13 @@ impl<'a> SectionReader<'a> {
                 1004 => {
                     if let Some(ref mut record) = current_record {
                         // Parse hex string to bytes
-                        let bytes: Vec<u8> = (0..pair.value_string.len())
-                            .step_by(2)
-                            .filter_map(|i| {
-                                let end = (i + 2).min(pair.value_string.len());
-                                u8::from_str_radix(&pair.value_string[i..end], 16).ok()
+                        // Byte pairs, not string slices: a damaged value can hold a multi-byte character, and a
+                        // slice inside it panics.
+                        let text = pair.value_string.as_bytes();
+                        let bytes: Vec<u8> = text
+                            .chunks(2)
+                            .filter_map(|digits| {
+                                u8::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()
                             })
                             .collect();
                         record.add_value(XDataValue::BinaryData(bytes));

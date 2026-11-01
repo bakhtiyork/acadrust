@@ -139,7 +139,8 @@ fn read_smc(data: &[u8]) -> (i64, usize) {
 
     let signed_value = value as i64;
     if (last_byte & 0x40) != 0 {
-        (-signed_value, i)
+        // 2^63 (damaged data) has no positive i64: C#'s unchecked negation wraps, as here.
+        (signed_value.wrapping_neg(), i)
     } else {
         (signed_value, i)
     }

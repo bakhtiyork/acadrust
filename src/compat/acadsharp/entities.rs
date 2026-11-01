@@ -3272,7 +3272,8 @@ fn collect_viewport(doc: &CadDocument, value: &crate::entities::Viewport, out: &
         fields
             .iter()
             .find(|(key, _)| *key == name)
-            .and_then(|(_, v)| v.as_f64())
+            // A non-finite size (a damaged file) is a string in the dump, not a JSON number.
+            .and_then(|(_, v)| super::number_value(v))
             .unwrap()
     };
     let height = get_number("Height");

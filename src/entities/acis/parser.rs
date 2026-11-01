@@ -274,19 +274,20 @@ impl SatParser {
                 Some(tok) if looks_like_negative_index(tok) => {
                     let idx_str = tokenizer.next_raw_token().unwrap();
                     let idx: i32 = idx_str.parse().unwrap_or(*auto_index);
-                    let idx = idx.abs();
-                    *auto_index = idx + 1;
+                    // A damaged index can be i32::MIN or i32::MAX.
+                    let idx = idx.saturating_abs();
+                    *auto_index = idx.saturating_add(1);
                     idx
                 }
                 _ => {
                     let idx = *auto_index;
-                    *auto_index += 1;
+                    *auto_index = auto_index.saturating_add(1);
                     idx
                 }
             }
         } else {
             let idx = *auto_index;
-            *auto_index += 1;
+            *auto_index = auto_index.saturating_add(1);
             idx
         };
 
@@ -532,9 +533,14 @@ impl<'a> SatTokenizer<'a> {
             let raw = self.next_raw_token()?;
             let len: usize = raw.parse().unwrap_or(0);
             self.skip_whitespace();
-            if self.pos + len <= self.text.len() {
-                let s = &self.text[self.pos..self.pos + len];
-                self.pos += len;
+            // The count is a number of the file (bytes): a damaged one can pass usize or end inside a character,
+            // and the string then ends after that character.
+            if let Some(mut end) = self.pos.checked_add(len).filter(|end| *end <= self.text.len()) {
+                while !self.text.is_char_boundary(end) {
+                    end += 1;
+                }
+                let s = &self.text[self.pos..end];
+                self.pos = end;
                 return Some(SatToken::String(s.to_string()));
             } else {
                 // Read remaining as string
@@ -716,10 +722,10 @@ fn read_counted_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
         *pos += 1;
     }
 
-    // Read exactly `len` bytes
-    if *pos + len <= bytes.len() {
-        let s = std::str::from_utf8(&bytes[*pos..*pos + len]).ok()?;
-        *pos += len;
+    // Read exactly `len` bytes (a damaged count can pass usize)
+    if let Some(end) = pos.checked_add(len).filter(|end| *end <= bytes.len()) {
+        let s = std::str::from_utf8(&bytes[*pos..end]).ok()?;
+        *pos = end;
         Some(s.to_string())
     } else {
         let s = std::str::from_utf8(&bytes[*pos..]).ok()?;
@@ -758,10 +764,10 @@ fn read_legacy_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
         *pos += 1;
     }
 
-    // Read exactly `len` bytes
-    if *pos + len <= bytes.len() {
-        let s = std::str::from_utf8(&bytes[*pos..*pos + len]).ok()?;
-        *pos += len;
+    // Read exactly `len` bytes (a damaged count can pass usize)
+    if let Some(end) = pos.checked_add(len).filter(|end| *end <= bytes.len()) {
+        let s = std::str::from_utf8(&bytes[*pos..end]).ok()?;
+        *pos = end;
         Some(s.to_string())
     } else {
         let s = std::str::from_utf8(&bytes[*pos..]).ok()?;
@@ -777,6 +783,30 @@ fn read_legacy_string(bytes: &[u8], pos: &mut usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R7 review (fuzz-dxf.py --impl rust --seed 3, panic@src/entities/acis/parser.rs:536 on a mutant of
+    /// sample_AC1021_binary.dxf): a counted string `@<len>` whose byte count ends inside a multi-byte character, and
+    /// one whose count passes usize, panicked (a string slice off a character boundary, `pos + len` overflow); so
+    /// did a record index of i32::MIN (`abs`, then `+ 1`).
+    #[test]
+    fn counted_strings_of_damaged_lengths_do_not_panic() {
+        for record in [
+            "-1 body $-1 -1 @1 \u{e9}x $-1 #",
+            "-1 body $-1 -1 @18446744073709551615 abc $-1 #",
+            "-2147483648 body $-1 -1 $-1 #",
+        ] {
+            let sat = format!(
+                "700 0 1 0\n@8 acadrust @8 ACIS 7.0 @24 Thu Jan 01 00:00:00 2023\n1e-06 9.9999999999999995e-07\n\
+                 -0 asmheader $-1 -1 @12 700 7 0 0 @5 ACIS @3 7.0 @24 Thu Jan 01 00:00:00 2023 #\n{record}\nEnd-of-ACIS-data\n"
+            );
+            let document = SatDocument::parse(&sat).expect("the SAT text is read");
+            assert_eq!(document.records.len(), 2, "{record}");
+        }
+        let mut pos = 0;
+        assert_eq!(read_counted_string(b"@18446744073709551615 abc", &mut pos).as_deref(), Some("abc"));
+        let mut pos = 0;
+        assert_eq!(read_legacy_string(b"18446744073709551615 abc", &mut pos).as_deref(), Some("abc"));
+    }
 
     #[test]
     fn test_parse_header_line() {

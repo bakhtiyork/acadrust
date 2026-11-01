@@ -102,6 +102,15 @@ pub fn number(n: f64) -> Value {
         json!(n)
     }
 }
+/// The number a [`number`] value holds (the dump writes NaN and the infinities as strings).
+pub(super) fn number_value(value: &Value) -> Option<f64> {
+    match value.as_str() {
+        Some("NaN") => Some(f64::NAN),
+        Some("Infinity") => Some(f64::INFINITY),
+        Some("-Infinity") => Some(f64::NEG_INFINITY),
+        _ => value.as_f64(),
+    }
+}
 pub(super) fn vec2(v: Vector2) -> Value {
     json!([number(v.x), number(v.y)])
 }
@@ -342,9 +351,39 @@ pub fn read_document_file(path: &Path) -> Result<CadDocument, String> {
     read_file(path, &reader)
 }
 
+std::thread_local! {
+    /// `file:line` of the last panic on this thread (see [`record_panic_locations`]).
+    static PANIC_LOCATION: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `file:line` of the last panic on any thread: a panic of a worker thread reaches the reading thread as the payload
+/// only (rayon resumes it there).
+static LAST_PANIC_LOCATION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Installs (once) a panic hook that records the location of every panic and then runs the previous hook, so the
+/// panic message still reaches stderr: the read's error can name where the reader panicked.
+fn record_panic_locations() {
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some(location) = info.location() {
+                let location = format!("{}:{}", location.file(), location.line());
+                PANIC_LOCATION.with(|cell| *cell.borrow_mut() = Some(location.clone()));
+                if let Ok(mut last) = LAST_PANIC_LOCATION.lock() {
+                    *last = Some(location);
+                }
+            }
+            previous(info);
+        }));
+    });
+}
+
 fn read_file(path: &Path, reader: &str) -> Result<CadDocument, String> {
     use crate::io::dwg::{DwgReadOptions, DwgReader};
     use crate::io::dxf::{DxfReader, DxfReaderConfiguration};
+    record_panic_locations();
+    PANIC_LOCATION.with(|cell| cell.borrow_mut().take());
     let result = std::panic::catch_unwind(|| -> crate::Result<CadDocument> {
         match reader {
             "dxf" => DxfReader::from_file(path)?
@@ -366,13 +405,36 @@ fn read_file(path: &Path, reader: &str) -> Result<CadDocument, String> {
             let kind = debug.split(['(', ' ', '{']).next().unwrap_or("DxfError");
             Err(format!("{kind}: {e}"))
         }
-        Err(payload) => {
-            let message = payload
-                .downcast_ref::<String>()
-                .map(String::as_str)
-                .or_else(|| payload.downcast_ref::<&str>().copied())
-                .unwrap_or("reader panicked");
-            Err(format!("Panic: {message}"))
-        }
+        Err(payload) => Err(panic_error(payload.as_ref())),
+    }
+}
+
+/// The error of a read that panicked: `Panic at <file:line>: <message>` (the location the hook of
+/// [`record_panic_locations`] kept).
+fn panic_error(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("reader panicked");
+    let location = PANIC_LOCATION
+        .with(|cell| cell.borrow_mut().take())
+        .or_else(|| LAST_PANIC_LOCATION.lock().ok().and_then(|mut last| last.take()))
+        .unwrap_or_else(|| "an unknown location".to_string());
+    format!("Panic at {location}: {message}")
+}
+
+#[cfg(test)]
+mod panic_error_tests {
+    /// R7: a panic the failsafe read catches becomes an error that names the panic's `file:line`.
+    #[test]
+    fn a_caught_panic_names_its_location() {
+        super::record_panic_locations();
+        let line = line!() + 1;
+        let payload = std::panic::catch_unwind(|| panic!("index out of range")).unwrap_err();
+        assert_eq!(
+            super::panic_error(payload.as_ref()),
+            format!("Panic at {}:{line}: index out of range", file!())
+        );
     }
 }

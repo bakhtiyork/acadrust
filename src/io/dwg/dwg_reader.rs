@@ -114,8 +114,135 @@ mod template_tests {
     }
 }
 
+#[cfg(test)]
+mod ac21_page_size_tests {
+    use super::*;
+
+    fn info(encoding: u64, page_compressed: u64, page_decompressed: u64) -> DwgFileHeaderInfo {
+        DwgFileHeaderInfo {
+            version_string: "AC1021".to_string(),
+            version: DwgVersion::AC21,
+            acad_maintenance_version: 0,
+            preview_address: 0,
+            dwg_version: 0,
+            app_release_version: 0,
+            code_page: 0,
+            security_type: 0,
+            summary_info_addr: 0,
+            vba_project_addr: 0,
+            ac21_metadata: None,
+            ac21_header_crc: None,
+            ac21_unknown_key: None,
+            ac21_compressed_data_crc: None,
+            page_records: HashMap::from([(1, (0, 0x400))]),
+            section_descriptors: vec![DwgSectionInfo {
+                name: "AcDb:Header".to_string(),
+                compressed_size: 0x100,
+                decompressed_size: 0x7400,
+                encrypted: 0,
+                hash_code: 0,
+                encoding,
+                page_count: 1,
+                pages: vec![DwgPageCrcInfo {
+                    page_number: 1,
+                    offset: 0,
+                    size: 0x400,
+                    decompressed_size: page_decompressed,
+                    compressed_size: page_compressed,
+                    checksum: 0,
+                    crc: 0,
+                }],
+            }],
+            section_locators: HashMap::new(),
+            objects_base_offset: 0,
+            is_ac18_format: false,
+        }
+    }
+
+    /// R7, abort `memory allocation of 127543348822022 bytes failed` (fuzz-dwg.py --impl rust --seed 1 on
+    /// sample_AC1021.dwg): the decoded size of an R2007 page is a 64-bit number of the section map, and the reader
+    /// allocated it (a zeroed buffer for a stored page, the LZ77 output for a compressed one) before reading a byte.
+    /// The page is an error (strict) or a skipped page (failsafe), never an allocation of 2^47 bytes.
+    #[test]
+    fn a_page_size_of_2_pow_47_is_not_allocated() {
+        for (encoding, compressed) in [(1, 0x100), (4, 0x100)] {
+            for failsafe in [false, true] {
+                let options = if failsafe { DwgReadOptions::failsafe() } else { DwgReadOptions::default() };
+                let mut reader = DwgReader::from_stream_with_options(Cursor::new(vec![0u8; 0x1000]), options);
+                let read = reader.get_section_buffer("AcDb:Header", &info(encoding, compressed, 1 << 47));
+                assert_eq!(read.is_ok(), failsafe, "encoding {encoding}, failsafe {failsafe}: {read:?}");
+            }
+        }
+        assert!(decode_ac21_page(&[0u8; 255], 251, 1, 251, 8, 1 << 47).is_err());
+    }
+
+    /// R7 review: a page-map offset of -1 (u64::MAX; the running offset wraps after a page size of -1) overflowed
+    /// `0x480 + offset` before the seek. The page is an error (strict) or a skipped page (failsafe).
+    #[test]
+    fn a_page_offset_past_u64_is_an_error() {
+        for encoding in [1, 4] {
+            for failsafe in [false, true] {
+                let options = if failsafe { DwgReadOptions::failsafe() } else { DwgReadOptions::default() };
+                let mut reader = DwgReader::from_stream_with_options(Cursor::new(vec![0u8; 0x1000]), options);
+                let mut info = info(encoding, 0x100, 0x100);
+                info.page_records.insert(1, (-1, 0x400));
+                let read = reader.get_section_buffer("AcDb:Header", &info);
+                assert_eq!(read.is_ok(), failsafe, "encoding {encoding}, failsafe {failsafe}: {read:?}");
+            }
+        }
+        assert!(ac21_file_offset(u64::MAX).is_err());
+    }
+
+    /// R7 review: the decoded size of an R2004 page map or section map is the system page header's i32; a negative
+    /// one left the LZ77 output unbounded (ACadSharp's `new byte[size]` throws). Both are errors now.
+    #[test]
+    fn a_negative_system_page_size_is_an_error() {
+        let mut page = Vec::new();
+        for value in [0x4163_0e3bu32, (-1i32) as u32, 4, 2, 0] {
+            page.extend(value.to_le_bytes());
+        }
+        page.extend([0u8; 4]);
+        let mut reader = DwgReader::from_stream(Cursor::new(page.clone()));
+        let mut header = info(4, 0, 0);
+        assert!(reader.read_page_map_ac18(&mut header, 0).is_err());
+        let mut reader = DwgReader::from_stream(Cursor::new(page));
+        header.page_records.insert(1, (0, 0x400));
+        assert!(reader.read_section_map_ac18(&mut header, 1).is_err());
+    }
+
+    /// R7 review: AcDs record offsets that go back (0, 2^32 - 1, 0, ...) made every other record's region the whole
+    /// segment, and each region was scanned for the modeler magic: O(records x segment). Offsets are cumulative; one
+    /// below an earlier one is not a region.
+    #[test]
+    fn acds_record_offsets_that_go_back_are_not_scanned_again() {
+        let records = 4_000usize;
+        let mut buf = vec![0u8; 4 << 20];
+        buf[..8].copy_from_slice(&[0xAC, 0xD5, 0x5F, 0x64, 0x61, 0x74, 0x61, 0x5F]);
+        let len = buf.len() as u64;
+        buf[16..24].copy_from_slice(&len.to_le_bytes());
+        for k in 0..records {
+            let p = 48 + k * 20;
+            buf[p..p + 4].copy_from_slice(&0x14u32.to_le_bytes());
+            buf[p + 8..p + 12].copy_from_slice(&(k as u32 + 1).to_le_bytes());
+            let offset = if k % 2 == 0 { 0 } else { u32::MAX };
+            buf[p + 16..p + 20].copy_from_slice(&offset.to_le_bytes());
+        }
+        let started = std::time::Instant::now();
+        assert!(extract_acds_record_blobs(&buf, &HashSet::new()).is_empty());
+        assert!(started.elapsed().as_secs() < 10, "took {:?}", started.elapsed());
+    }
+}
+
 /// AC1021 file header offset (data pages start after this)
 const AC21_FILE_HEADER_SIZE: u64 = 0x480;
+
+/// The file position of an R2007 page at `page_offset` (a number of the page map, so a damaged one can lie past the
+/// end of any file).
+fn ac21_file_offset(page_offset: u64) -> Result<u64, DxfError> {
+    AC21_FILE_HEADER_SIZE
+        .checked_add(page_offset)
+        .ok_or_else(|| DxfError::Parse(format!("AC21 page offset {page_offset:#X} is out of range")))
+}
 
 /// The largest section buffer a read allocates from a size stated in the file: the length limit of a .NET `byte[]`
 /// (0x7FFFFFC7), which is what ACadSharp can hold. A larger number is a damaged header, not a drawing.
@@ -432,11 +559,16 @@ fn extract_acds_record_blobs(buf: &[u8], modeler_handles: &HashSet<u64>) -> Vec<
             .and_then(|units| seg.checked_add(units as usize * 16))
             .filter(|base| *base >= table_end && *base < seg_end);
         let base = aligned.unwrap_or(table_end);
+        // The offsets are cumulative: an offset below an earlier one (damaged data) would make regions overlap, and
+        // N overlapping regions of a whole segment are scanned in O(N x segment).
+        let mut floor = 0usize;
         for k in 0..recs.len() {
             let (handle, off) = recs[k];
             let region_start = base + off;
             let region_end = recs.get(k + 1).map_or(seg_end, |&(_, o)| base + o);
-            if region_start >= seg_end || region_end <= region_start {
+            let backwards = off < floor;
+            floor = floor.max(off);
+            if backwards || region_start >= seg_end || region_end <= region_start {
                 if modeler_handles.contains(&handle) {
                     orphan_handles.push((handle, seq)); // blob lives in an external segment
                 }
@@ -2128,7 +2260,8 @@ impl<R: Read + Seek> DwgReader<R> {
         let section_map_id = cursor.read_u32::<LittleEndian>()?;
 
         // The stored address is (actual - 0x100)
-        let page_map_address = page_map_address_stored + 0x100;
+        // The stored value is the file's (ACadSharp adds 0x100 to a `ulong`, unchecked): a damaged one wraps.
+        let page_map_address = page_map_address_stored.wrapping_add(0x100);
 
         info.is_ac18_format = true;
 
@@ -2173,6 +2306,15 @@ impl<R: Read + Seek> DwgReader<R> {
             return Err(DxfError::InvalidFormat(format!(
                 "Invalid AC18 page map compressed size: {}",
                 comp_size
+            )));
+        }
+        // The decoded size bounds the decompressor's output: a negative one (ACadSharp's `new byte[size]` throws)
+        // would leave it unbounded, and a few bytes of matches expand to gigabytes. A system page is a page: the
+        // data pages' limit applies.
+        if !(0..=100_000_000).contains(&decomp_size) {
+            return Err(DxfError::InvalidFormat(format!(
+                "Invalid AC18 page map decompressed size: {}",
+                decomp_size
             )));
         }
         let mut compressed = vec![0u8; comp_size as usize];
@@ -2253,6 +2395,15 @@ impl<R: Read + Seek> DwgReader<R> {
             return Err(DxfError::InvalidFormat(format!(
                 "Invalid AC18 section map compressed size: {}",
                 comp_size
+            )));
+        }
+        // The decoded size bounds the decompressor's output: a negative one (ACadSharp's `new byte[size]` throws)
+        // would leave it unbounded, and a few bytes of matches expand to gigabytes. A system page is a page: the
+        // data pages' limit applies.
+        if !(0..=100_000_000).contains(&decomp_size) {
+            return Err(DxfError::InvalidFormat(format!(
+                "Invalid AC18 section map decompressed size: {}",
+                decomp_size
             )));
         }
         let mut compressed = vec![0u8; comp_size as usize];
@@ -2660,8 +2811,7 @@ impl<R: Read + Seek> DwgReader<R> {
             ac21_page_layout(compressed_size, correction_factor, block_size)?;
 
         // Read encoded data from file
-        self.stream
-            .seek(SeekFrom::Start(AC21_FILE_HEADER_SIZE + page_offset))?;
+        self.stream.seek(SeekFrom::Start(ac21_file_offset(page_offset)?))?;
         let mut encoded_buffer = vec![0u8; read_length];
         let bytes_read = self.stream.read(&mut encoded_buffer)?;
         if bytes_read < read_length {
@@ -2887,9 +3037,8 @@ impl<R: Read + Seek> DwgReader<R> {
                 let payload = match info.page_records.get(&(page.page_number as i32)) {
                     Some(&(page_offset, _)) if encoding == 1 => {
                         let read = (|| -> Result<Vec<u8>, DxfError> {
-                            self.stream.seek(SeekFrom::Start(
-                                AC21_FILE_HEADER_SIZE + page_offset as u64,
-                            ))?;
+                            self.stream
+                                .seek(SeekFrom::Start(ac21_file_offset(page_offset as u64)?))?;
                             let mut bytes = vec![0u8; fill_size];
                             self.stream.read_exact(&mut bytes)?;
                             Ok(bytes)
@@ -2904,9 +3053,9 @@ impl<R: Read + Seek> DwgReader<R> {
                         match ac21_page_layout(page.compressed_size, 1, block_size) {
                             Ok((total_size, factor, read_length)) => {
                                 let read = (|| -> Result<Vec<u8>, DxfError> {
-                                    self.stream.seek(SeekFrom::Start(
-                                        AC21_FILE_HEADER_SIZE + page_offset as u64,
-                                    ))?;
+                                    self.stream.seek(SeekFrom::Start(ac21_file_offset(
+                                        page_offset as u64,
+                                    )?))?;
                                     let mut bytes = vec![0u8; read_length];
                                     let read = self.stream.read(&mut bytes)?;
                                     bytes[read..].fill(0);

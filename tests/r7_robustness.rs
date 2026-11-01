@@ -30,6 +30,29 @@ FFFFFFFFFFFFFFFF\n  0\nENDBLK\n  0\nENDSEC\n  0\nEOF\n";
     let first = document.allocate_handle();
     let second = document.allocate_handle();
     assert!(!first.is_null() && !second.is_null());
+    // The counter cannot pass u64::MAX: the handles it issues are new ones, not the SEQEND's FFFFFFFFFFFFFFFF again.
+    assert_ne!(first, second);
+    for handle in [first, second] {
+        assert_ne!(handle.value(), u64::MAX);
+        assert!(document.get_entity(handle).is_none(), "{handle:?} is already in use");
+    }
+}
+
+/// The same allocator while the file is read: entities without a handle after one of FFFFFFFFFFFFFFFF each get a
+/// handle of their own (a saturating counter gave all of them FFFFFFFFFFFFFFFF).
+#[test]
+fn entities_after_a_handle_of_u64_max_get_distinct_handles() {
+    let dxf = "  0\nSECTION\n  2\nENTITIES\n  0\nLINE\n  5\nFFFFFFFFFFFFFFFF\n  8\n0\n 10\n0\n 20\n0\n 11\n1\n 21\n1\n\
+  0\nLINE\n  8\n0\n 10\n0\n 20\n0\n 11\n2\n 21\n2\n  0\nLINE\n  8\n0\n 10\n0\n 20\n0\n 11\n3\n 21\n3\n  0\nENDSEC\n  0\nEOF\n";
+    let mut document = failsafe_dxf(dxf).expect("the failsafe read returns a document");
+    let mut handles: Vec<u64> = document.entities().map(|e| e.common().handle.value()).collect();
+    assert_eq!(handles.len(), 3, "{handles:X?}");
+    handles.push(document.allocate_handle().value());
+    let count = handles.len();
+    handles.sort_unstable();
+    handles.dedup();
+    assert_eq!(handles.len(), count, "a handle was issued twice: {handles:X?}");
+    assert!(!handles.contains(&0));
 }
 
 /// Writes `bytes` under the test scratch directory and returns the ACadSharp dump of the failsafe read of it (the
@@ -913,4 +936,108 @@ fn ac18_section_size_is_bounded_by_the_pages_the_map_lists() {
     finishes_within(60, move || {
         let _ = acadrust::DwgReader::from_stream_with_options(Cursor::new(bytes), acadrust::DwgReadOptions::failsafe()).read();
     });
+}
+
+// ---- R7 review: siblings of the fuzz findings (audit of the readers for counts, sizes and arithmetic taken from
+// the file; synthetic inputs written here) ----
+
+/// The objects of a DXF document of one OBJECTS-section record (`record` is its group pairs, ASCII).
+fn read_objects(record: &str) -> CadDocument {
+    let dxf = format!("  0\nSECTION\n  2\nOBJECTS\n{record}  0\nENDSEC\n  0\nEOF\n");
+    failsafe_dxf(&dxf).expect("the failsafe read returns a document")
+}
+
+/// CONTEXTDATAMANAGER: a sub-manager entry count (91) of 100,000 with no entry after it pushed 100,000 default entries
+/// per sub-manager (nested counts of a few bytes each made billions). The list ends where the file's values do.
+#[test]
+fn nested_class_object_counts_end_with_the_values() {
+    use acadrust::objects::{ClassObjectData, ObjectType};
+    let mut record = String::from("  0\nCONTEXTDATAMANAGER\n  5\nC1\n100\nAcDbContextDataManager\n340\n0\n 90\n3\n");
+    for _ in 0..3 {
+        record.push_str("340\n0\n 91\n100000\n");
+    }
+    let document = read_objects(&record);
+    let manager = document
+        .objects
+        .values()
+        .find_map(|object| match object {
+            ObjectType::ClassObject(class) => match &class.data {
+                ClassObjectData::ContextDataManager(manager) => Some(manager.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the manager is read");
+    assert_eq!(manager.sub_managers.len(), 3);
+    assert!(manager.sub_managers.iter().all(|sub| sub.entries.is_empty()));
+}
+
+/// ASSOC2DCONSTRAINTGROUP: the root node's connection count (90) of 100,000 at the end of the record pushed 100,000
+/// default connections (and the node list of a damaged registry as many nodes). The record's end ends the lists.
+#[test]
+fn constraint_group_counts_end_with_the_record() {
+    use acadrust::objects::{AssociativeData, ObjectType};
+    let mut record =
+        String::from("  0\nACDBASSOC2DCONSTRAINTGROUP\n  5\nC2\n100\nAcDbAssoc2dConstraintGroup\n 90\n2\n 70\n0\n");
+    for _ in 0..3 {
+        record.push_str(" 10\n0.0\n 20\n0.0\n 30\n0.0\n");
+    }
+    record.push_str("360\n0\n 90\n0\n 90\n100000\n 90\n1\n 90\n100000\n");
+    let document = read_objects(&record);
+    let group = document
+        .objects
+        .values()
+        .find_map(|object| match object {
+            ObjectType::Associative(assoc) => match &assoc.data {
+                AssociativeData::ConstraintGroup(group) => Some(group.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the constraint group is read");
+    assert!(group.nodes.iter().map(|node| node.connections.len()).sum::<usize>() <= 1, "{:?}", group.nodes.len());
+}
+
+/// LAYER group 62 of -32768: `i16::abs` overflowed (ACadSharp's Math.Abs throws); the layer is read, off.
+#[test]
+fn layer_color_of_i16_min_is_read() {
+    let dxf = "  0\nSECTION\n  2\nTABLES\n  0\nTABLE\n  2\nLAYER\n 70\n1\n  0\nLAYER\n  2\nL1\n 70\n0\n 62\n-32768\n  6\nCONTINUOUS\n\
+  0\nENDTAB\n  0\nENDSEC\n  0\nEOF\n";
+    let document = failsafe_dxf(dxf).expect("the failsafe read returns a document");
+    let layer = document.layers.get("L1").expect("the layer is read");
+    assert!(layer.flags.off);
+}
+
+/// XDATA 1004 (binary chunk) holding a multi-byte character: the hex digits were sliced out of the string by byte
+/// offset, and a slice inside the character panicked.
+#[test]
+fn binary_xdata_with_a_multibyte_character_is_read() {
+    let dxf = "  0\nSECTION\n  2\nENTITIES\n  0\nLINE\n  5\n2B\n  8\n0\n 10\n0\n 20\n0\n 11\n1\n 21\n1\n1001\nAPP\n1004\nAéFF\n\
+  0\nENDSEC\n  0\nEOF\n";
+    let document = failsafe_dxf(dxf).expect("the failsafe read returns a document");
+    assert_eq!(document.entities().count(), 1);
+}
+
+/// A handle-map offset delta of -2^63 (nine 0x80 continuation bytes, then 0x41: value 2^63 with the sign bit): the
+/// negation overflowed. C#'s unchecked negation wraps, as the reader does.
+#[test]
+fn signed_modular_char_of_2_pow_63_does_not_overflow() {
+    use acadrust::io::dwg::dwg_stream_readers::handle_reader::read_handles;
+    let mut chunk = vec![0x00, 13, 0x01];
+    chunk.extend([0x80; 9]);
+    chunk.extend([0x41, 0x00, 0x00]);
+    let map = read_handles(&chunk).expect("a damaged chunk is read, not rejected");
+    assert_eq!(map.get(&1), Some(&i64::MIN));
+}
+
+/// panic@src/compat/acadsharp/entities.rs:3276 (`fuzz-dxf.py --impl rust --seed 3`, a mutant of
+/// sample_AC1027_ascii.dxf): a VIEWPORT size that is not finite (here 1e999, infinity) is written to the dump as the
+/// string "Infinity", and the view read it back as a JSON number to derive ScaleFactor and ViewWidth (None.unwrap()).
+#[cfg(feature = "acadsharp-compat")]
+#[test]
+fn viewport_of_infinite_size_is_dumped() {
+    let dxf = "  0\nSECTION\n  2\nENTITIES\n  0\nVIEWPORT\n  5\n2C\n100\nAcDbEntity\n 67\n1\n  8\n0\n100\nAcDbViewport\n\
+ 10\n0.0\n 20\n0.0\n 30\n0.0\n 40\n1e999\n 41\n1e999\n 68\n1\n 69\n2\n 12\n0.0\n 22\n0.0\n 45\n1e999\n  0\nENDSEC\n  0\nEOF\n";
+    let dump = dump_of("viewport-infinite.dxf", dxf.as_bytes());
+    assert!(dump.is_object());
 }
