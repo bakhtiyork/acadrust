@@ -241,6 +241,25 @@ fn read_dgn_stroke_pattern_dxf(
     let mut end_widths = take_all_dgn_properties(properties, subclass, 45);
     let mut width_modes = take_all_dgn_properties(properties, subclass, 94);
     let mut cap_modes = take_all_dgn_properties(properties, subclass, 95);
+    // A stroke the file states with no value at all is not allocated: the declared count (up to i32::MAX in a damaged
+    // file) is bounded by the longest value list.
+    let count = count.min(
+        [
+            dash.len(),
+            bypass.len(),
+            scalable.len(),
+            invert_origin.len(),
+            invert_end.len(),
+            lengths.len(),
+            start_widths.len(),
+            end_widths.len(),
+            width_modes.len(),
+            cap_modes.len(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0),
+    );
     let mut strokes = Vec::with_capacity(count);
     for _ in 0..count {
         strokes.push(DgnLsStroke {
@@ -10214,7 +10233,8 @@ impl<'a> SectionReader<'a> {
                         char::from_u32(pair.as_i16().unwrap_or(65) as u32).unwrap_or('A');
                 }
                 73 => {
-                    if let Some(count) = pair.as_i16() {
+                    // A negative count (a damaged file) must not wrap to a huge reserve.
+                    if let Some(count) = pair.as_i16().filter(|count| *count > 0) {
                         linetype.elements.reserve(count as usize);
                     }
                 }
@@ -12828,7 +12848,29 @@ impl<'a> SectionReader<'a> {
                 let mut angles = take_all_dgn_properties(&mut object.properties, subclass, 43);
                 let mut stroke_numbers =
                     take_all_dgn_properties(&mut object.properties, subclass, 96);
-                let mut symbols = Vec::with_capacity(count);
+                let mut symbols = Vec::new();
+                // A symbol the file states with no value at all is not allocated (the count can be i32::MAX).
+                let count = count.min(
+                    [
+                        symbol_handles.len(),
+                        partial.len(),
+                        clip.len(),
+                        stretch.len(),
+                        projected.len(),
+                        colors.len(),
+                        lineweights.len(),
+                        justify.len(),
+                        rotations.len(),
+                        vertices.len(),
+                        x_offsets.len(),
+                        y_offsets.len(),
+                        angles.len(),
+                        stroke_numbers.len(),
+                    ]
+                    .into_iter()
+                    .max()
+                    .unwrap_or(0),
+                );
                 for _ in 0..count {
                     symbols.push(DgnLsSymbolReference {
                         symbol_component: dgn_handle(take_first(&mut symbol_handles)),
@@ -16480,11 +16522,11 @@ impl<'a> SectionReader<'a> {
                     // Number of source boundary objects
                     let num_handles = pair.as_i32().unwrap_or(0);
                     for _ in 0..num_handles {
-                        if let Some(hp) = self.reader.read_pair()? {
-                            if hp.code == 330 {
-                                if let Some(h) = hp.as_handle() {
-                                    current_path_handles.push(Handle::new(h));
-                                }
+                        // The count is the file's claim (up to 2 billion): the end of the file ends the list.
+                        let Some(hp) = self.reader.read_pair()? else { break };
+                        if hp.code == 330 {
+                            if let Some(h) = hp.as_handle() {
+                                current_path_handles.push(Handle::new(h));
                             }
                         }
                     }
@@ -16501,16 +16543,16 @@ impl<'a> SectionReader<'a> {
                     // 10/20 codes read here can't be confused with edge vertices.
                     let n = pair.as_i32().unwrap_or(0).max(0);
                     for _ in 0..n {
-                        let mut x = 0.0;
                         let mut y = 0.0;
-                        if let Some(p) = self.reader.read_pair()? {
-                            if p.code == 10 {
-                                x = p.as_double().unwrap_or(0.0);
-                            } else {
+                        // The count is the file's claim (up to 2 billion): the end of the file ends the list.
+                        let x = match self.reader.read_pair()? {
+                            Some(p) if p.code == 10 => p.as_double().unwrap_or(0.0),
+                            Some(p) => {
                                 self.reader.push_back(p);
                                 break;
                             }
-                        }
+                            None => break,
+                        };
                         if let Some(p) = self.reader.read_pair()? {
                             if p.code == 20 {
                                 y = p.as_double().unwrap_or(0.0);
@@ -16794,30 +16836,31 @@ impl<'a> SectionReader<'a> {
 
         // Read knot values (code 40)
         for _ in 0..num_knots {
-            if let Some(p) = self.reader.read_pair()? {
-                if p.code == 40 {
-                    edge.knots.push(p.as_double().unwrap_or(0.0));
-                } else {
+            match self.reader.read_pair()? {
+                Some(p) if p.code == 40 => edge.knots.push(p.as_double().unwrap_or(0.0)),
+                Some(p) => {
                     self.reader.push_back(p);
                     break;
                 }
+                None => break,
             }
         }
 
         // Read control points (codes 10/20, with optional weight 42)
         for _ in 0..num_control_points {
-            let mut x = 0.0;
             let mut y = 0.0;
             let mut w = 1.0;
             // Read 10, 20
-            if let Some(p) = self.reader.read_pair()? {
-                if p.code == 10 {
-                    x = p.as_double().unwrap_or(0.0);
-                } else {
+            // The list ends where the file's data does: a pair that is not the x coordinate, or the end of the file,
+            // stops the loop (the count is the file's claim and can be 2 billion).
+            let x = match self.reader.read_pair()? {
+                Some(p) if p.code == 10 => p.as_double().unwrap_or(0.0),
+                Some(p) => {
                     self.reader.push_back(p);
-                    continue;
+                    break;
                 }
-            }
+                None => break,
+            };
             if let Some(p) = self.reader.read_pair()? {
                 if p.code == 20 {
                     y = p.as_double().unwrap_or(0.0);
@@ -16847,16 +16890,17 @@ impl<'a> SectionReader<'a> {
 
         // Read fit points (codes 11/21)
         for _ in 0..num_fit_points {
-            let mut x = 0.0;
             let mut y = 0.0;
-            if let Some(p) = self.reader.read_pair()? {
-                if p.code == 11 {
-                    x = p.as_double().unwrap_or(0.0);
-                } else {
+            // The list ends where the file's data does: a pair that is not the x coordinate, or the end of the file,
+            // stops the loop (the count is the file's claim and can be 2 billion).
+            let x = match self.reader.read_pair()? {
+                Some(p) if p.code == 11 => p.as_double().unwrap_or(0.0),
+                Some(p) => {
                     self.reader.push_back(p);
-                    continue;
+                    break;
                 }
-            }
+                None => break,
+            };
             if let Some(p) = self.reader.read_pair()? {
                 if p.code == 21 {
                     y = p.as_double().unwrap_or(0.0);
@@ -16908,23 +16952,24 @@ impl<'a> SectionReader<'a> {
         }
 
         let mut edge = crate::entities::hatch::PolylineEdge {
-            vertices: Vec::with_capacity(num_vertices as usize),
+            vertices: Vec::with_capacity(num_vertices.clamp(0, 4096) as usize),
             is_closed,
         };
 
         // Read vertices: 10/20 (coords), optional 42 (bulge)
         for _ in 0..num_vertices {
-            let mut x = 0.0;
             let mut y = 0.0;
             let mut bulge = 0.0;
-            if let Some(p) = self.reader.read_pair()? {
-                if p.code == 10 {
-                    x = p.as_double().unwrap_or(0.0);
-                } else {
+            // The list ends where the file's data does: a pair that is not the x coordinate, or the end of the file,
+            // stops the loop (the count is the file's claim and can be 2 billion).
+            let x = match self.reader.read_pair()? {
+                Some(p) if p.code == 10 => p.as_double().unwrap_or(0.0),
+                Some(p) => {
                     self.reader.push_back(p);
-                    continue;
+                    break;
                 }
-            }
+                None => break,
+            };
             if let Some(p) = self.reader.read_pair()? {
                 if p.code == 20 {
                     y = p.as_double().unwrap_or(0.0);
@@ -21554,7 +21599,13 @@ impl<'a> SectionReader<'a> {
         if ncols == 0 {
             ncols = table.columns.len();
         }
-        while row_heights.len() < nrows {
+        // The declared row count (91) pads rows that have no height (141); one that no row height and no cell backs is
+        // not allocated: a count of a million in a damaged file is not a million rows (ACadSharp creates rows from
+        // the 141 groups only).
+        let backed = row_heights
+            .len()
+            .max(if ncols > 0 { cells.len().div_ceil(ncols) } else { 0 });
+        while row_heights.len() < nrows.min(backed) {
             row_heights.push(0.0);
         }
         for h in row_heights {

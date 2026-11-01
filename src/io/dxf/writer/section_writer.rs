@@ -638,7 +638,7 @@ impl<'a, W: DxfStreamWriter> SectionWriter<'a, W> {
 
     fn allocate_handle(&mut self) -> Handle {
         let handle = Handle::new(self.next_handle);
-        self.next_handle += 1;
+        self.next_handle = self.next_handle.saturating_add(1);
         handle
     }
 

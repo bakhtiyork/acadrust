@@ -82,13 +82,13 @@ impl Replay {
         let h = self.nodes[i].template;
         let h = if h == 0 || self.occupied.contains(&h) {
             while self.occupied.contains(&self.cursor) {
-                self.cursor += 1;
+                self.cursor = self.cursor.wrapping_add(1);
             }
             self.cursor
         } else {
             h
         };
-        self.cursor = self.cursor.max(h + 1);
+        self.cursor = self.cursor.max(h.wrapping_add(1));
         self.occupied.insert(h);
         self.nodes[i].final_handle = h;
     }
@@ -308,7 +308,7 @@ pub(super) fn apply(doc: &CadDocument, header: &mut Value, records: &mut Vec<Val
         }
     }
     for &i in &r.pending {
-        r.initial += 1;
+        r.initial = r.initial.wrapping_add(1);
         r.nodes[i].template = r.initial;
     }
     let mut zero_layer = entries
@@ -420,7 +420,7 @@ pub(super) fn apply(doc: &CadDocument, header: &mut Value, records: &mut Vec<Val
         rewrite(&mut value["props"], "", &refs, &map);
         let h = id(&value["handle"]);
         r.occupied.insert(h);
-        r.cursor = r.cursor.max(h + 1);
+        r.cursor = r.cursor.max(h.wrapping_add(1));
         out.push(value);
     }
     // The entity projector emits nested records before their parent. R12
@@ -524,12 +524,12 @@ pub(super) fn apply(doc: &CadDocument, header: &mut Value, records: &mut Vec<Val
         out.push(node.value.clone());
     }
     let root = r.cursor;
-    r.cursor += 1;
+    r.cursor = r.cursor.wrapping_add(1);
     let mut root_value = dictionary(root, 0, "ROOT");
     root_value["owner"] = handle(Handle::NULL);
     for name in DICTIONARIES {
         let h = r.cursor;
-        r.cursor += 1;
+        r.cursor = r.cursor.wrapping_add(1);
         root_value["props"]["EntryHandles"]
             .as_array_mut()
             .unwrap()

@@ -86,6 +86,9 @@ pub fn read_handles(data: &[u8]) -> Result<HashMap<u64, i64>> {
 }
 
 /// Read unsigned Modular Char (MC) from byte slice.
+///
+/// A chain of more than nine continuation bytes (damaged data) shifts past bit 63; the shift count wraps modulo 64 as
+/// C#'s `ulong <<` does in ACadSharp, instead of overflowing.
 /// Returns (value, bytes_consumed).
 fn read_mc(data: &[u8]) -> (u64, usize) {
     let mut value: u64 = 0;
@@ -98,7 +101,7 @@ fn read_mc(data: &[u8]) -> (u64, usize) {
         }
         let b = data[i];
         i += 1;
-        value |= ((b & 0x7F) as u64) << shift;
+        value |= ((b & 0x7F) as u64).wrapping_shl(shift);
         if (b & 0x80) == 0 {
             break;
         }
@@ -126,10 +129,10 @@ fn read_smc(data: &[u8]) -> (i64, usize) {
 
         if (b & 0x80) == 0 {
             // Final byte: bits 0-5 = value, bit 6 = sign
-            value |= ((b & 0x3F) as u64) << shift;
+            value |= ((b & 0x3F) as u64).wrapping_shl(shift);
             break;
         } else {
-            value |= ((b & 0x7F) as u64) << shift;
+            value |= ((b & 0x7F) as u64).wrapping_shl(shift);
             shift += 7;
         }
     }

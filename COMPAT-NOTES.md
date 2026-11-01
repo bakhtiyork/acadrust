@@ -370,6 +370,10 @@ Every behaviour change to upstream code is recorded here with its reason. ACadSh
 | R6 SVG writer, ACadSharp view | `SvgConfiguration::acadsharp_view` (field only with the `acadsharp-compat` feature; off by default; `acad-dump write-svg` turns it on). On, the writer reads the document as ACadSharp reads the same file where that differs from the native model: the text spelling of a TEXT, ATTRIB and MTEXT (`\U+00B0` escapes, the restored original of R14 to R2000), the height 1 of a DXF attribute without one, the colour and line weight of entities and layers (book and ENC colours, the nearest index and no weight of R14 to R2004 files saved by a later version, a DWG layer's ByLayer/ByBlock as index 7), the units of a block record (ACadSharp reads them from R2007 on), the zero weights of a non-rational hatch spline edge of a DWG, the entities a record lists, ACadSharp's ACI palette (`Color.GetRgb`, which differs from the fork's ACI table at 198 of the 255 indices, e.g. 250 is black there) and its MTEXT text processor (literal `\U+00B0` and `\S1/4;`, `ArgumentOutOfRangeException` for an unterminated `\f` after the first character), and for an R12 DXF: no layouts, the face records of a polyface mesh as vertices at the origin, the ATTRIB and SEQEND children of an INSERT in the block collection, ownerless VIEWPORTs in the model space, no diameter dimension with user-positioned text. Off, the native values are written: the native colours through the fork's ACI table, the native MTEXT parser for the text lines, the native entity lists and layouts (correct geometry; a hatch spline edge draws its curve). | Per policy the native model stays correct and the ACadSharp quirks are reproduced only as a view. Every rule of the view is a function of `src/compat/acadsharp/view.rs`, which the dump uses for the same values (one implementation each; the module re-exports `view_entity_color`, `view_entity_line_weight`, `view_layer_color`, `view_layer_line_weight`, `view_entity_handles`, `INDEX_RGB`). Without the feature there is no view. Native and view outputs of the gate samples were compared by the R6 review: the same entities in every output except the R12 viewport placement, and no native error where the view writes, except `my_block_v2` of the R2000/R2004 samples (DWG and DXF), whose units the native model holds and `ToPixelSize` does not support: the same `InvalidEnumArgumentException` ACadSharp raises for the R2007+ samples, whose units it reads. |
 | R6 compat view module | `src/compat/acadsharp/view.rs` (new, `pub(crate)`): the native-typed reading rules shared by the dump and the SVG view (`source_entity_color`, `text_value`, `legacy_replacement`, `mtext_value`, `attribute_height`, `hatch_spline_weight`, `record_units`, `legacy_dxf`, `rejects_legacy_dimension`, `ownerless_entities_record`, `plain_text`). The dump's entity Color / LineWeight, layer Color / LineWeight, block record Units, attribute Height, hatch spline control-point weights, MTEXT value and the R12 dimension / viewport rules of `legacy_identity.rs` call them instead of their own copies. `palette.rs` and `mtext_plain_text.rs` stay in the compat module (`try_plain_text` returns `None` where C# throws; `plain_text` keeps the dump's sentinel). | One implementation per rule, so the dump and the SVG view cannot drift. The dump output is unchanged (G1 `rs-gap.tsv` and per-sample files identical to rv19). |
 | R6 block record order | `CadDocument::source_block_record_order` (new, `pub(crate)`, reader provenance like `source_app_id_order`): the DWG reader (`dwg_document_builder.rs`, BLOCK_CONTROL) records the control object's handle list followed by the model and paper space records; `compat::acadsharp::block_records` enumerates `BlockRecords` in that order (ACadSharp adds the two default records last), the table order for a DXF or an in-memory document; `compat::acadsharp::model_space_name` is `doc.ModelSpace.Name`. The field is listed as provenance in `native_dump.rs` / `semantic_inventory.rs`. | `write-svg` numbers `block-NNNN.svg` by the C# enumeration order of `doc.BlockRecords`. The native table is ordered by handle. No behaviour of a reader or writer changes (the DWG reader stores one more vector; G4 and G5 rerun by the R6 review, see the R6 section). |
+| R7 handle counters at u64::MAX | `document.rs` (`allocate_handle`, the BLOCK/ENDBLK handle pass, `synchronize_handle_allocator`, the `h + 1` of every entity and object that joins the document), `io/dwg/dwg_document_builder.rs` (the free-handle search), `io/dxf/writer/section_writer.rs`, `io/dwg/dwg_stream_writers/object_writer/common.rs`; view: `compat/acadsharp/legacy_identity.rs`, `registration_order.rs` | A handle of FFFFFFFFFFFFFFFF in a file (or a HANDSEED of it) made `next_handle + 1` overflow: a panic with overflow checks, a silent wrap to the null handle without. The native counters now saturate (the pre-existing `saturating_add` of the same file), the free-handle search wraps and skips the null handle (it must find a free value), and the ACadSharp view wraps as ACadSharp's unchecked `ulong` does. The view's two free-handle loops used `saturating_add`, which stops at u64::MAX: with that value occupied they never ended (a hang, found on three samples). Upstream-PR candidate (the first part). |
+| R7 DXF counts in damaged files | `io/dxf/reader/section_reader.rs`: LTYPE group 73, ACAD_TABLE rows (91), HATCH source objects (97), seed points (98), polyline vertices (93), spline knots, control points and fit points, DGN line style strokes and symbols | A count the file states was cast to usize or looped on, so a negative LTYPE count asked `Vec::reserve` for 2^64 elements (`capacity overflow`), a table of a million declared rows allocated a million rows (the ACadSharp view then needed 4 minutes and 1.7 GB), and a hatch count of 2^31-1 looped (or pushed a default element) past the end of the file. Allocation and loops are now bounded by the data present: a table row needs a row height or a cell, a list ends at the first pair that is not its next element or at the end of the file, a stroke or symbol needs a value. ACadSharp creates table rows from the 141 groups only, so the dump is unchanged for a file whose counts are true. Upstream-PR candidate. |
+| R7 R2007 (AC1021) LZ77 decoder | `io/dwg/decompressor_ac21.rs` (`decompress_ac21` returns `Result`; every read of the source, every literal and back-reference copy is range-checked; the index sums are saturating), `io/dwg/dwg_reader.rs` (`decode_ac21_page` returns `Result`; page sizes above 1 GiB and a stated section size above 0x7FFFFFC7, the .NET array limit, are errors) | The decoder indexed its source and destination with offsets and lengths read from the stream: nine distinct `index out of bounds` panics on a mutated sample, all caught by the failsafe read as "skipped corrupt page" with a panic message on stderr. They are now errors of the page, as ACadSharp's `IndexOutOfRangeException` is. The signature of the public `decompress_ac21` changed (`Result<(), DxfError>`). |
+| R7 DWG header sizes | `io/dwg/dwg_reader.rs` (AC18 section buffer bound by the pages the map lists, not by the declared count, which wrapped to 2^64 for a negative one; the AC21 page map offsets wrap; `i32::MIN` of the R2007 ComprLen), `io/dwg/decompressor_ac18.rs` (reserve at most 32x the source), `io/dwg/dwg_stream_readers/classes_reader.rs` (negative section size), `io/dwg/dwg_stream_readers/handle_reader.rs` (modular chars of more than nine bytes shift modulo 64 as C#'s `ulong <<`) | Sizes from the file headers decided allocations: `memory allocation of 127543348822022 bytes failed` aborted the process (not catchable) on two mutants; a negative section size and a long modular char panicked. All are errors or bounded values now. |
 
 ## ACadSharp differential dump
 
@@ -2835,3 +2839,83 @@ dedicated test. (5) The native mode keeps ACadSharp's arbitrary-axis threshold q
 (|x|, |y| below 1/64 but not 0) gets C#'s OCS, not AutoCAD's. (6) G4 and G5 (R6 review, clean build of the reviewed tree): G4 `--jobs 3` 96 cells and G5 one version at a time
 (288 cells, sample_V included) equal the R5b-19 review runs in every cell and row file apart from run metadata (G5-RR 269/288,
 RC same-version 42/42, RC sample_V 10/36, idem 283/288); G1 45/49 with `rs-gap.tsv` and every per-sample file unchanged.
+
+## R7 Robustness (gate G7) and speed (gate G8)
+
+**Harness.** `Tools/fuzz/fuzz-dxf.py` and `fuzz-dwg.py` (CadKit) take `--impl rust`: they build `acad-dump` once with
+`cargo build --profile fuzz --features acadsharp-compat --bin acad-dump` (the `[profile.fuzz]` of this `Cargo.toml`: inherits
+release, `debug-assertions` and `overflow-checks` on, `debug = "line-tables-only"`, no LTO) and run `acad-dump dump <mutant> <out>`
+(failsafe read plus the canonical dump). A panic message on stderr is a finding even when the failsafe read caught it and the exit is 0
+(`read_file` and the DWG builder catch panics per file and per record); the key is the panic's `file:line`, or for a location inside the
+standard library the first frame of a `RUST_BACKTRACE=1` re-run that is not. Death by signal without a message (stack overflow,
+allocation failure) is `abort-<why>@<seed>`, a timeout `hang@<seed>`, a peak RSS over 2,048 MiB `mem@<seed>`. `--replay DIR` replays
+files once. Mutants, determinism (pure function of seed and index) and the minimiser are the Swift fuzzers'.
+
+**Runs** (3 jobs; "mutants" = mutants run; findings are distinct keys; the Mac was shared and its load varied from 5 to 150, which
+changes the mutants per minute, not the classification):
+
+| Run | Binary | Mutants | Findings |
+|---|---|---|---|
+| DXF seed 1, 40 min | start | 946 | 1 (panic `legacy_identity.rs:311`, 2 mutants) |
+| DXF seed 1, after that fix | R7 fix 1 | 1,127 | 0 |
+| DXF seed 2, run 1 | R7 fix 1 | 1,548 (34 min, killed during minimisation) | 1 hang (ACAD_TABLE row count) |
+| DXF seed 2, run 2 | + table fix | 23,215 (29 min, killed during minimisation) | 2 traps (LTYPE count), 1 hang (HATCH 97) |
+| DXF seed 2, run 3, 30 min | + DXF fixes | 30,623 | 0 |
+| DWG seed 1, 40 min | + DXF fixes | 85,657 | 26 (16 traps: 2 aborts, 14 panics; 10 hangs); 2,874 mutants with a panic, 25 hangs |
+| DWG seed 1, 40 min, after the fixes | final | 93,925 | 0 |
+| DWG seed 2, 40 min | final | 79,046 | 0 (2 `hang` records at the end of the run, which took 499 min wall: the Mac slept; both mutants replay clean) |
+| DXF seed 1, 30 min | final | 20,004 | 0 |
+
+The 21 `.dwg`/`.dxf` regression fixtures of `Tests/CadCoreTests/Fixtures/fuzz` (40 files with their dumps) replay with 0 findings (before
+the fixes `handle-seed-overflow.dxf` panicked at `document.rs:5481`). The 94 mutants kept from the DWG seed 1 run (and the 4 DXF ones)
+replay with 0 findings on the final binary.
+
+**Findings** (location of the fuzz build, root cause, fix; every one has a test in `tests/r7_robustness.rs` that fails without it):
+
+| Finding | Root cause | Fix |
+|---|---|---|
+| `document.rs:5481` `add with overflow` (fixture `handle-seed-overflow.dxf`) | handle FFFFFFFFFFFFFFFF; `next_handle += 1` | `saturating_add` at every counter bump of `document.rs` (28 sites, e.g. 2583, 3703, 5397-5510) |
+| `compat/acadsharp/legacy_identity.rs:311` (exit 101) | HANDSEED of an R12 file at u64::MAX in the view's allocator | `wrapping_add` (ACadSharp's unchecked `ulong`), lines 85, 91, 311, 423, 527, 532 |
+| hang@sample_AC1027_ascii (ACAD_TABLE with 1,000,000 rows) | reader padded rows to the declared count 91; the view then wrote 1,000,000 x 5 cells (4 minutes, 1.7 GB) | `section_reader.rs:21602`: a row needs a height or a cell |
+| `section_reader.rs:10236` `capacity overflow` (LTYPE 73 = -1, ASCII and binary) | `i16 as usize` into `reserve` | filter `> 0` |
+| hang@sample_AC1024_ascii (HATCH 97 = 2^31-1) | the loop kept reading past the end of the file | `16525`; the same shape in 98, knots, control points, fit points, polyline vertices (16547, 16854, 16894, 16963), DGN strokes (244) and symbols (12852) fixed with it |
+| hang@BLOCKLOOKUPPARAMETER, @export_sample, and 8 more (view) | `registration_order.rs` skipped occupied handles with `saturating_add`: with u64::MAX occupied the loop never ended | `wrapping_add`, lines 230, 398; `dwg_document_builder.rs` free-handle search wraps and skips 0 |
+| `decompressor_ac21.rs:447-471` (9 locations, 2,400 mutants) | unchecked indexing of source and destination by stream-derived offsets and lengths | `decompress_ac21` returns `Result`, every read and copy range-checked (`decompressor_ac21.rs:49` on); `decode_ac21_page` (`dwg_reader.rs:144`) returns `Result` and bounds both sizes |
+| `decompressor_ac18.rs:29` `capacity overflow` | `Vec::with_capacity(decompressed_size)`, a negative `i32 as usize` | reserve at most 32x the source |
+| `dwg_reader.rs:2475` `add with overflow` | running offset of the AC21 page map | `wrapping_add` (2490); `i32::MIN` of ComprLen via `unsigned_abs` |
+| `classes_reader.rs:73` | negative section size cast to usize | `try_from` (65) |
+| `handle_reader.rs:101`, `:132` `shift left with overflow` | modular char of more than nine bytes | `wrapping_shl` (C#'s `<<` masks the count; 104, 132, 135) |
+| abort `memory allocation of 127543348822022 bytes failed` x2 (AC1032 `empty.dwg`, AC1021) | AC18 section bound used the declared page count (negative i32 as u64); AC21 `fill_size` / section size unbounded | `dwg_reader.rs:3065` bound by the pages listed; `MAX_SECTION_BYTES` (0x7FFFFFC7, the .NET array limit, lines 122, 2827, 3075) and a 1 GiB page limit (2830, 2873) |
+
+No blanket `catch_unwind` was added. The failsafe read in `compat::acadsharp::read_file` and the DWG builder keep the guards they had
+(they are upstream's): the harness counts the panic they swallow, so a caught panic is a finding.
+
+**Verification.** `cargo test --features acadsharp-compat --no-fail-fast`: 2,811 passed, 0 failed, 60 ignored (2,795 before; 16 new in
+`tests/r7_robustness.rs`), 0 warnings in `cargo build --lib` and in the feature build. G1 45/49, 738,772 properties 100.00 %, `rs-gap.tsv`
+byte-identical to the R6 review run. G4 (`--jobs 3`): RR 94/96, RC 94/96, idem 96/96, equal to the R6 review (`rv6-g4`) in every cell
+field. G5 (one version at a time, 288 cells): RR 269/288, RC same-version 42/42, RC sample_V 10/36, idem 283/288, equal to `rv6-g5` in
+every cell field.
+
+**G8** (release bench crate built from this tree against the upstream 0.6.5 binary; `Tools/bench-report.sh --impl rust` and the
+`g8.sh` method: instructions retired, median of 5, peak footprint; the rayon pool size is the switch, 1 thread and default; there
+is no separate option):
+
+| File | 1T instr ratio | 1T footprint ratio | default instr ratio | default footprint ratio |
+|---|---|---|---|---|
+| OPEN FOOTING | 0.98 | 0.85 | 1.00 | 0.92 |
+| PIER CAP REINFORCEMENT | 0.98 | 0.82 | 1.00 | 0.93 |
+| PIER RECT | 0.97 | 0.93 | 0.99 | 0.93 |
+| PIER REINFORCEMENT 02122007 | 0.98 | 0.92 | 0.98 | 0.94 |
+| UIT BHUWANA PART1 | 0.98 | 0.93 | 0.98 | 0.92 |
+| scau-gis | 0.99 | 1.00 | 1.02 | 1.00 |
+
+All at or below 1.02, limit 1.20. Wall-clock seconds were also taken (`bench-report.sh --impl rust`, median of 5) but at a load average
+of 117 they swing between 0.61 and 2.52 of upstream on the same binary, so the instruction count is the time evidence, as in every
+earlier G8 check. Footprint is 0.82 to 1.00.
+
+**Open / UNVERIFIED.** (1) The FFI part of G7 (the catch of a panic at the C boundary) waits for R8. (2) `compat::acadsharp::read_file`
+turns a panic into `Panic: <message>` without the location; the harness reads the location from stderr. (3) Not every reader path has
+been reached: the 85,657 + 93,925 + 79,046 DWG and 20,004 + 30,623 DXF mutants are mutations of the 22 and 14 seeds only; the DWG
+seeds' AEC, dynamic-block and geolocation objects are covered, other object families are not. (4) The minimiser of a hang can run for
+far longer than its budget under load (it was stopped by hand twice); the findings were diagnosed from the kept mutants. (5) The test
+for the AC1021 allocation abort uses the findings' diagnosis and the replay of the 1 MB mutant, not an embedded copy.

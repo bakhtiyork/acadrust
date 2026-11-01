@@ -2750,11 +2750,12 @@ impl DwgDocumentBuilder {
             occupied: &mut std::collections::HashSet<Handle>,
             next_handle: &mut u64,
         ) -> Handle {
-            while occupied.contains(&Handle::new(*next_handle)) {
-                *next_handle += 1;
+            // A seed read from the file can be anywhere up to u64::MAX: wrap, and never issue the null handle.
+            while *next_handle == 0 || occupied.contains(&Handle::new(*next_handle)) {
+                *next_handle = next_handle.wrapping_add(1);
             }
             let handle = Handle::new(*next_handle);
-            *next_handle += 1;
+            *next_handle = next_handle.wrapping_add(1);
             occupied.insert(handle);
             handle
         }

@@ -117,6 +117,13 @@ mod template_tests {
 /// AC1021 file header offset (data pages start after this)
 const AC21_FILE_HEADER_SIZE: u64 = 0x480;
 
+/// The largest section buffer a read allocates from a size stated in the file: the length limit of a .NET `byte[]`
+/// (0x7FFFFFC7), which is what ACadSharp can hold. A larger number is a damaged header, not a drawing.
+const MAX_SECTION_BYTES: usize = 0x7FFF_FFC7;
+
+/// The largest page of an R2007 section (decoded) a read allocates from a size stated in the page header.
+const MAX_AC21_PAGE_BYTES: u64 = 1 << 30;
+
 fn ac21_page_layout(
     compressed_size: u64,
     correction_factor: u64,
@@ -141,12 +148,19 @@ fn decode_ac21_page(
     block_size: usize,
     compressed_size: u64,
     uncompressed_size: u64,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, DxfError> {
+    // Both sizes are numbers from the page header: the decoded page is never larger than a 1 GiB section page
+    // (the allocation below follows the claim, so a damaged header must not decide it).
+    if uncompressed_size > MAX_AC21_PAGE_BYTES || compressed_size > u64::from(u32::MAX) {
+        return Err(DxfError::InvalidFormat(format!(
+            "Invalid AC21 page sizes: compressed={compressed_size}, uncompressed={uncompressed_size}"
+        )));
+    }
     let mut compressed_data = vec![0u8; total_size];
     reed_solomon_decode(encoded, &mut compressed_data, factor, block_size);
     if compressed_size == uncompressed_size {
         compressed_data.truncate(uncompressed_size as usize);
-        return compressed_data;
+        return Ok(compressed_data);
     }
 
     let mut padded_source = vec![0u8; compressed_data.len() + 64];
@@ -157,9 +171,9 @@ fn decode_ac21_page(
         0,
         compressed_size as u32,
         &mut decompressed_data,
-    );
+    )?;
     decompressed_data.truncate(uncompressed_size as usize);
-    decompressed_data
+    Ok(decompressed_data)
 }
 
 /// Results from reading a DWG file header.
@@ -2372,7 +2386,7 @@ impl<R: Read + Seek> DwgReader<R> {
         if compr_len < 0 {
             // Negative ComprLen means data is stored uncompressed (raw).
             // |ComprLen| = raw data length. Copy directly from offset 0x20.
-            let raw_len = (-compr_len) as usize;
+            let raw_len = compr_len.unsigned_abs() as usize;
             let src_start = 32; // offset 0x20 in decoded data
             let copy_len = raw_len
                 .min(0x110)
@@ -2382,7 +2396,7 @@ impl<R: Read + Seek> DwgReader<R> {
         } else {
             // Positive ComprLen means data is LZ77 compressed.
             // Decompress from byte offset 32 in decoded_data.
-            decompress_ac21(&decoded_data, 32, compr_len as u32, &mut metadata_buffer);
+            decompress_ac21(&decoded_data, 32, compr_len as u32, &mut metadata_buffer)?;
         }
 
         // Step 5: Parse compressed metadata (extracts CRC-64)
@@ -2472,7 +2486,8 @@ impl<R: Read + Seek> DwgReader<R> {
             let ind = id.unsigned_abs();
 
             info.page_records.insert(ind as i32, (offset, size));
-            offset += size;
+            // Page sizes are the file's numbers; the running offset wraps as ACadSharp's unchecked long does.
+            offset = offset.wrapping_add(size);
         }
 
         self.notifications.notify(
@@ -2654,14 +2669,14 @@ impl<R: Read + Seek> DwgReader<R> {
             encoded_buffer[bytes_read..].fill(0);
         }
 
-        Ok(decode_ac21_page(
+        decode_ac21_page(
             &encoded_buffer,
             total_size,
             factor,
             block_size,
             compressed_size,
             uncompressed_size,
-        ))
+        )
     }
 
     /// Get the merged decompressed buffer for a named section (AC21).
@@ -2807,8 +2822,17 @@ impl<R: Read + Seek> DwgReader<R> {
         // Field 0x00 ("Data size") holds the total section data size.
         // Field 0x08 ("Max size") is the page partition size per spec §5.4.
         // We truncate to the total data size, not the page size.
-        let total_size = section.compressed_size as usize;
-        let mut result = Vec::with_capacity(total_size);
+        let total_size = usize::try_from(section.compressed_size)
+            .ok()
+            .filter(|size| *size <= MAX_SECTION_BYTES)
+            .ok_or_else(|| {
+                DxfError::Parse(format!(
+                    "AC21 section '{}' size {} is out of range",
+                    section_name, section.compressed_size
+                ))
+            })?;
+        // The size is the file's claim; the buffer grows with the pages that are really read.
+        let mut result = Vec::with_capacity(total_size.min(64 << 20));
 
         // encoding=1 (stored): contiguous data followed by non-interleaved RS
         // parity. Reading only the payload deliberately skips that parity.
@@ -2844,6 +2868,21 @@ impl<R: Read + Seek> DwgReader<R> {
         for page_batch in section.pages.chunks(batch_pages) {
             let mut prepared = Vec::with_capacity(page_batch.len());
             for page in page_batch {
+                if page.decompressed_size > MAX_AC21_PAGE_BYTES {
+                    let message = format!(
+                        "page {} decompressed size {} is out of range",
+                        page.page_number, page.decompressed_size
+                    );
+                    if !failsafe {
+                        return Err(DxfError::Parse(message));
+                    }
+                    prepared.push(PreparedPage {
+                        number: page.page_number,
+                        fill_size: 0,
+                        payload: PagePayload::Failed(message),
+                    });
+                    continue;
+                }
                 let fill_size = page.decompressed_size as usize;
                 let payload = match info.page_records.get(&(page.page_number as i32)) {
                     Some(&(page_offset, _)) if encoding == 1 => {
@@ -2918,20 +2957,25 @@ impl<R: Read + Seek> DwgReader<R> {
                         factor,
                         compressed_size,
                         uncompressed_size,
-                    } => Ok(decode_ac21_page(
+                    } => decode_ac21_page(
                         &bytes,
                         total_size,
                         factor,
                         block_size,
                         compressed_size,
                         uncompressed_size,
-                    )),
+                    )
+                    .map_err(|error| error.to_string()),
                     PagePayload::Failed(error) => Err(error),
                 };
                 (page.number, page.fill_size, data)
             });
 
             for (page_number, fill_size, page_result) in decoded {
+                // What lies past the declared section size is cut below; do not buffer it.
+                if result.len() > total_size {
+                    break;
+                }
                 match page_result {
                     Ok(page_data) => result.extend_from_slice(&page_data),
                     Err(error) => {
@@ -3016,7 +3060,9 @@ impl<R: Read + Seek> DwgReader<R> {
         }
         // The section is its pages: a declared size they cannot hold is a
         // corrupt header, while a large drawing legitimately spans many pages.
-        let page_count = section.pages.len().max(section.page_count.max(0) as usize);
+        // The pages the map lists (the reader reads exactly the declared count of them): the declared count itself is
+        // a number from the file, negative ones wrap to 2^64 - n, and cannot bound an allocation.
+        let page_count = section.pages.len();
         // Pages may be sparse: an all-zero page is not written, so the last
         // page's offset (not the page count) bounds the section.
         let reachable = section
@@ -3026,7 +3072,9 @@ impl<R: Read + Seek> DwgReader<R> {
             .max()
             .and_then(|offset| usize::try_from(offset).ok())
             .map_or(0, |offset| offset.saturating_add(max_page_size));
-        if total_size > page_count.saturating_mul(max_page_size).max(reachable) {
+        if total_size > MAX_SECTION_BYTES
+            || total_size > page_count.saturating_mul(max_page_size).max(reachable)
+        {
             return Err(DxfError::Parse(format!(
                 "AC18 section '{}' size {} exceeds its {} page(s) of {} bytes",
                 section_name, total_size, page_count, max_page_size

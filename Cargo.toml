@@ -75,3 +75,13 @@ required-features = ["acadsharp-compat"]
 
 [profile.bench]
 inherits = "release"
+
+# CadKit R7: the build the mutation fuzzers (Tools/fuzz --impl rust) run: optimised like release but with debug
+# assertions and overflow checks on, and line tables so panic locations and backtrace frames carry file:line.
+[profile.fuzz]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
+debug = "line-tables-only"
+lto = false
+codegen-units = 16
