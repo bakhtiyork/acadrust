@@ -840,6 +840,9 @@ fn project_source_values(
         value["IntersectionDisplay"] = json!(0);
     }
     if let Some(version) = dwg {
+        // Only the DXF reader fills ArrowBlockName ($DIMLDRBLK); ACadSharp's DWG reader leaves it empty, while the
+        // native header keeps the name of the DIMLDRBLK handle for the writers.
+        value["ArrowBlockName"] = json!("");
         value["CodePage"] = json!(h.code_page.to_ascii_lowercase());
         for (index, key, native) in [
             (0, "CreateDateTime", h.create_date_julian),

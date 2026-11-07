@@ -152,6 +152,7 @@ fn dwg_arrow_and_unattached_ucs_projection_preserves_native_handles() {
     }
     doc.header.dim_arrow_block_handle = Handle::new(0xF10);
     doc.header.dim_leader_arrow_block_handle = Handle::new(0xF11);
+    doc.header.dim_leader_arrow_block = "LeaderArrow".into(); // the DWG reader resolves the handle to its name
     doc.header.model_space_ucs_handle = Handle::new(0xF12);
     doc.header.model_space_ucs_name = "NamedUcs".into();
     doc.header.dim_linetype_name = "DASHED".into();
@@ -164,6 +165,7 @@ fn dwg_arrow_and_unattached_ucs_projection_preserves_native_handles() {
     assert_eq!(h["DimensionLineType"], "ByBlock");
     assert_eq!(doc.header.model_space_ucs_name, "NamedUcs");
     assert_eq!(doc.header.dim_arrow_block_handle, Handle::new(0xF10));
+    assert_eq!(doc.header.dim_leader_arrow_block, "LeaderArrow");
 }
 
 #[test]

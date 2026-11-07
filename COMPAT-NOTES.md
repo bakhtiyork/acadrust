@@ -2965,3 +2965,11 @@ the bin target is the toolchain's, also at d5bb4b9). G1 45/49, 738,772 propertie
 the R6 review run. G4 (`--jobs 3`, `rv7-g4`) and G5 (one version at a time, `rv7-g5`): every cell equal to `rv6-g4` and
 `rv6-g5` (provenance and timing fields aside). Corpus (130 files of `corpus.noindex`, release builds of d5bb4b9 and this
 tree, one file at a time): the same exit status, stderr and dump (SHA-256) for all 130.
+
+## G2 re-check at the end of R7 (2026-11-07)
+
+The corpus at 63e44e0 matched 118 / 130 against 121 / 130 at 572841c. The 3 new files (cadviewer/PWR07_2.OG,
+scau-gis/室内设计家具图库, scau-gis/别墅建筑结构全套图纸) differed in one row, `CadHeader.ArrowBlockName`: R5 made the DWG reader
+store the name of the DIMLDRBLK handle in `dim_leader_arrow_block`, which the compat view printed, but ACadSharp sets
+ArrowBlockName only from DXF. The view now prints it empty for DWG sources; the native field keeps the name. Test:
+`dwg_arrow_and_unattached_ucs_projection_preserves_native_handles` now sets that field as the reader does.
